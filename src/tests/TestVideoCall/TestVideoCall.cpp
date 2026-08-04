@@ -223,6 +223,7 @@ private slots:
 
 	void aVideoCallWorksEndToEnd();
 	void anUnsubscribedClientReceivesNothing();
+	void aClientJoiningLaterLearnsOfExistingStreams();
 
 private:
 	QTemporaryDir m_dir;
@@ -403,6 +404,45 @@ void TestVideoCall::aVideoCallWorksEndToEnd() {
 	QCOMPARE(unit.header.senderSession, alice.session);
 	QCOMPARE(unit.header.width, 640u);
 	QCOMPARE(unit.header.height, 480u);
+}
+
+// A stream announces itself once, when it starts. Anyone who connects after that moment has to be told
+// separately, or they subscribe to nothing and sit showing an empty grid while the sender is plainly
+// sharing - which is exactly how this shipped: whoever joined second saw nothing until the sender
+// toggled sharing off and on again.
+void TestVideoCall::aClientJoiningLaterLearnsOfExistingStreams() {
+	TestClient alice;
+	QVERIFY2(alice.connectAndAuthenticate("alice-early", m_port), "alice could not authenticate");
+
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(7);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	announcement.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+	announcement.set_width(640);
+	announcement.set_height(480);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+	QThread::msleep(300);
+
+	// Only now does the second client appear, with the announcement already long past.
+	TestClient bob;
+	QVERIFY2(bob.connectAndAuthenticate("bob-late", m_port), "bob could not authenticate");
+
+	QByteArray body;
+	QVERIFY2(bob.waitFor(TCPMessageType::VideoState, body), "the existing stream was never announced to the late joiner");
+
+	MumbleProto::VideoState replayed;
+	QVERIFY(replayed.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+
+	QCOMPARE(replayed.session(), alice.session);
+	QCOMPARE(replayed.stream_id(), 7u);
+	QVERIFY(replayed.active());
+
+	// The codec has to survive the replay too. Without it the receiver has no decoder to pick and drops
+	// every unit it is about to be sent.
+	QCOMPARE(replayed.codec(), MumbleProto::VideoState_Codec_VP8);
+	QCOMPARE(replayed.width(), 640u);
 }
 
 void TestVideoCall::anUnsubscribedClientReceivesNothing() {

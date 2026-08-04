@@ -52,7 +52,9 @@
 #endif
 
 #include <functional>
+#include <map>
 #include <optional>
+#include <utility>
 #include <span>
 #include <vector>
 
@@ -200,6 +202,18 @@ public:
 	/// Drops video subscriptions that the current ACLs no longer permit, telling each affected client
 	/// that its subscription ended.
 	void revalidateVideoSubscriptions();
+
+	/// The most recent announcement for every stream currently active, keyed by (sender, stream).
+	///
+	/// Kept because a stream is announced when it starts and not again. Without this a client that
+	/// connects while somebody is already sharing is never told, subscribes to nothing, and sits showing
+	/// only its own picture until the sender happens to stop and start again.
+	std::map< std::pair< unsigned int, unsigned int >, MumbleProto::VideoState > m_videoAnnouncements;
+
+	/// Sends `user` the announcement for every active stream it is permitted to receive, as though each
+	/// had just started. Used when a client joins, and when an ACL change grants it video it could not
+	/// previously see.
+	void sendActiveVideoStreams(ServerUser *user);
 
 	/// Decrypts one received video datagram, stamps the sender, and re-encrypts it to each permitted
 	/// subscriber. Runs on the UDP thread only.

@@ -1874,6 +1874,10 @@ void Server::connectionClosed(QAbstractSocket::SocketError err, const QString &r
 	// stale entries behind would attach them to whoever inherits the number next.
 	m_videoRouter.removeUser(u->uiSession);
 
+	for (auto it = m_videoAnnouncements.begin(); it != m_videoAnnouncements.end();) {
+		it = it->first.first == u->uiSession ? m_videoAnnouncements.erase(it) : std::next(it);
+	}
+
 	if (u->uiSession > 0 && u->uiSession < iMaxUsers * 2)
 		qqIds.enqueue(u->uiSession); // Reinsert session id into pool
 
@@ -2272,6 +2276,10 @@ void Server::userEnterChannel(User *p, Channel *c, MumbleProto::UserState &mpus)
 	sendClientPermission(static_cast< ServerUser * >(p), c);
 	if (c->cParent)
 		sendClientPermission(static_cast< ServerUser * >(p), c->cParent);
+
+	// Moving into a channel where somebody is already sharing is the same problem as connecting into
+	// one: the announcement happened before this user could receive it, so it has to be repeated.
+	sendActiveVideoStreams(static_cast< ServerUser * >(p));
 }
 
 bool Server::hasPermission(ServerUser *p, Channel *c, QFlags< ChanACL::Perm > perm) {
@@ -2360,6 +2368,24 @@ void Server::flushClientPermissionCache(ServerUser *u, MumbleProto::PermissionQu
 	mppq.set_flush(true);
 
 	sendMessage(u, mppq);
+}
+
+void Server::sendActiveVideoStreams(ServerUser *user) {
+	if (!user || user->sState != ServerUser::Authenticated) {
+		return;
+	}
+
+	for (const auto &entry : m_videoAnnouncements) {
+		const unsigned int sender = entry.first.first;
+
+		// Never announce a stream to somebody who could not subscribe to it: doing so would tell them
+		// that the sender is sharing and offer them a subscription that can only be refused.
+		if (sender == user->uiSession || !mayReceiveVideo(user->uiSession, sender)) {
+			continue;
+		}
+
+		sendMessage(user, entry.second);
+	}
 }
 
 void Server::revalidateVideoSubscriptions() {

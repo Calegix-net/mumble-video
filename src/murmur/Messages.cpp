@@ -661,6 +661,10 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 
 	log(uSource, "Authenticated");
 
+	// After the user list, so the client already knows who these senders are by the time it is told what
+	// they are sharing.
+	sendActiveVideoStreams(uSource);
+
 	emit userConnected(uSource);
 }
 
@@ -2587,6 +2591,9 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	msg.set_session(uSource->uiSession);
 
+	const auto streamKey = std::make_pair(static_cast< unsigned int >(uSource->uiSession),
+										 static_cast< unsigned int >(msg.stream_id()));
+
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are
 		// reported as a permission denial rather than distinguished, since the stream count is a server
@@ -2594,6 +2601,15 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		PERM_DENIED(uSource, uSource->cChannel, ChanACL::ShareVideo);
 
 		return;
+	}
+
+	// Retained so the announcement can be replayed to clients that connect later. A stream announces
+	// itself once, when it starts, so anyone who was not connected at that moment would otherwise never
+	// learn of it.
+	if (msg.active()) {
+		m_videoAnnouncements[streamKey] = msg;
+	} else {
+		m_videoAnnouncements.erase(streamKey);
 	}
 
 	// Relayed only to those who could actually subscribe. Announcing a stream to a user who is not
