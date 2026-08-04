@@ -8,6 +8,8 @@
 // Together with TestVideoPipeline this closes the loop from a captured frame to what a viewer actually
 // sees, so a mistake in tile placement shows up as a wrong picture here rather than as a bug report.
 
+#include "Mumble.pb.h"
+#include "VP8Codec.h"
 #include "VideoEncoder.h"
 #include "VideoGrid.h"
 #include "VideoSource.h"
@@ -26,9 +28,19 @@ namespace {
 constexpr unsigned int SENDER = 5;
 constexpr unsigned int STREAM = 1;
 
+/// Announces a stream, as the VideoState message does. Nothing is decoded without this: the payload
+/// never says which codec produced it, so an unannounced stream has no decoder to hand it to.
+void announce(VideoGrid &grid, unsigned int sender, unsigned int stream,
+			  int codec = MumbleProto::VideoState_Codec_TiledImage) {
+	grid.setStreamCodec(sender, stream, codec);
+}
+
 /// Feeds every tile of one encoded frame into the grid, as the network path would.
 void deliverFrame(VideoGrid &grid, const std::vector< EncodedVideoUnit > &units, unsigned int sender,
-				  unsigned int stream) {
+				  unsigned int stream, int codec = MumbleProto::VideoState_Codec_TiledImage) {
+	announce(grid, sender, stream, codec);
+
+
 	for (const EncodedVideoUnit &unit : units) {
 		grid.onVideoUnitReceived(
 			sender, stream, unit.header.x, unit.header.y,
@@ -71,6 +83,9 @@ private slots:
 	void sendersAppearAndDisappear();
 	void theSenderCountIsCapped();
 	void tilesOutsideTheSurfaceBoundAreRefused();
+	void aVp8StreamIsDecoded();
+	void unitsForAnUnannouncedStreamAreDropped();
+	void anUnknownCodecIsDropped();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
 };
@@ -151,6 +166,7 @@ void TestVideoGrid::surfaceGrowthKeepsWhatWasAlreadyDrawn() {
 	QVERIFY(first.save(&buffer, "JPEG", 95));
 	buffer.close();
 
+	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(64, 64));
 
@@ -176,6 +192,7 @@ void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
 	QVERIFY(big.save(&buffer, "JPEG", 90));
 	buffer.close();
 
+	announce(grid, SENDER, 1);
 	grid.onVideoUnitReceived(SENDER, 1, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
 
@@ -190,6 +207,7 @@ void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
 	QVERIFY(small.save(&smallBuffer, "JPEG", 90));
 	smallBuffer.close();
 
+	announce(grid, SENDER, 2);
 	grid.onVideoUnitReceived(SENDER, 2, 0, 0, smallEncoded);
 	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(32, 32));
 }
@@ -207,6 +225,8 @@ void TestVideoGrid::sendersAppearAndDisappear() {
 	QVERIFY(tile.save(&buffer, "JPEG", 90));
 	buffer.close();
 
+	announce(grid, 1, STREAM);
+	announce(grid, 2, STREAM);
 	grid.onVideoUnitReceived(1, STREAM, 0, 0, encoded);
 	grid.onVideoUnitReceived(2, STREAM, 0, 0, encoded);
 	QCOMPARE(grid.senderCount(), 2);
@@ -242,10 +262,79 @@ void TestVideoGrid::theSenderCountIsCapped() {
 	buffer.close();
 
 	for (unsigned int session = 1; session <= VideoGrid::MAX_SENDERS + 10; ++session) {
+		announce(grid, session, STREAM);
 		grid.onVideoUnitReceived(session, STREAM, 0, 0, encoded);
 	}
 
 	QCOMPARE(grid.senderCount(), VideoGrid::MAX_SENDERS);
+}
+
+// The bug this file shipped: every camera stream uses VP8, the grid only ever called the JPEG decoder,
+// and so a viewer saw nothing at all while packets arrived normally. Nothing here covered a codec other
+// than the default, so nothing failed.
+void TestVideoGrid::aVp8StreamIsDecoded() {
+	// Not checking isValid() here: the encoder builds its context on the first frame, once it knows the
+	// resolution, so it is legitimately invalid until then.
+	VP8Encoder encoder;
+
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	const QImage frame = source.render(0);
+	QVERIFY(!frame.isNull());
+
+	const std::vector< EncodedVideoUnit > units = encoder.encode(frame, STREAM, 0, 0, true);
+	QVERIFY(!units.empty());
+
+	VideoGrid grid;
+	deliverFrame(grid, units, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QCOMPARE(grid.senderCount(), 1);
+	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+}
+
+// Units must never select their own decoder: the payload comes from another client, so trusting it to
+// say what it is would make every decoder in the client reachable by anyone who can send a packet.
+void TestVideoGrid::unitsForAnUnannouncedStreamAreDropped() {
+	VideoGrid grid;
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray jpeg;
+	QBuffer buffer(&jpeg);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG"));
+
+	// Perfectly valid JPEG, but no announcement arrived for this stream.
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	QCOMPARE(grid.senderCount(), 0);
+
+	// And it starts working the moment the announcement does arrive.
+	announce(grid, SENDER, STREAM);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	QCOMPARE(grid.senderCount(), 1);
+}
+
+void TestVideoGrid::anUnknownCodecIsDropped() {
+	VideoGrid grid;
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray jpeg;
+	QBuffer buffer(&jpeg);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG"));
+
+	// CODEC_UNKNOWN is what a codec added after this build resolves to. Dropped, not guessed at, even
+	// though these particular bytes would decode.
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_CODEC_UNKNOWN);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	QCOMPARE(grid.senderCount(), 0);
 }
 
 void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
@@ -262,6 +351,7 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 
 	// The offset comes off the network. A tile claiming to belong far outside any real frame must not
 	// make the client allocate a surface to match.
+	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 100000, 100000, encoded);
 
 	QCOMPARE(grid.senderCount(), 0);
@@ -275,6 +365,7 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 void TestVideoGrid::nonJpegDataIsRefused() {
 	VideoGrid grid;
 
+	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, QByteArray("not an image at all"));
 	QCOMPARE(grid.senderCount(), 0);
 

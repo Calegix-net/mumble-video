@@ -5,19 +5,34 @@
 
 #include "VideoGrid.h"
 
+#include "Mumble.pb.h"
+
 #include <QtGui/QPainter>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setAutoFillBackground(true);
 }
 
+int VideoGrid::senderCount() const {
+	int count = 0;
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (!it->second.canvas.isNull()) {
+			++count;
+		}
+	}
+
+	return count;
+}
+
 QImage VideoGrid::surfaceFor(unsigned int senderSession) const {
 	const auto it = m_surfaces.find(senderSession);
 
-	return it == m_surfaces.end() ? QImage() : it->canvas;
+	return it == m_surfaces.end() ? QImage() : it->second.canvas;
 }
 
 bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
@@ -52,37 +67,86 @@ bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
 	return true;
 }
 
-void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
-									const QByteArray &encodedTile) {
-	QImage tile;
+QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
+	switch (surface.codec) {
+		case MumbleProto::VideoState_Codec_TiledImage: {
+			QImage tile;
 
-	// Explicitly JPEG rather than letting Qt sniff the format. Sniffing would let a sender pick the
-	// decoder by crafting a header, which turns every image format Qt supports into attack surface.
-	if (!tile.loadFromData(encodedTile, "JPEG") || tile.isNull()) {
-		return;
+			// Explicitly JPEG rather than letting Qt sniff the format. Sniffing would let a sender pick
+			// the decoder by crafting a header, which turns every image format Qt supports into attack
+			// surface.
+			if (!tile.loadFromData(payload, "JPEG")) {
+				return QImage();
+			}
+
+			return tile;
+		}
+		case MumbleProto::VideoState_Codec_VP8: {
+			if (!surface.vp8) {
+				surface.vp8 = std::make_unique< VP8Decoder >();
+			}
+
+			if (!surface.vp8->isValid()) {
+				return QImage();
+			}
+
+			const auto *bytes = reinterpret_cast< const Mumble::Protocol::byte * >(payload.constData());
+
+			return surface.vp8->decode(
+				std::vector< Mumble::Protocol::byte >(bytes, bytes + static_cast< std::size_t >(payload.size())));
+		}
+		default:
+			// CODEC_UNKNOWN, or a codec this build has no decoder for. Dropped rather than guessed at,
+			// as the protocol requires.
+			return QImage();
 	}
+}
 
-	const bool isNewSender = !m_surfaces.contains(senderSession);
-
-	if (isNewSender && senderCount() >= MAX_SENDERS) {
+void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec) {
+	// Bounded on surfaces held, not on surfaces drawn: the cap is there to stop a peer forcing unbounded
+	// allocation by announcing streams, and an announced-but-blank surface still costs memory.
+	if (m_surfaces.find(senderSession) == m_surfaces.end()
+		&& m_surfaces.size() >= static_cast< std::size_t >(MAX_SENDERS)) {
 		return;
 	}
 
 	Surface &surface = m_surfaces[senderSession];
 
-	// A new stream from the same sender means new dimensions or a new source, so the old picture is no
-	// longer part of the same image.
-	if (!isNewSender && surface.streamID != streamID) {
+	// A codec announcement for a stream that is not the one being shown replaces it wholesale: a stream
+	// id changes precisely when the codec, source or dimensions do, so nothing about the old one carries
+	// over - least of all a decoder holding reference frames from different content.
+	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.canvas = QImage();
+		surface.vp8.reset();
 	}
 
 	surface.streamID = streamID;
+	surface.codec    = codec;
+}
+
+void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
+									const QByteArray &encodedTile) {
+	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
+	// no codec, and are dropped rather than assumed to be anything.
+	const auto existing = m_surfaces.find(senderSession);
+
+	if (existing == m_surfaces.end() || existing->second.streamID != streamID) {
+		return;
+	}
+
+	Surface &surface = existing->second;
+
+	const QImage tile = decodeUnit(surface, encodedTile);
+
+	if (tile.isNull()) {
+		return;
+	}
+
+	// A surface exists from the announcement onwards but holds no picture until now, so this is what
+	// makes the sender count - and with it the video panel - appear.
+	const bool wasBlank = surface.canvas.isNull();
 
 	if (!growToFit(surface.canvas, static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height())) {
-		if (isNewSender) {
-			m_surfaces.remove(senderSession);
-		}
-
 		return;
 	}
 
@@ -91,8 +155,8 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		painter.drawImage(static_cast< int >(x), static_cast< int >(y), tile);
 	}
 
-	if (isNewSender) {
-		emit senderCountChanged(senderCount());
+	if (wasBlank) {
+		emit senderCountChanged(tileCount());
 	}
 
 	update();
@@ -122,14 +186,14 @@ void VideoGrid::clearSelfFrame() {
 }
 
 void VideoGrid::removeSender(unsigned int senderSession) {
-	if (m_surfaces.remove(senderSession) > 0) {
+	if (m_surfaces.erase(senderSession) > 0) {
 		emit senderCountChanged(senderCount());
 		update();
 	}
 }
 
 void VideoGrid::clear() {
-	if (m_surfaces.isEmpty()) {
+	if (m_surfaces.empty()) {
 		return;
 	}
 
@@ -143,7 +207,7 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	QPainter painter(this);
 	painter.fillRect(rect(), Qt::black);
 
-	if (m_surfaces.isEmpty() && m_selfFrame.isNull()) {
+	if (m_surfaces.empty() && m_selfFrame.isNull()) {
 		return;
 	}
 
@@ -186,11 +250,11 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		drawInto(m_selfFrame, index++, tr("You"));
 	}
 
-	for (auto it = m_surfaces.constBegin(); it != m_surfaces.constEnd(); ++it, ++index) {
-		if (it->canvas.isNull()) {
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (it->second.canvas.isNull()) {
 			continue;
 		}
 
-		drawInto(it->canvas, index, QString());
+		drawInto(it->second.canvas, index++, QString());
 	}
 }

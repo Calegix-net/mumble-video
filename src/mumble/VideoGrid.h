@@ -6,12 +6,15 @@
 #ifndef MUMBLE_MUMBLE_VIDEOGRID_H_
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
+#include "VP8Codec.h"
+
 #include <QtCore/QByteArray>
-#include <QtCore/QHash>
 #include <QtGui/QImage>
 #include <QtWidgets/QWidget>
 
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
 
 /**
  * Displays the video other participants are sharing.
@@ -28,6 +31,11 @@
  * Everything reaching this class has been relayed by the server and therefore originates with another
  * client, so the geometry on a tile is treated as untrusted: surfaces are bounded, tiles that would land
  * outside one are refused, and the number of senders on screen is capped.
+ *
+ * Which decoder a unit is fed to comes from the stream's announcement, never from the bytes themselves.
+ * The payload is attacker-controlled, so letting it select the decoder would turn every format the
+ * client can parse into attack surface. A stream whose codec was never announced, or was announced as
+ * one this build does not know, is dropped rather than guessed at.
  */
 class VideoGrid : public QWidget {
 	Q_OBJECT
@@ -44,8 +52,10 @@ public:
 
 	explicit VideoGrid(QWidget *parent = nullptr);
 
-	/// Number of senders currently on screen.
-	int senderCount() const { return static_cast< int >(m_surfaces.size()); }
+	/// Number of senders currently on screen. Counts only those with a picture: a surface exists from a
+	/// stream's announcement onward, but one with nothing decoded into it yet occupies no cell and must
+	/// not reserve one, or the grid lays out around an empty square.
+	int senderCount() const;
 
 	/// Everything drawn, including your own picture. This is what decides whether the panel is worth
 	/// showing at all.
@@ -71,6 +81,16 @@ public slots:
 	/// Stops showing the local camera.
 	void clearSelfFrame();
 
+	/**
+	 * Records the codec a sender's stream is encoded with, from its VideoState announcement.
+	 *
+	 * Must arrive before the stream's units do, which the protocol guarantees: the announcement is what
+	 * causes a receiver to subscribe, and the server relays nothing until it has.
+	 *
+	 * @param codec A MumbleProto::VideoState::Codec value.
+	 */
+	void setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec);
+
 	/// Drops a sender's surface, on disconnect or when their stream ends.
 	void removeSender(unsigned int senderSession);
 
@@ -85,9 +105,18 @@ protected:
 	struct Surface {
 		QImage canvas;
 		unsigned int streamID = 0;
+
+		/// MumbleProto::VideoState::Codec. 0 is CODEC_UNKNOWN, whose units are dropped.
+		int codec = 0;
+
+		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
+		/// reference frames, so reusing one across streams would decode new frames against stale state.
+		std::unique_ptr< VP8Decoder > vp8;
 	};
 
-	QHash< unsigned int, Surface > m_surfaces;
+	// std::unordered_map rather than QHash: a Surface owns its decoder through a unique_ptr, which makes
+	// it move-only, and QHash requires its values to be copyable.
+	std::unordered_map< unsigned int, Surface > m_surfaces;
 
 	/// The local camera, kept apart from m_surfaces because it has no session and is always drawn first.
 	QImage m_selfFrame;
@@ -97,6 +126,10 @@ protected:
 	/// Grows a surface so the given rectangle fits, within the bounds above. Returns false if the
 	/// rectangle cannot be accommodated.
 	static bool growToFit(QImage &canvas, int x, int y, int width, int height);
+
+	/// Turns one unit's payload into an image using the codec the stream announced. Returns a null
+	/// image if the codec is unknown, unsupported, or the payload did not decode.
+	static QImage decodeUnit(Surface &surface, const QByteArray &payload);
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOGRID_H_

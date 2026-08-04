@@ -1326,6 +1326,12 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		return;
 	}
 
+	// Recorded before subscribing, so the codec is known by the time the first unit can arrive. Without
+	// it the units are undecodable: nothing in the UDP payload says which codec produced it, by design.
+	if (m_videoGrid) {
+		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.codec()));
+	}
+
 	MumbleProto::VideoSubscribe mpvs;
 	mpvs.set_session(msg.session());
 	mpvs.set_stream_id(msg.stream_id());
