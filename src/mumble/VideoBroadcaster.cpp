@@ -96,6 +96,8 @@ void VideoBroadcaster::onFrameReady(const QImage &frame, std::uint64_t captureTi
 		return;
 	}
 
+	emit previewFrame(frame);
+
 	const std::vector< EncodedVideoUnit > units =
 		m_codec == 0 ? m_vp8.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe)
 					 : m_encoder.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe);

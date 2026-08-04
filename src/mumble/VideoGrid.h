@@ -47,6 +47,10 @@ public:
 	/// Number of senders currently on screen.
 	int senderCount() const { return static_cast< int >(m_surfaces.size()); }
 
+	/// Everything drawn, including your own picture. This is what decides whether the panel is worth
+	/// showing at all.
+	int tileCount() const { return senderCount() + (m_selfFrame.isNull() ? 0 : 1); }
+
 	/// The surface accumulated for a sender, or a null image if there is none. Exposed so that the
 	/// composition can be tested without going through a paint event.
 	QImage surfaceFor(unsigned int senderSession) const;
@@ -59,6 +63,13 @@ public slots:
 	 */
 	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
 							 const QByteArray &encodedTile);
+
+	/// Shows the local camera. Drawn first so your own picture does not move about as other people come
+	/// and go.
+	void setSelfFrame(const QImage &frame);
+
+	/// Stops showing the local camera.
+	void clearSelfFrame();
 
 	/// Drops a sender's surface, on disconnect or when their stream ends.
 	void removeSender(unsigned int senderSession);
@@ -77,6 +88,9 @@ protected:
 	};
 
 	QHash< unsigned int, Surface > m_surfaces;
+
+	/// The local camera, kept apart from m_surfaces because it has no session and is always drawn first.
+	QImage m_selfFrame;
 
 	void paintEvent(QPaintEvent *event) override;
 

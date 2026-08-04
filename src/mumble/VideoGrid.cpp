@@ -98,6 +98,29 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	update();
 }
 
+void VideoGrid::setSelfFrame(const QImage &frame) {
+	const bool wasEmpty = m_selfFrame.isNull();
+
+	m_selfFrame = frame;
+
+	if (wasEmpty != frame.isNull()) {
+		emit senderCountChanged(tileCount());
+	}
+
+	update();
+}
+
+void VideoGrid::clearSelfFrame() {
+	if (m_selfFrame.isNull()) {
+		return;
+	}
+
+	m_selfFrame = QImage();
+
+	emit senderCountChanged(tileCount());
+	update();
+}
+
 void VideoGrid::removeSender(unsigned int senderSession) {
 	if (m_surfaces.remove(senderSession) > 0) {
 		emit senderCountChanged(senderCount());
@@ -120,13 +143,13 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	QPainter painter(this);
 	painter.fillRect(rect(), Qt::black);
 
-	if (m_surfaces.isEmpty()) {
+	if (m_surfaces.isEmpty() && m_selfFrame.isNull()) {
 		return;
 	}
 
 	// A roughly square arrangement, which is what every other video call looks like and needs no layout
 	// configuration to be reasonable at any participant count.
-	const int count   = senderCount();
+	const int count   = tileCount();
 	const int columns = static_cast< int >(std::ceil(std::sqrt(static_cast< double >(count))));
 	const int rows    = (count + columns - 1) / columns;
 
@@ -139,23 +162,35 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 
 	int index = 0;
 
+	// Scaled to fit inside its cell without distorting it. Letterboxing is the honest presentation:
+	// stretching somebody's screen share to fill a cell makes text unreadable.
+	const auto drawInto = [&](const QImage &image, int slot, const QString &label) {
+		const int column = slot % columns;
+		const int row    = slot / columns;
+
+		const QRect cell(column * cellWidth, row * cellHeight, cellWidth, cellHeight);
+		const QSize scaled = image.size().scaled(cell.size(), Qt::KeepAspectRatio);
+
+		const QRect target(cell.x() + (cell.width() - scaled.width()) / 2,
+						   cell.y() + (cell.height() - scaled.height()) / 2, scaled.width(), scaled.height());
+
+		painter.drawImage(target, image);
+
+		if (!label.isEmpty()) {
+			painter.setPen(Qt::white);
+			painter.drawText(cell.adjusted(4, 4, -4, -4), Qt::AlignBottom | Qt::AlignLeft, label);
+		}
+	};
+
+	if (!m_selfFrame.isNull()) {
+		drawInto(m_selfFrame, index++, tr("You"));
+	}
+
 	for (auto it = m_surfaces.constBegin(); it != m_surfaces.constEnd(); ++it, ++index) {
 		if (it->canvas.isNull()) {
 			continue;
 		}
 
-		const int column = index % columns;
-		const int row    = index / columns;
-
-		const QRect cell(column * cellWidth, row * cellHeight, cellWidth, cellHeight);
-
-		// Scaled to fit inside the cell without distorting it. Letterboxing is the honest presentation:
-		// stretching someone's screen share to fill a cell makes text unreadable.
-		const QSize scaled = it->canvas.size().scaled(cell.size(), Qt::KeepAspectRatio);
-
-		const QRect target(cell.x() + (cell.width() - scaled.width()) / 2,
-						   cell.y() + (cell.height() - scaled.height()) / 2, scaled.width(), scaled.height());
-
-		painter.drawImage(target, it->canvas);
+		drawInto(it->canvas, index, QString());
 	}
 }

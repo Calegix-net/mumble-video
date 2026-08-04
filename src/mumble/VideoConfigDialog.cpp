@@ -260,46 +260,57 @@ void VideoConfigDialog::onPreviewToggled() {
 }
 
 void VideoConfigDialog::onFrameReady(const QImage &frame, std::uint64_t captureTimestampUsec) {
-	// Encoded and decoded rather than shown raw, so the preview reflects what a viewer will actually see
-	// at these settings, and so the measured bitrate is the real one.
-	static VP8Encoder vp8;
-	static VP8Decoder vp8Decoder;
-	static TiledImageEncoder tiled;
-
 	const QSize resolution = m_resolution->currentData().toSize();
 	const QImage scaled    = frame.scaled(resolution, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-	if (m_codec->currentData().toInt() == 0) {
-		vp8.setBitrate(static_cast< unsigned int >(m_bitrate->value()));
-		vp8.setFramerate(static_cast< unsigned int >(m_framerate->value()));
+	// Shown before anything else is attempted. Previously the preview was only updated from the decoded
+	// output, so any frame the encoder declined to emit left the panel blank -- which is what a user saw
+	// when nothing appeared at all.
+	m_preview->setFrame(scaled);
 
-		const std::vector< EncodedVideoUnit > units = vp8.encode(scaled, 0, 0, captureTimestampUsec);
+	const int codec = m_codec->currentData().toInt();
 
-		for (const EncodedVideoUnit &unit : units) {
+	// Reconfigured only when a setting actually changes. setBitrate and setFramerate both tear the
+	// encoder down, so calling them per frame rebuilt it every time: every frame became a keyframe, the
+	// presentation clock restarted, and rate control never had a chance to settle.
+	if (codec == 0) {
+		const unsigned int bitrate   = static_cast< unsigned int >(m_bitrate->value());
+		const unsigned int framerate = static_cast< unsigned int >(m_framerate->value());
+
+		if (bitrate != m_vp8.bitrate() || framerate != m_vp8.framerate()) {
+			m_vp8.setBitrate(bitrate);
+			m_vp8.setFramerate(framerate);
+		}
+
+		for (const EncodedVideoUnit &unit : m_vp8.encode(scaled, 0, m_previewFrameNumber, captureTimestampUsec)) {
 			m_bytesThisSecond += unit.payload.size();
 
-			const QImage decoded = vp8Decoder.decode(unit.payload);
+			// The decoded picture is what a viewer really receives, so it is preferred when available.
+			const QImage decoded = m_vp8Decoder.decode(unit.payload);
 
 			if (!decoded.isNull()) {
 				m_preview->setFrame(decoded);
 			}
 		}
 
+		m_previewFrameNumber++;
+
 		return;
 	}
 
-	tiled.setTileSize(m_tileSize->currentData().toInt());
-	tiled.setQuality(m_tileQuality->value());
+	if (m_tiled.tileSize() != m_tileSize->currentData().toInt() || m_tiled.quality() != m_tileQuality->value()) {
+		m_tiled.setTileSize(m_tileSize->currentData().toInt());
+		m_tiled.setQuality(m_tileQuality->value());
+	}
 
-	const std::vector< EncodedVideoUnit > units = tiled.encode(scaled, 0, 0, captureTimestampUsec);
-
-	for (const EncodedVideoUnit &unit : units) {
+	// Tiles are independently decodable and the source is already on screen, so only the cost needs
+	// computing here. The frame number has to advance or dirty-tile detection compares a frame with
+	// itself and reports nothing changed.
+	for (const EncodedVideoUnit &unit : m_tiled.encode(scaled, 0, m_previewFrameNumber, captureTimestampUsec)) {
 		m_bytesThisSecond += unit.payload.size();
 	}
 
-	// Tiles are independently decodable, so the preview can simply show the source at the chosen
-	// resolution; the number that matters here is the bitrate beneath it.
-	m_preview->setFrame(scaled);
+	m_previewFrameNumber++;
 }
 
 void VideoConfigDialog::load(const Settings &r) {

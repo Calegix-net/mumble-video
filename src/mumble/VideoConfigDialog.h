@@ -7,6 +7,8 @@
 #define MUMBLE_MUMBLE_VIDEOCONFIGDIALOG_H_
 
 #include "ConfigDialog.h"
+#include "VP8Codec.h"
+#include "VideoEncoder.h"
 #include "VideoPreview.h"
 
 #include <QtCore/QTimer>
@@ -73,6 +75,13 @@ protected:
 	QLabel *m_stats              = nullptr;
 
 	std::unique_ptr< VideoSource > m_source;
+
+	// Owned rather than function-static: statics would be shared between dialog instances and would
+	// outlive the settings they were configured for.
+	VP8Encoder m_vp8;
+	VP8Decoder m_vp8Decoder;
+	TiledImageEncoder m_tiled;
+	std::uint64_t m_previewFrameNumber = 0;
 
 	// Rolling measurement of what the current settings would actually cost on the wire, which is the
 	// number that decides whether a setting is usable on a real connection.

@@ -479,14 +479,25 @@ void MainWindow::setupVideoGrid() {
 	m_videoDock->setObjectName(QStringLiteral("qdwVideo"));
 	m_videoDock->setWidget(m_videoGrid);
 
-	addDockWidget(Qt::RightDockWidgetArea, m_videoDock);
+	// Across the top rather than down one side: video is what people look at during a call, and a narrow
+	// column beside the user tree makes faces too small to read.
+	addDockWidget(Qt::TopDockWidgetArea, m_videoDock);
 
-	// Hidden until somebody actually shares. A permanently empty black panel would be worse than no
+	// Hidden until there is something to show. A permanently empty black panel would be worse than no
 	// panel at all for the many users who never touch this.
 	m_videoDock->hide();
 
-	connect(m_videoGrid, &VideoGrid::senderCountChanged, this,
-			[this](int count) { m_videoDock->setVisible(count > 0); });
+	connect(m_videoGrid, &VideoGrid::senderCountChanged, this, [this](int count) {
+		const bool show = count > 0;
+
+		m_videoDock->setVisible(show);
+
+		if (show) {
+			// Half the window, so video and the conversation below it get equal room. Reapplied on each
+			// appearance, since a hidden dock has no meaningful size to divide.
+			resizeDocks({ m_videoDock }, { height() / 2 }, Qt::Vertical);
+		}
+	});
 }
 
 void MainWindow::setupVideoBroadcast() {
@@ -515,6 +526,15 @@ void MainWindow::setupVideoBroadcast() {
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Camera sharing stopped: %1").arg(reason));
+	});
+
+	// Your own camera, shown alongside everyone else's. Without it, sharing looks like nothing happened.
+	connect(m_videoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfFrame);
+
+	connect(m_videoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
+		if (!active) {
+			m_videoGrid->clearSelfFrame();
+		}
 	});
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::unitReady, this,

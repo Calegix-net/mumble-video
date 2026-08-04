@@ -72,6 +72,13 @@ signals:
 	/// One encoded unit, ready to fragment and send.
 	void unitReady(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload);
 
+	/// The frame just captured, before encoding.
+	///
+	/// Self-view deliberately shows the raw capture rather than the encoded-and-decoded result: the point
+	/// is to confirm framing and that the camera is live, and putting your own encoder and decoder in that
+	/// path would cost CPU to make your own picture look worse.
+	void previewFrame(const QImage &frame);
+
 	/// Capture started or stopped, so the UI can update the toggle.
 	void activeChanged(bool active);
 
