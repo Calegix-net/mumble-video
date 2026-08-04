@@ -77,6 +77,7 @@
 #include <QtCore/QUrlQuery>
 #include <QtGui/QClipboard>
 #include <QtGui/QDesktopServices>
+#include <QtGui/QIcon>
 #include <QtGui/QImageReader>
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
@@ -507,8 +508,27 @@ void MainWindow::setupVideoBroadcast() {
 	m_shareCameraAction->setCheckable(true);
 	m_shareCameraAction->setStatusTip(tr("Share your camera with this channel"));
 
+	// Off and On rather than one icon plus the button's pressed state: on most styles a checked tool
+	// button is a subtle background tint, which is far too quiet for "your camera is live".
+	QIcon cameraIcon;
+	cameraIcon.addFile(QLatin1String("skin:actions/camera-video.svg"), QSize(), QIcon::Normal, QIcon::Off);
+	cameraIcon.addFile(QLatin1String("skin:actions/camera-video-active.svg"), QSize(), QIcon::Normal, QIcon::On);
+	m_shareCameraAction->setIcon(cameraIcon);
+	// The menu keeps its text alone, as every other entry there does.
+	m_shareCameraAction->setIconVisibleInMenu(false);
+
 	qmSelf->addSeparator();
 	qmSelf->addAction(m_shareCameraAction);
+
+	// Next to mute, deafen and record: the toolbar is where the things you toggle mid-conversation live,
+	// and sharing a camera belongs with them rather than three levels into a menu. Placed by position
+	// relative to the recording button rather than before a named later action, so it stays in that
+	// group even if the toolbar is rearranged; a null "before" simply appends.
+	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
+	const qsizetype afterRecording          = toolbarActions.indexOf(qaRecording) + 1;
+	qtIconToolbar->insertAction(
+		afterRecording > 0 && afterRecording < toolbarActions.size() ? toolbarActions.at(afterRecording) : nullptr,
+		m_shareCameraAction);
 
 	// Beside the audio wizard, because it answers the same kind of question for the other medium.
 	m_videoWizardAction = new QAction(tr("&Video Wizard"), this);

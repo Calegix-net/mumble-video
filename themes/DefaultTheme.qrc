@@ -60,6 +60,8 @@
     <file alias="talking_muted.svg">Default/talking_muted.svg</file>
     <file alias="talking_whisper.svg">Default/talking_whisper.svg</file>
     <file alias="theme.ini">Default/theme.ini</file>
+    <file alias="actions/camera-video.svg">Default/actions/camera-video.svg</file>
+    <file alias="actions/camera-video-active.svg">Default/actions/camera-video-active.svg</file>
     <file alias="actions/audio-input-microphone-muted.svg">Default/actions/audio-input-microphone-muted.svg</file>
     <file alias="actions/audio-input-microphone.svg">Default/actions/audio-input-microphone.svg</file>
     <file alias="actions/bookmark-new.svg">Default/bookmark-new.svg</file>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	 width="500px" height="500px" viewBox="0 0 500 500" xml:space="preserve">
+<!-- Camera live: currently sharing. Green, the same colour the microphone icon uses for its live state,
+     with a red dot so the difference from the idle icon survives at toolbar size and in greyscale. -->
+<path opacity="0.9" fill="#34A853" d="M60,168c0-15.464,12.536-28,28-28h212c15.464,0,28,12.536,28,28v164
+	c0,15.464-12.536,28-28,28H88c-15.464,0-28-12.536-28-28V168z"/>
+<path opacity="0.9" fill="#34A853" d="M348,214l82-44c7.998-4.291,17.5,1.5,17.5,10.5v139c0,9-9.502,14.791-17.5,10.5l-82-44V214z"/>
+<circle opacity="0.95" fill="#EA4335" cx="130" cy="210" r="34"/>
+</svg>
