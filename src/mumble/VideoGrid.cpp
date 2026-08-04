@@ -207,13 +207,18 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	QPainter painter(this);
 	painter.fillRect(rect(), Qt::black);
 
-	if (m_surfaces.empty() && m_selfFrame.isNull()) {
+	// Tested on what is drawable, not on whether any surface exists. A surface is created when a stream
+	// is announced and stays blank until the first frame decodes, so "holds surfaces" and "has something
+	// to draw" are different questions; conflating them let a blank surface reach the layout below with
+	// a count of zero, and divide by it.
+	const int count = tileCount();
+
+	if (count == 0) {
 		return;
 	}
 
 	// A roughly square arrangement, which is what every other video call looks like and needs no layout
 	// configuration to be reasonable at any participant count.
-	const int count   = tileCount();
 	const int columns = static_cast< int >(std::ceil(std::sqrt(static_cast< double >(count))));
 	const int rows    = (count + columns - 1) / columns;
 

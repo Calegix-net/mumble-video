@@ -86,6 +86,7 @@ private slots:
 	void aVp8StreamIsDecoded();
 	void unitsForAnUnannouncedStreamAreDropped();
 	void anUnknownCodecIsDropped();
+	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
 };
@@ -335,6 +336,21 @@ void TestVideoGrid::anUnknownCodecIsDropped() {
 	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_CODEC_UNKNOWN);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
 	QCOMPARE(grid.senderCount(), 0);
+}
+
+// A receiver holds a surface from the announcement onward, before anything has decoded into it. If it
+// is not sharing its own camera either, there is a window where a surface exists but nothing is drawable
+// - and the grid still has to survive being painted in it.
+void TestVideoGrid::anAnnouncedButBlankStreamPaintsWithoutCrashing() {
+	VideoGrid grid;
+	grid.resize(320, 240);
+
+	announce(grid, SENDER, STREAM);
+
+	QCOMPARE(grid.senderCount(), 0);
+
+	QImage target(320, 240, QImage::Format_RGB32);
+	grid.render(&target);
 }
 
 void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
