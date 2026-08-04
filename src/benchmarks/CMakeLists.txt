@@ -15,5 +15,11 @@ set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "")
 
 FetchContent_MakeAvailable(googlebenchmark)
 
+# Google Benchmark is a third-party dependency and does not compile cleanly under the strict warning
+# set this project builds with: GCC 15 rejects it outright over -Werror=conversion and
+# -Werror=sign-conversion in counter.cc and statistics.cc. Suppress warnings for it exactly as is done
+# for the other vendored dependencies, otherwise no benchmark can be built at all on a modern compiler.
+disable_warnings_for_all_targets_in("${googlebenchmark_SOURCE_DIR}")
+
 add_subdirectory(protocol)
 add_subdirectory(AudioReceiverBuffer)
