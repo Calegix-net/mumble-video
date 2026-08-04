@@ -123,8 +123,8 @@ void MumbleSSL::addSystemCA() {
 		sslCfg.setCaCertificates(filteredCaList);
 		QSslConfiguration::setDefaultConfiguration(sslCfg);
 
-		qWarning("SSL: CA certificate filter applied. Filtered size: %i, original size: %i", filteredCaList.size(),
-				 caList.size());
+		qWarning("SSL: CA certificate filter applied. Filtered size: %lli, original size: %lli",
+				 static_cast< long long >(filteredCaList.size()), static_cast< long long >(caList.size()));
 	}
 #endif
 }

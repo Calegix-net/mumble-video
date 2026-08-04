@@ -42,10 +42,15 @@
 #include <windows.h>
 
 #ifdef __MINGW32__
-// MinGW's <qos2.h> header does not provide everything we need,
-// so define QOS_FLOWID (and PQOS_FLOWID) as well as QOS_NON_ADAPTIVE_FLOW
-// ourselves to allow us to build with QoS support on MinGW.
+// MinGW's <qos2.h> used to be missing QOS_FLOWID, PQOS_FLOWID and QOS_NON_ADAPTIVE_FLOW, and Mumble
+// declared them itself so QoS support could be built at all. Current mingw-w64 declares all three, and
+// its QOS_FLOWID is ULONG rather than the UINT32 assumed here, so declaring them unconditionally is now
+// a conflicting definition rather than a gap-filler. Take the header's version whenever there is one.
+#	if defined(__has_include) && __has_include(<qos2.h>)
+#		include <qos2.h>
+#	else
 typedef UINT32 QOS_FLOWID, *PQOS_FLOWID;
+#	endif
 #	ifndef QOS_NON_ADAPTIVE_FLOW
 #		define QOS_NON_ADAPTIVE_FLOW 0x00000002
 #	endif

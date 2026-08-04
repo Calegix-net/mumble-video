@@ -92,13 +92,13 @@ HRESULT STDMETHODCALLTYPE WASAPINotificationClient::QueryInterface(REFIID riid, 
 }
 
 ULONG STDMETHODCALLTYPE WASAPINotificationClient::AddRef() {
-	return InterlockedIncrement(&_cRef);
+	return static_cast< ULONG >(InterlockedIncrement(&_cRef));
 }
 
 ULONG STDMETHODCALLTYPE WASAPINotificationClient::Release() {
 	// We hold a ref to ourselves all the time (static singleton) so no
 	// need to clean ourselves up or anything.
-	ULONG ulRef = InterlockedDecrement(&_cRef);
+	ULONG ulRef = static_cast< ULONG >(InterlockedDecrement(&_cRef));
 	Q_ASSERT(ulRef > 0);
 	return ulRef;
 }

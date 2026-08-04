@@ -40,11 +40,11 @@ XboxInput::XboxInput()
 		return;
 	}
 
-	m_getStateFunc = reinterpret_cast< XboxInputGetStateFunc >(GetProcAddress(m_xinputlib, "XInputGetState"));
+	m_getStateFunc = reinterpret_cast< XboxInputGetStateFunc >(reinterpret_cast< void * >(GetProcAddress(m_xinputlib, "XInputGetState")));
 	// Undocumented XInputGetStateEx -- ordinal 100. It is available in XInput 1.3 and greater.
 	// It provides access to the state of the guide button.
 	// For reference, see SDL's XInput support: http://www.libsdl.org/tmp/SDL/src/core/windows/SDL_xinput.c
-	m_getStateExFunc = reinterpret_cast< XboxInputGetStateFunc >(GetProcAddress(m_xinputlib, (char *) 100));
+	m_getStateExFunc = reinterpret_cast< XboxInputGetStateFunc >(reinterpret_cast< void * >(GetProcAddress(m_xinputlib, (char *) 100)));
 
 	if (m_getStateExFunc) {
 		GetState = m_getStateExFunc;

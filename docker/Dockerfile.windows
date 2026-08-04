@@ -1,0 +1,90 @@
+# Copyright The Mumble Developers. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file at the root of the
+# Mumble source tree or at <https://www.mumble.info/LICENSE>.
+
+# Windows cross-build environment, x86_64, using the MinGW-w64 toolchain.
+#
+# Upstream builds Windows with MSVC and vcpkg, which needs Windows. Cross-compiling with MinGW gets a
+# Windows client out of the same Linux container as everything else. Fedora packages MinGW builds of Qt 6
+# (including Multimedia, which the camera needs), OpenSSL, Protobuf, Boost and Opus; libvpx is the one
+# dependency it does not ship, so it is built from source below.
+FROM fedora:42
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        mingw64-gcc mingw64-gcc-c++ mingw64-binutils \
+        mingw64-qt6-qtbase mingw64-qt6-qttools \
+        mingw64-qt6-qtsvg mingw64-qt6-qtmultimedia \
+        mingw64-openssl mingw64-protobuf mingw64-boost mingw64-opus \
+        mingw64-zlib mingw64-winpthreads \
+        mingw64-flac mingw64-libvorbis mingw64-libogg \
+        cmake make git pkgconf protobuf-compiler \
+        yasm nasm diffutils file findutils which perl \
+    && dnf clean all
+
+# libvpx, cross-built for MinGW. Its own configure script handles this properly, which is simpler and
+# more reliable than trying to coax CMake into it.
+ARG VPX_VERSION=v1.15.0
+RUN git clone --depth 1 --branch ${VPX_VERSION} https://chromium.googlesource.com/webm/libvpx /tmp/libvpx \
+    && cd /tmp/libvpx \
+    && CROSS=x86_64-w64-mingw32- ./configure \
+         --target=x86_64-win64-gcc \
+         --prefix=/usr/x86_64-w64-mingw32/sys-root/mingw \
+         --disable-examples --disable-tools --disable-docs --disable-unit-tests \
+         --enable-vp8 --enable-vp9 --enable-static --disable-shared \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/libvpx
+
+# MinGW ships its Windows headers in lowercase. Poco includes several of them with the capitalisation
+# Microsoft's SDK uses, which resolves fine on a case-insensitive Windows filesystem and not at all here.
+# Symlinks are the least invasive fix; patching Poco's includes would mean carrying a patch forever.
+RUN cd /usr/x86_64-w64-mingw32/sys-root/mingw/include \
+    && for header in Windows.h WinSock2.h WS2tcpip.h Iphlpapi.h IPHlpApi.h ShlObj.h TlHelp32.h \
+                     Psapi.h WinIoCtl.h WinBase.h WinNT.h WinCrypt.h ShellAPI.h ObjBase.h \
+                     UnKnwn.h OleAuto.h WinDNS.h WinSvc.h AccCtrl.h AclAPI.h; do \
+         lower=$(echo "$header" | tr 'A-Z' 'a-z'); \
+         if [ -f "$lower" ] && [ ! -e "$header" ]; then ln -s "$lower" "$header"; fi; \
+       done
+
+# Poco, which the client requires unconditionally and Fedora does not ship for MinGW. Only the four
+# components the client actually links are built; the rest (databases, MongoDB, networking) roughly
+# triple the build time for nothing. The Data sub-options are listed separately because Poco re-enables
+# ODBC for Windows targets regardless of ENABLE_DATA, and it does not cross-compile: it wants SQL_GUID,
+# which the MinGW ODBC headers do not define.
+#
+# CMAKE_MC_COMPILER is pre-set because Poco looks for the MSVC message compiler by its Windows filename,
+# which no cross-toolchain provides under that name; MinGW's equivalent is windmc.
+ARG POCO_VERSION=poco-1.14.2-release
+RUN git clone --depth 1 --branch ${POCO_VERSION} https://github.com/pocoproject/poco /tmp/poco \
+    && cmake -S /tmp/poco -B /tmp/poco-build \
+         -DCMAKE_TOOLCHAIN_FILE=/usr/share/mingw/toolchain-mingw64.cmake \
+         -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DBUILD_SHARED_LIBS=OFF \
+         -DCMAKE_MC_COMPILER=/usr/bin/x86_64-w64-mingw32-windmc \
+         -DENABLE_FOUNDATION=ON -DENABLE_XML=ON -DENABLE_UTIL=ON -DENABLE_ZIP=ON \
+         -DENABLE_JSON=ON \
+         -DENABLE_NET=OFF -DENABLE_NETSSL=OFF -DENABLE_CRYPTO=OFF -DENABLE_DATA=OFF \
+         -DENABLE_DATA_ODBC=OFF -DENABLE_DATA_SQLITE=OFF -DENABLE_DATA_MYSQL=OFF \
+         -DENABLE_DATA_POSTGRESQL=OFF \
+         -DENABLE_MONGODB=OFF -DENABLE_REDIS=OFF -DENABLE_PROMETHEUS=OFF \
+         -DENABLE_ENCODINGS=OFF -DENABLE_JWT=OFF -DENABLE_ACTIVERECORD=OFF \
+         -DENABLE_TESTS=OFF -DENABLE_SAMPLES=OFF \
+    && cmake --build /tmp/poco-build -j"$(nproc)" \
+    && cmake --install /tmp/poco-build \
+    && rm -rf /tmp/poco /tmp/poco-build
+
+# libsndfile, which the client requires unconditionally for recording. Fedora packages no mingw64 build
+# of it, but it does package everything it wants to link against, so only libsndfile itself is built here.
+ARG SNDFILE_VERSION=1.2.2
+RUN git clone --depth 1 --branch ${SNDFILE_VERSION} https://github.com/libsndfile/libsndfile /tmp/sndfile \
+    && cmake -S /tmp/sndfile -B /tmp/sndfile-build \
+         -DCMAKE_TOOLCHAIN_FILE=/usr/share/mingw/toolchain-mingw64.cmake \
+         -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw \
+         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+         -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_MPEG=OFF \
+    && cmake --build /tmp/sndfile-build -j"$(nproc)" && cmake --install /tmp/sndfile-build \
+    && rm -rf /tmp/sndfile /tmp/sndfile-build
+
+WORKDIR /build

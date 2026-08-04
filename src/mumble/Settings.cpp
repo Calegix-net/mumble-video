@@ -1143,11 +1143,12 @@ void Settings::legacyLoad(const QString &path) {
 			}
 			// Fallthrough
 #ifdef Q_OS_WIN
+			[[fallthrough]];
 		case 2: {
 			QList< Shortcut > &shortcuts              = qlShortcuts;
 			const QList< Shortcut > migratedShortcuts = GlobalShortcutWin::migrateSettings(shortcuts);
 			if (shortcuts.size() > migratedShortcuts.size()) {
-				const uint32_t num = shortcuts.size() - migratedShortcuts.size();
+				const uint32_t num = static_cast< uint32_t >(shortcuts.size() - migratedShortcuts.size());
 				QMessageBox::warning(
 					nullptr, QObject::tr("Shortcuts migration incomplete"),
 					QObject::tr("Unfortunately %1 shortcut(s) could not be migrated.\nYou can register them again.")

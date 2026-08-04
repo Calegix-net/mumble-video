@@ -43,6 +43,12 @@ extern "C" {
 // From os_win.cpp
 extern HWND mumble_mw_hwnd;
 
+// mingw-w64's hidusage.h does not define this HID usage yet. It is a fixed value from the HID Usage
+// Tables, not something the SDK is free to change, so defining it when absent is safe.
+#ifndef HID_USAGE_GENERIC_MULTI_AXIS_CONTROLLER
+#	define HID_USAGE_GENERIC_MULTI_AXIS_CONTROLLER ((USAGE) 0x08)
+#endif
+
 struct InputHid {
 	uint32_t button = 0;
 	std::string deviceName;
@@ -254,7 +260,7 @@ QList< Shortcut > GlobalShortcutWin::migrateSettings(const QList< Shortcut > &ol
 			const auto uuid = entries.at(1).toUuid();
 			if (uuid == KEYBOARD_UUID) {
 				InputKeyboard input;
-				input.code = (value & ~0x8000U) >> 8;
+				input.code = static_cast< uint16_t >((value & ~0x8000U) >> 8);
 				input.e0   = value & 0x8000U;
 
 				// With DirectInput the extended bit is:
@@ -277,8 +283,8 @@ QList< Shortcut > GlobalShortcutWin::migrateSettings(const QList< Shortcut > &ol
 #ifdef USE_XBOXINPUT
 			} else if (uuid == XINPUT_UUID) {
 				InputXinput input;
-				input.device = (value >> 24) & 0xFF;
-				input.code   = value & 0x00FFFFFF;
+				input.device = static_cast< uint8_t >((value >> 24) & 0xFF);
+				input.code   = static_cast< uint8_t >(value & 0x00FFFFFF);
 
 				button = QVariant::fromValue(input);
 #endif
@@ -286,13 +292,13 @@ QList< Shortcut > GlobalShortcutWin::migrateSettings(const QList< Shortcut > &ol
 			} else if (uuid == GKEY_KEYBOARD_UUID) {
 				InputGkey input = {};
 				input.keyboard  = true;
-				input.mode      = value >> 16;
-				input.button    = value & 0xFFFF;
+				input.mode      = static_cast< uint8_t >(value >> 16);
+				input.button    = static_cast< uint8_t >(value & 0xFFFF);
 
 				button = QVariant::fromValue(input);
 			} else if (uuid == GKEY_MOUSE_UUID) {
 				InputGkey input = {};
-				input.button    = value;
+				input.button    = static_cast< uint8_t >(value);
 
 				button = QVariant::fromValue(input);
 #endif
@@ -390,7 +396,7 @@ void GlobalShortcutWin::run() {
 	rid[4].hwndTarget  = mumble_mw_hwnd;
 
 	if (!RegisterRawInputDevices(rid, NRID, sizeof(RAWINPUTDEVICE))) {
-		qWarning("GlobalShortcutWindows: RegisterRawInputDevices() failed with error %u!", GetLastError());
+		qWarning("GlobalShortcutWindows: RegisterRawInputDevices() failed with error %lu!", GetLastError());
 	}
 
 	std::mutex mutex;
@@ -477,7 +483,7 @@ void GlobalShortcutWin::injectRawInputMessage(HRAWINPUT handle) {
 		return;
 	}
 
-	auto input = reinterpret_cast< const PRAWINPUT >(buffer.get());
+	auto input = reinterpret_cast< PRAWINPUT >(buffer.get());
 	switch (input->header.dwType) {
 		case RIM_TYPEMOUSE: {
 			const RAWMOUSE &mouse = input->data.mouse;
@@ -573,7 +579,7 @@ void GlobalShortcutWin::processMsgKeyboard(MsgKeyboard &msg) {
 		// Keys like “Pause / Break” and “Numlock” act strangely,
 		// sometimes like they are not even the same physical key.
 		// They use the so called escaped sequences, which we have to decipher.
-		msg.scanCode = MapVirtualKey(msg.virtualKey, MAPVK_VK_TO_VSC) | 0x100;
+		msg.scanCode = static_cast< USHORT >(MapVirtualKey(msg.virtualKey, MAPVK_VK_TO_VSC) | 0x100);
 	}
 
 	// E0 and E1 are escape sequences used for certain special keys, such as PRINT and PAUSE/BREAK.
@@ -581,7 +587,8 @@ void GlobalShortcutWin::processMsgKeyboard(MsgKeyboard &msg) {
 	if (msg.flags & RI_KEY_E1) {
 		// For escaped sequences, turn the virtual key into the correct scan code using MapVirtualKey().
 		// MapVirtualKey() is unable to map VK_PAUSE (this is a known bug), hence we map that by hand.
-		msg.scanCode = msg.virtualKey != VK_PAUSE ? MapVirtualKey(msg.virtualKey, MAPVK_VK_TO_VSC) : 0x45;
+		msg.scanCode = static_cast< USHORT >(msg.virtualKey != VK_PAUSE ? MapVirtualKey(msg.virtualKey, MAPVK_VK_TO_VSC)
+													 : 0x45);
 	}
 
 	InputKeyboard input = {};
@@ -717,7 +724,7 @@ GlobalShortcutWin::DeviceMap::iterator GlobalShortcutWin::addDevice(const HANDLE
 
 	device.usageRange.first  = buttonCaps[0].Range.UsageMin;
 	device.usageRange.second = buttonCaps[0].Range.UsageMax;
-	device.buttons.resize(device.usageRange.second - device.usageRange.first + 1);
+	device.buttons.resize(static_cast< std::size_t >(device.usageRange.second - device.usageRange.first + 1));
 
 	if (device.xinput) {
 		++m_xinputDevices;

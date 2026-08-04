@@ -227,7 +227,9 @@ static inline int8_t isWin32Process64Bit(const procptr_t &baseAddress) {
 	}
 }
 
-#ifdef WIN32
+// _WIN32 rather than WIN32: the latter is defined by the MSVC project templates, not by the compiler,
+// so a MinGW cross-build would otherwise fall through to the Linux backend and fail on <elf.h>.
+#ifdef _WIN32
 #	include "mumble_positional_audio_win32.h"
 #else
 #	include "mumble_positional_audio_linux.h"

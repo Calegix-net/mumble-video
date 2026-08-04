@@ -338,7 +338,7 @@ void OSInfo::fillXml(QDomDocument &doc, QDomElement &root, const QList< QHostAdd
 	bool bSSE2 = false;
 #if defined(Q_OS_WIN)
 #	define regstr(x) QString::fromLatin1(reinterpret_cast< const char * >(&x), 4)
-	int chop;
+	qsizetype chop;
 	int cpuinfo[4];
 
 	__cpuid(cpuinfo, 1);
@@ -349,7 +349,7 @@ void OSInfo::fillXml(QDomDocument &doc, QDomElement &root, const QList< QHostAdd
 	cpu_id = regstr(cpuinfo[1]) + regstr(cpuinfo[3]) + regstr(cpuinfo[2]);
 
 	for (unsigned int j = 2; j <= 4; ++j) {
-		__cpuid(cpuinfo, 0x80000000 + j);
+		__cpuid(cpuinfo, static_cast< int >(0x80000000u + j));
 		cpu_extid += regstr(cpuinfo[0]) + regstr(cpuinfo[1]) + regstr(cpuinfo[2]) + regstr(cpuinfo[3]);
 	}
 

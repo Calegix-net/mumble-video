@@ -38,8 +38,15 @@ Connection::Connection(QObject *p, QSslSocket *qtsSock) : QObject(p) {
 	}
 
 	int nodelay = 1;
-	setsockopt(static_cast< int >(qtsSocket->socketDescriptor()), IPPROTO_TCP, TCP_NODELAY,
-			   reinterpret_cast< char * >(&nodelay), static_cast< socklen_t >(sizeof(nodelay)));
+	// The socket handle is an unsigned SOCKET on Windows and a plain int everywhere else, so the
+	// descriptor cannot be narrowed to a single type here without changing sign on one platform.
+#ifdef Q_OS_WIN
+	const SOCKET sockfd = static_cast< SOCKET >(qtsSocket->socketDescriptor());
+#else
+	const int sockfd = static_cast< int >(qtsSocket->socketDescriptor());
+#endif
+	setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast< char * >(&nodelay),
+			   static_cast< socklen_t >(sizeof(nodelay)));
 
 	connect(qtsSocket, SIGNAL(errorOccurred(QAbstractSocket::SocketError)), this,
 			SLOT(socketError(QAbstractSocket::SocketError)));
@@ -69,7 +76,7 @@ void Connection::setToS() {
 		return;
 
 	dwFlow = 0;
-	if (!QOSAddSocketToFlow(hQoS, qtsSocket->socketDescriptor(), nullptr, QOSTrafficTypeAudioVideo,
+	if (!QOSAddSocketToFlow(hQoS, static_cast< SOCKET >(qtsSocket->socketDescriptor()), nullptr, QOSTrafficTypeAudioVideo,
 							QOS_NON_ADAPTIVE_FLOW, reinterpret_cast< PQOS_FLOWID >(&dwFlow)))
 		qWarning("Connection: Failed to add flow to QOS");
 #elif defined(Q_OS_UNIX)

@@ -353,9 +353,9 @@ static IMMDevice *openNamedOrDefaultDevice(const QString &name, EDataFlow dataFl
 	// Try to find a device pointer for |name|.
 	if (!name.isEmpty()) {
 		std::vector< wchar_t > devname;
-		devname.resize(name.length() + 1);
-		int len      = name.toWCharArray(devname.data());
-		devname[len] = 0;
+		devname.resize(static_cast< std::size_t >(name.length()) + 1);
+		const int len                            = static_cast< int >(name.toWCharArray(devname.data()));
+		devname[static_cast< std::size_t >(len)] = 0;
 		hr           = pEnumerator->GetDevice(devname.data(), &pDevice);
 		if (FAILED(hr)) {
 			qWarning("WASAPI: Failed to open selected device %s %ls (df=%d, e=%d, hr=0x%08lx), falling back to default",
@@ -465,10 +465,10 @@ void WASAPIInput::run() {
 			ZeroMemory(&wfe, sizeof(wfe));
 			wfe.Format.cbSize          = 0;
 			wfe.Format.wFormatTag      = WAVE_FORMAT_PCM;
-			wfe.Format.nChannels       = channels;
+			wfe.Format.nChannels       = static_cast< WORD >(channels);
 			wfe.Format.nSamplesPerSec  = 48000;
 			wfe.Format.wBitsPerSample  = 16;
-			wfe.Format.nBlockAlign     = wfe.Format.nChannels * wfe.Format.wBitsPerSample / 8;
+			wfe.Format.nBlockAlign     = static_cast< WORD >(wfe.Format.nChannels * wfe.Format.wBitsPerSample / 8);
 			wfe.Format.nAvgBytesPerSec = wfe.Format.nBlockAlign * wfe.Format.nSamplesPerSec;
 
 			micpwfxe = &wfe;
@@ -962,7 +962,7 @@ void WASAPIOutput::run() {
 		}
 		pwfx->nSamplesPerSec  = 48000;
 		pwfx->wBitsPerSample  = 16;
-		pwfx->nBlockAlign     = pwfx->nChannels * pwfx->wBitsPerSample / 8;
+		pwfx->nBlockAlign     = static_cast< WORD >(pwfx->nChannels * pwfx->wBitsPerSample / 8);
 		pwfx->nAvgBytesPerSec = pwfx->nBlockAlign * pwfx->nSamplesPerSec;
 
 		hr = pAudioClient->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, want, want, pwfx,
@@ -989,7 +989,7 @@ void WASAPIOutput::run() {
 
 		if (!Global::get().s.bPositionalAudio) {
 			pwfx->nChannels       = 2;
-			pwfx->nBlockAlign     = pwfx->nChannels * pwfx->wBitsPerSample / 8;
+			pwfx->nBlockAlign     = static_cast< WORD >(pwfx->nChannels * pwfx->wBitsPerSample / 8);
 			pwfx->nAvgBytesPerSec = pwfx->nBlockAlign * pwfx->nSamplesPerSec;
 
 			if (pwfxe) {

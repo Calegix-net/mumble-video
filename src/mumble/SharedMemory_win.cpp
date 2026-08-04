@@ -63,7 +63,7 @@ SharedMemory2::SharedMemory2(QObject *p, unsigned int minsize, const QString &me
 			if ((VirtualQuery(a_ucData, &mbi, sizeof(mbi)) == 0) || (mbi.RegionSize < minsize)) {
 				qWarning() << "SharedMemory2: Memory too small" << qsName << mbi.RegionSize;
 			} else {
-				uiSize = mbi.RegionSize;
+				uiSize = static_cast< unsigned int >(mbi.RegionSize);
 				return;
 			}
 		}

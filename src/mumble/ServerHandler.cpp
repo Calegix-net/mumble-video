@@ -1020,7 +1020,8 @@ void ServerHandler::serverConnectionConnected() {
 				addr.sin_addr.s_addr = htonl(qhaRemote.toIPv4Address());
 
 				dwFlowUDP = 0;
-				if (!QOSAddSocketToFlow(hQoS, qusUdp->socketDescriptor(), reinterpret_cast< sockaddr * >(&addr),
+				if (!QOSAddSocketToFlow(hQoS, static_cast< SOCKET >(qusUdp->socketDescriptor()),
+										reinterpret_cast< sockaddr * >(&addr),
 										QOSTrafficTypeVoice, QOS_NON_ADAPTIVE_FLOW,
 										reinterpret_cast< PQOS_FLOWID >(&dwFlowUDP)))
 					qWarning("ServerHandler: Failed to add UDP to QOS");

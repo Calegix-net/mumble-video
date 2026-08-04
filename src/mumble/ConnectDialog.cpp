@@ -680,7 +680,7 @@ QMimeData *ServerItem::toMimeData(const QString &name, const QString &host, unsi
 	ZeroMemory(&fgda, sizeof(fgda));
 	fgda.cItems              = 1;
 	fgda.fgd[0].dwFlags      = FD_LINKUI | FD_FILESIZE;
-	fgda.fgd[0].nFileSizeLow = contents.length();
+	fgda.fgd[0].nFileSizeLow = static_cast< DWORD >(contents.length());
 	strcpy_s(fgda.fgd[0].cFileName, MAX_PATH, urlname.toLocal8Bit().constData());
 	mime->setData(QLatin1String("FileGroupDescriptor"),
 				  QByteArray(reinterpret_cast< const char * >(&fgda), sizeof(fgda)));
@@ -689,7 +689,7 @@ QMimeData *ServerItem::toMimeData(const QString &name, const QString &host, unsi
 	ZeroMemory(&fgdw, sizeof(fgdw));
 	fgdw.cItems              = 1;
 	fgdw.fgd[0].dwFlags      = FD_LINKUI | FD_FILESIZE;
-	fgdw.fgd[0].nFileSizeLow = contents.length();
+	fgdw.fgd[0].nFileSizeLow = static_cast< DWORD >(contents.length());
 	wcscpy_s(fgdw.fgd[0].cFileName, MAX_PATH, urlname.toStdWString().c_str());
 	mime->setData(QLatin1String("FileGroupDescriptorW"),
 				  QByteArray(reinterpret_cast< const char * >(&fgdw), sizeof(fgdw)));

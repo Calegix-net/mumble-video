@@ -94,9 +94,9 @@ static void enableCrashOnCrashes() {
 
 	HMODULE kernel32 = LoadLibrary(L"kernel32.dll");
 
-	tGetPolicy pGetPolicy = (tGetPolicy) GetProcAddress(kernel32, "GetProcessUserModeExceptionPolicy");
+	tGetPolicy pGetPolicy = reinterpret_cast< tGetPolicy >(reinterpret_cast< void * >(GetProcAddress(kernel32, "GetProcessUserModeExceptionPolicy")));
 
-	tSetPolicy pSetPolicy = (tSetPolicy) GetProcAddress(kernel32, "SetProcessUserModeExceptionPolicy");
+	tSetPolicy pSetPolicy = reinterpret_cast< tSetPolicy >(reinterpret_cast< void * >(GetProcAddress(kernel32, "SetProcessUserModeExceptionPolicy")));
 
 	if (pGetPolicy && pSetPolicy) { // Only available as of Vista SP2 / Win7 SP1
 		DWORD dwFlags;
@@ -115,7 +115,7 @@ BOOL SetHeapOptions() {
 		return FALSE;
 
 	typedef BOOL(WINAPI * HSI)(HANDLE, HEAP_INFORMATION_CLASS, PVOID, SIZE_T);
-	HSI pHsi = (HSI) GetProcAddress(hLib, "HeapSetInformation");
+	HSI pHsi = reinterpret_cast< HSI >(reinterpret_cast< void * >(GetProcAddress(hLib, "HeapSetInformation")));
 	if (!pHsi) {
 		FreeLibrary(hLib);
 		return FALSE;
@@ -260,7 +260,7 @@ DWORD WinVerifySslCert(const QByteArray &cert) {
 	DWORD errorStatus = std::numeric_limits< DWORD >::max();
 
 	PCCERT_CONTEXT certContext = CertCreateCertificateContext(
-		X509_ASN_ENCODING, reinterpret_cast< const BYTE * >(cert.constData()), cert.size());
+		X509_ASN_ENCODING, reinterpret_cast< const BYTE * >(cert.constData()), static_cast< DWORD >(cert.size()));
 	if (!certContext) {
 		return errorStatus;
 	}

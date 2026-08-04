@@ -642,6 +642,13 @@ if(WIN32)
 	# to include plain guiddef.h without having to worry about side-effects.
 	set_source_files_properties("WinGUIDs.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
 
+	if(NOT MSVC)
+		# CMake's Boost module defaults to the static libraries for Windows targets, which is right for the
+		# MSVC build but not for a MinGW cross-build: the distribution packages ship import libraries only,
+		# and the search fails on a .a that was never built.
+		set(Boost_USE_STATIC_LIBS OFF)
+	endif()
+
 	find_pkg(Boost
 		COMPONENTS
 			system
@@ -681,12 +688,20 @@ if(WIN32)
 			Boost::thread
 	)
 
+	# Named without the .lib suffix so both toolchains resolve them: MSVC takes the bare name and MinGW
+	# turns it into -lname. Spelling them as .lib makes CMake treat them as literal file paths, which no
+	# cross-build has.
 	target_link_libraries(mumble_client_object_lib
 		PUBLIC
-			dbghelp.lib
-			dxguid.lib
-			hid.lib
-			wintrust.lib
+			dbghelp
+			dxguid
+			hid
+			wintrust
+			# CertCreateCertificateContext and friends (os_win.cpp), and SHStrDupW. The MSVC build never
+			# had to name these because the Windows SDK headers request them with #pragma comment(lib),
+			# which MinGW does not honour.
+			crypt32
+			shlwapi
 	)
 else()
 	target_sources(mumble_client_object_lib PRIVATE "SharedMemory_unix.cpp")

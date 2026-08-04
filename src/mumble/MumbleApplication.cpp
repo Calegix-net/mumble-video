@@ -72,7 +72,7 @@ bool MumbleApplication::nativeEventFilter(const QByteArray &, void *message, qin
 			// We don't care about GIDC_ARRIVAL because we add a device only when we receive input from it.
 			if (msg->wParam == GIDC_REMOVAL) {
 				// The device is not available anymore, free resources allocated for it.
-				gsw->deviceRemoved(reinterpret_cast< const HANDLE >(msg->lParam));
+				gsw->deviceRemoved(reinterpret_cast< HANDLE >(msg->lParam));
 			}
 	}
 

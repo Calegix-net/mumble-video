@@ -43,7 +43,7 @@ void TextToSpeechPrivate::say(const QString &text) {
 
 void TextToSpeechPrivate::setVolume(int volume) {
 	if (pVoice)
-		pVoice->SetVolume(volume);
+		pVoice->SetVolume(static_cast< USHORT >(volume));
 }
 
 TextToSpeech::TextToSpeech(QObject *p) : QObject(p) {

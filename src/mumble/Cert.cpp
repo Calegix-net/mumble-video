@@ -521,11 +521,11 @@ QByteArray CertWizard::exportCert(const Settings::KeyPair &kp) {
 	QByteArray qba;
 
 	p    = reinterpret_cast< const unsigned char * >(key.constData());
-	pkey = d2i_AutoPrivateKey(nullptr, &p, key.length());
+	pkey = d2i_AutoPrivateKey(nullptr, &p, static_cast< long >(key.length()));
 
 	if (pkey) {
 		p    = reinterpret_cast< const unsigned char * >(crt.constData());
-		x509 = d2i_X509(nullptr, &p, crt.length());
+		x509 = d2i_X509(nullptr, &p, static_cast< long >(crt.length()));
 
 		if (x509 && X509_check_private_key(x509, pkey)) {
 			X509_keyid_set1(x509, nullptr, 0);
@@ -540,7 +540,7 @@ QByteArray CertWizard::exportCert(const Settings::KeyPair &kp) {
 				crt     = cert.toDer();
 				p       = reinterpret_cast< const unsigned char * >(crt.constData());
 
-				c = d2i_X509(nullptr, &p, crt.length());
+				c = d2i_X509(nullptr, &p, static_cast< long >(crt.length()));
 				if (c)
 					sk_X509_push(certs, c);
 			}
