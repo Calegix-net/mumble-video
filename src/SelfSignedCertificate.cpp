@@ -147,7 +147,11 @@ bool SelfSignedCertificate::generate(CertificateType certificateType, QString cl
 		}
 	}
 
-	CHECK(X509_sign(x509, pkey, EVP_sha1()));
+	// SHA-256, not SHA-1. Distributions with a strict system crypto policy -- Fedora and RHEL among them
+	// -- refuse to produce a SHA-1 signature at all, so this call simply failed and the server came up
+	// with no certificate and rejected every TLS connection with "no suitable signature algorithm". SHA-1
+	// certificates have in any case been rejected by TLS implementations for years.
+	CHECK(X509_sign(x509, pkey, EVP_sha256()));
 
 	{
 		QByteArray crt;
