@@ -76,4 +76,15 @@ exec "${here}/bin/mumble" "$@"
 LAUNCHER
 chmod +x "${OUT_DIR}/mumble"
 
+# Stamped so a published archive says which commit produced it. A bundle was once built from a stale
+# tree and shipped as new - byte-identical to the previous one - and nothing in it could have revealed
+# that. The binary's own checksum is recorded for the same reason.
+{
+    echo "commit:      $(git -C "$(dirname "$0")/.." rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "describe:    $(git -C "$(dirname "$0")/.." describe --always --dirty 2>/dev/null || echo unknown)"
+    echo "built:       $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "mumble.sha256: $(sha256sum "${OUT_DIR}/bin/mumble" | cut -d" " -f1)"
+} > "${OUT_DIR}/BUILD-INFO.txt"
+
+cat "${OUT_DIR}/BUILD-INFO.txt"
 echo "bundled $(find "${OUT_DIR}/lib" -name '*.so*' | wc -l) libraries, $(du -sh "${OUT_DIR}" | cut -f1) total"
