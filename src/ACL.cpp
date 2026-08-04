@@ -126,8 +126,13 @@ QFlags< ChanACL::Perm > ChanACL::effectivePermissions(ServerUser *p, Channel *ch
 		ch = ch->cParent;
 	}
 
-	// Default permissions
-	Permissions def = Traverse | Enter | Speak | Whisper | TextMessage | Listen;
+	// Default permissions.
+	//
+	// New privileges are not granted implicitly: anything absent from this set is denied everywhere
+	// until an ACL grants it. Video is included so that the feature works on a server whose ACLs nobody
+	// has touched, matching how Speak and TextMessage are treated, and an operator who does not want it
+	// denies it explicitly.
+	Permissions def = Traverse | Enter | Speak | Whisper | TextMessage | Listen | ShareVideo | ReceiveVideo;
 
 	granted = def;
 
@@ -314,6 +319,14 @@ QString ChanACL::whatsThis(Perm p) {
 		case Listen:
 			return tr("This represents the permission to use the listen-feature allowing to listen to a channel "
 					  "without being in it.");
+		case ShareVideo:
+			return tr("This represents the permission to share a camera or a screen with the channel. It is separate "
+					  "from the speak privilege, so that a user may be allowed to talk without being allowed to "
+					  "broadcast their screen.");
+		case ReceiveVideo:
+			return tr("This represents the permission to watch video shared in the channel. Without it a user may "
+					  "still be present and hear the conversation, but the server will refuse to send them anyone's "
+					  "camera or screen.");
 		default:
 			break;
 	}
@@ -369,6 +382,10 @@ QString ChanACL::permName(Perm p) {
 			return tr("Register Self");
 		case Listen:
 			return tr("Listen");
+		case ShareVideo:
+			return tr("Share video");
+		case ReceiveVideo:
+			return tr("Receive video");
 		default:
 			break;
 	}

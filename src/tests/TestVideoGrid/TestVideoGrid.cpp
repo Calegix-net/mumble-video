@@ -1,0 +1,333 @@
+// Copyright The Mumble Developers. All rights reserved.
+// Use of this source code is governed by a BSD-style license
+// that can be found in the LICENSE file at the root of the
+// Mumble source tree or at <https://www.mumble.info/LICENSE>.
+
+// The last hop: tiles produced by the real encoder, painted into the real display surface.
+//
+// Together with TestVideoPipeline this closes the loop from a captured frame to what a viewer actually
+// sees, so a mistake in tile placement shows up as a wrong picture here rather than as a bug report.
+
+#include "VideoEncoder.h"
+#include "VideoGrid.h"
+#include "VideoSource.h"
+
+#include <QObject>
+#include <QSignalSpy>
+#include <QtGui/QImage>
+#include <QtGui/QPainter>
+#include <QtTest>
+
+#include <cstdint>
+#include <vector>
+
+namespace {
+
+constexpr unsigned int SENDER = 5;
+constexpr unsigned int STREAM = 1;
+
+/// Feeds every tile of one encoded frame into the grid, as the network path would.
+void deliverFrame(VideoGrid &grid, const std::vector< EncodedVideoUnit > &units, unsigned int sender,
+				  unsigned int stream) {
+	for (const EncodedVideoUnit &unit : units) {
+		grid.onVideoUnitReceived(
+			sender, stream, unit.header.x, unit.header.y,
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
+	}
+}
+
+/// Mean absolute per-channel difference between two images of the same size, 0-255.
+double meanDifference(const QImage &a, const QImage &b) {
+	if (a.size() != b.size() || a.isNull()) {
+		return 255.0;
+	}
+
+	const QImage left  = a.convertToFormat(QImage::Format_RGB32);
+	const QImage right = b.convertToFormat(QImage::Format_RGB32);
+
+	double total = 0.0;
+
+	for (int y = 0; y < left.height(); ++y) {
+		for (int x = 0; x < left.width(); ++x) {
+			const QRgb p = left.pixel(x, y);
+			const QRgb q = right.pixel(x, y);
+
+			total += std::abs(qRed(p) - qRed(q)) + std::abs(qGreen(p) - qGreen(q)) + std::abs(qBlue(p) - qBlue(q));
+		}
+	}
+
+	return total / (left.width() * left.height() * 3.0);
+}
+
+} // namespace
+
+class TestVideoGrid : public QObject {
+	Q_OBJECT
+private slots:
+	void anEncodedFrameIsReassembledIntoThePicture();
+	void aPartialFrameShowsWhatArrived();
+	void surfaceGrowthKeepsWhatWasAlreadyDrawn();
+	void aNewStreamFromTheSameSenderStartsFresh();
+	void sendersAppearAndDisappear();
+	void theSenderCountIsCapped();
+	void tilesOutsideTheSurfaceBoundAreRefused();
+	void nonJpegDataIsRefused();
+	void itPaintsWithoutCrashing();
+};
+
+void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
+	SyntheticVideoSource source(640, 480);
+	// A smooth gradient rather than the default noise. Noise is incompressible, so JPEG mangles it and a
+	// fidelity comparison would measure the codec rather than the tiling. A gradient varies across both
+	// axes, so a tile drawn at the wrong offset still shows up plainly, while quantisation error stays
+	// small enough for the threshold below to mean something.
+	source.setChangeRatio(0);
+
+	TiledImageEncoder encoder;
+
+	const QImage original = source.render(0);
+
+	VideoGrid grid;
+	deliverFrame(grid, encoder.encode(original, STREAM, 1, 1), SENDER, STREAM);
+
+	const QImage shown = grid.surfaceFor(SENDER);
+
+	QCOMPARE(shown.size(), original.size());
+
+	// JPEG is lossy, so this cannot be an exact comparison. A mean difference of a level or two is normal
+	// for quality 80 on smooth content; a tile placed at the wrong offset runs into the tens.
+	const double difference = meanDifference(original, shown);
+
+	QVERIFY2(difference < 4.0, qPrintable(QStringLiteral("mean difference %1").arg(difference)));
+
+	// And prove the threshold is actually discriminating, or this test would pass whatever the grid drew.
+	// Mirroring rather than moving a single tile: the gradient varies along x, so a mirror changes almost
+	// every pixel, whereas displacing one 128x128 tile touches only five percent of a 640x480 frame and
+	// barely moves the mean at all.
+	QVERIFY(meanDifference(original, shown.flipped(Qt::Horizontal)) > 4.0);
+}
+
+void TestVideoGrid::aPartialFrameShowsWhatArrived() {
+	SyntheticVideoSource source(640, 480);
+	TiledImageEncoder encoder;
+
+	std::vector< EncodedVideoUnit > units = encoder.encode(source.render(0), STREAM, 1, 1);
+	QVERIFY(units.size() > 4);
+
+	// Drop half the tiles, as loss would. The surface must still show the ones that made it: this is the
+	// property that makes independently decodable tiles worth the overhead.
+	units.resize(units.size() / 2);
+
+	VideoGrid grid;
+	deliverFrame(grid, units, SENDER, STREAM);
+
+	const QImage shown = grid.surfaceFor(SENDER);
+	QVERIFY(!shown.isNull());
+
+	// Something was drawn, rather than the surface staying blank waiting for a complete frame.
+	bool anyNonBlack = false;
+
+	for (int y = 0; y < shown.height() && !anyNonBlack; ++y) {
+		for (int x = 0; x < shown.width(); ++x) {
+			if (shown.pixel(x, y) != qRgb(0, 0, 0)) {
+				anyNonBlack = true;
+				break;
+			}
+		}
+	}
+
+	QVERIFY(anyNonBlack);
+}
+
+void TestVideoGrid::surfaceGrowthKeepsWhatWasAlreadyDrawn() {
+	VideoGrid grid;
+
+	QImage first(64, 64, QImage::Format_RGB32);
+	first.fill(QColor(200, 30, 40));
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(first.save(&buffer, "JPEG", 95));
+	buffer.close();
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(64, 64));
+
+	// A tile further right and down forces the surface to grow.
+	grid.onVideoUnitReceived(SENDER, STREAM, 64, 64, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+
+	// And the first tile is still there. Reallocating blank would make a resolution change flash black.
+	const QRgb corner = grid.surfaceFor(SENDER).pixel(10, 10);
+	QVERIFY(qRed(corner) > 150);
+	QVERIFY(qGreen(corner) < 100);
+}
+
+void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
+	VideoGrid grid;
+
+	QImage big(128, 128, QImage::Format_RGB32);
+	big.fill(Qt::white);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(big.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	grid.onVideoUnitReceived(SENDER, 1, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+
+	// A different stream id means a different source or different dimensions, so the old picture is not
+	// part of the same image any more.
+	QImage small(32, 32, QImage::Format_RGB32);
+	small.fill(Qt::white);
+
+	QByteArray smallEncoded;
+	QBuffer smallBuffer(&smallEncoded);
+	smallBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(small.save(&smallBuffer, "JPEG", 90));
+	smallBuffer.close();
+
+	grid.onVideoUnitReceived(SENDER, 2, 0, 0, smallEncoded);
+	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(32, 32));
+}
+
+void TestVideoGrid::sendersAppearAndDisappear() {
+	VideoGrid grid;
+	QSignalSpy spy(&grid, &VideoGrid::senderCountChanged);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	grid.onVideoUnitReceived(1, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(2, STREAM, 0, 0, encoded);
+	QCOMPARE(grid.senderCount(), 2);
+	QCOMPARE(spy.count(), 2);
+
+	// Further tiles from a known sender are not a new arrival.
+	grid.onVideoUnitReceived(1, STREAM, 0, 0, encoded);
+	QCOMPARE(spy.count(), 2);
+
+	grid.removeSender(1);
+	QCOMPARE(grid.senderCount(), 1);
+	QCOMPARE(spy.count(), 3);
+
+	// Removing someone who is not there changes nothing.
+	grid.removeSender(99);
+	QCOMPARE(spy.count(), 3);
+
+	grid.clear();
+	QCOMPARE(grid.senderCount(), 0);
+	QCOMPARE(spy.count(), 4);
+}
+
+void TestVideoGrid::theSenderCountIsCapped() {
+	VideoGrid grid;
+
+	QImage tile(16, 16, QImage::Format_RGB32);
+	tile.fill(Qt::blue);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	for (unsigned int session = 1; session <= VideoGrid::MAX_SENDERS + 10; ++session) {
+		grid.onVideoUnitReceived(session, STREAM, 0, 0, encoded);
+	}
+
+	QCOMPARE(grid.senderCount(), VideoGrid::MAX_SENDERS);
+}
+
+void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
+	VideoGrid grid;
+
+	QImage tile(16, 16, QImage::Format_RGB32);
+	tile.fill(Qt::red);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	// The offset comes off the network. A tile claiming to belong far outside any real frame must not
+	// make the client allocate a surface to match.
+	grid.onVideoUnitReceived(SENDER, STREAM, 100000, 100000, encoded);
+
+	QCOMPARE(grid.senderCount(), 0);
+	QVERIFY(grid.surfaceFor(SENDER).isNull());
+
+	// Exactly at the boundary is still refused, since the tile would extend past it.
+	grid.onVideoUnitReceived(SENDER, STREAM, static_cast< unsigned int >(VideoGrid::MAX_SURFACE_WIDTH), 0, encoded);
+	QCOMPARE(grid.senderCount(), 0);
+}
+
+void TestVideoGrid::nonJpegDataIsRefused() {
+	VideoGrid grid;
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, QByteArray("not an image at all"));
+	QCOMPARE(grid.senderCount(), 0);
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, QByteArray());
+	QCOMPARE(grid.senderCount(), 0);
+
+	// A PNG is a valid image but not what the codec says it is. Decoding is pinned to JPEG so that a
+	// sender cannot choose which of Qt's decoders to hand its bytes to.
+	QImage png(16, 16, QImage::Format_RGB32);
+	png.fill(Qt::yellow);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(png.save(&buffer, "PNG"));
+	buffer.close();
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	QCOMPARE(grid.senderCount(), 0);
+}
+
+void TestVideoGrid::itPaintsWithoutCrashing() {
+	SyntheticVideoSource source(320, 240);
+	TiledImageEncoder encoder;
+
+	VideoGrid grid;
+	grid.resize(800, 600);
+
+	for (unsigned int sender = 1; sender <= 5; ++sender) {
+		deliverFrame(grid, encoder.encode(source.render(sender), STREAM, sender, 1), sender, STREAM);
+		encoder.reset();
+	}
+
+	QCOMPARE(grid.senderCount(), 5);
+
+	// Render into an image rather than showing a window, so this works on a headless machine.
+	QImage target(800, 600, QImage::Format_RGB32);
+	grid.render(&target);
+
+	// The grid drew something other than its background.
+	bool anyNonBlack = false;
+
+	for (int y = 0; y < target.height() && !anyNonBlack; y += 4) {
+		for (int x = 0; x < target.width(); x += 4) {
+			if (target.pixel(x, y) != qRgb(0, 0, 0)) {
+				anyNonBlack = true;
+				break;
+			}
+		}
+	}
+
+	QVERIFY(anyNonBlack);
+}
+
+QTEST_MAIN(TestVideoGrid)
+#include "TestVideoGrid.moc"

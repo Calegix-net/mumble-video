@@ -30,6 +30,8 @@ add_library(mumble_server_object_lib OBJECT
 	"PBKDF2.h"
 	"Register.cpp"
 	"RPC.cpp"
+	"VideoRouter.cpp"
+	"VideoRouter.h"
 	"Server.cpp"
 	"Server.h"
 	"ServerUser.cpp"

@@ -24,6 +24,7 @@
 #include "Timer.h"
 #include "User.h"
 #include "Version.h"
+#include "VideoRouter.h"
 #include "VolumeAdjustment.h"
 
 #include "database/ConnectionParameter.h"
@@ -182,6 +183,30 @@ public:
 	bool bValid;
 
 	ChannelListenerManager m_channelListenerManager;
+
+	/// Decides who receives whose video, and enforces the ShareVideo/ReceiveVideo privileges. Constructed
+	/// with callbacks into this server's ACL lookups so that the routing logic itself stays independent
+	/// of the permission model.
+	VideoRouter m_videoRouter;
+
+	/// Whether the user may share video into the channel they are currently in.
+	bool mayShareVideo(unsigned int senderSession);
+
+	/// Whether `subscriberSession` may receive video from `senderSession` right now. This is evaluated
+	/// against the *sender's current channel*, so a sender moving into a channel the subscriber cannot
+	/// enter ends the subscription just as surely as the subscriber moving out of it.
+	bool mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession);
+
+	/// Drops video subscriptions that the current ACLs no longer permit, telling each affected client
+	/// that its subscription ended.
+	void revalidateVideoSubscriptions();
+
+	/// Decrypts one received video datagram, stamps the sender, and re-encrypts it to each permitted
+	/// subscriber. Runs on the UDP thread only.
+	void relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagram, std::size_t len);
+
+	/// Scratch message for relayVideo, reused to keep the relay off the allocator. UDP-thread only.
+	MumbleUDP::Video m_relayedVideo;
 
 
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Server > m_udpDecoder;

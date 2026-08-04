@@ -14,6 +14,7 @@
 #	include "win.h"
 #endif
 
+#include "VideoTransport.h"
 #include "crypto/CryptState.h"
 
 #include <QtCore/QElapsedTimer>
@@ -78,6 +79,11 @@ public:
 	QMutex qmCrypt;
 #endif
 	std::unique_ptr< CryptState > csCrypt;
+
+	/// Encryption for the video channel. Separate from csCrypt because video needs its own sequence
+	/// space; see VideoTransport.h. Keyed by deriving from the same session key, so it needs no
+	/// additional exchange.
+	Mumble::Protocol::VideoCryptState videoCrypt;
 	/// Returns the peer's chain of digital certificates, starting with the peer's immediate certificate
 	/// and ending with the CA's certificate.
 	QList< QSslCertificate > peerCertificateChain() const;

@@ -668,6 +668,12 @@ namespace Protocol {
 					return decodeAudio_protobuf(data.subspan(1, data.size() - 1));
 				case UDPMessageType::Ping:
 					return decodePing_protobuf(data.subspan(1, data.size() - 1));
+				case UDPMessageType::Video:
+					// Video is not implemented yet. The message type is registered so that the wire format is
+					// fixed, but there is no decoder for it, so such packets are treated as invalid. Note that
+					// this is not merely a stub: a peer must never send video to a peer that has not advertised
+					// FEATURE_VIDEO, so receiving one here always indicates a broken or malicious sender.
+					return false;
 			}
 
 			// Unknown package type

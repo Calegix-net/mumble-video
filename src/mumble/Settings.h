@@ -277,9 +277,26 @@ struct Settings {
 	IdleAction iaeIdleAction         = Nothing;
 	bool bUndoIdleActionUponActivity = false;
 
-	VADSource vsVAD                     = Amplitude;
-	float fVADmin                       = 0.80f;
-	float fVADmax                       = 0.98f;
+	VADSource vsVAD = Amplitude;
+	float fVADmin   = 0.80f;
+	float fVADmax   = 0.98f;
+	// Video settings. Deliberately mirroring the audio ones: a device, a codec, and the quality knobs
+	// that codec actually has.
+	QString qsVideoDevice = {};
+	// 0 = VP8 (cameras), 1 = TiledImage (screen content).
+	int videoCodec      = 0;
+	int iVideoWidth     = 640;
+	int iVideoHeight    = 480;
+	int iVideoFramerate = 30;
+	/// VP8 target bitrate, kbit/s.
+	int iVideoBitrate = 800;
+	/// TiledImage JPEG quality, 1-100.
+	int iVideoTileQuality = 80;
+	/// TiledImage tile edge length in pixels.
+	int iVideoTileSize = 128;
+	/// Whether the video wizard has been shown once already.
+	bool videoWizardShown = false;
+
 	int iFramesPerPacket                = 2;
 	QString qsAudioInput                = {};
 	QString qsAudioOutput               = {};

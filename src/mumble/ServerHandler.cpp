@@ -232,10 +232,12 @@ void ServerHandler::setProtocolVersion(Version::full_t version) {
 
 void ServerHandler::udpReady() {
 	while (qusUdp->hasPendingDatagrams()) {
-		char encrypted[Mumble::Protocol::MAX_UDP_PACKET_SIZE];
+		// Sized for the larger of the two media channels, since which one a datagram belongs to is only
+		// known after it has been read.
+		char encrypted[Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE];
 		unsigned int buflen = static_cast< unsigned int >(qusUdp->pendingDatagramSize());
 
-		if (buflen > Mumble::Protocol::MAX_UDP_PACKET_SIZE) {
+		if (buflen > Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE) {
 			// Discard datagrams that exceed our buffer's size as we'd have to trim them down anyways and it is not very
 			// likely that the data is valid in the trimmed down form.
 			// As we're using a maxSize of 0 it is okay to pass nullptr as the data buffer. Qt's docs (5.15) ensures
@@ -261,13 +263,32 @@ void ServerHandler::udpReady() {
 		if (buflen < 5)
 			continue;
 
+		// Media datagrams carry their channel in the clear, because audio and video hold separate crypt
+		// states and neither can be decrypted with the other's.
+		if (buflen < 1) {
+			continue;
+		}
+
+		if (static_cast< Mumble::Protocol::byte >(encrypted[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
+			handleVideoDatagram(reinterpret_cast< const Mumble::Protocol::byte * >(encrypted), buflen);
+
+			continue;
+		}
+
+		if (static_cast< Mumble::Protocol::byte >(encrypted[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+			continue;
+		}
+
+		// Past the channel byte is what the audio crypt state expects.
+		const char *audio = encrypted + 1;
+		buflen -= 1;
+
 		std::span< Mumble::Protocol::byte > buffer = m_udpDecoder.getBuffer();
 
 		// 4 bytes is the overhead of the encryption
 		assert(buffer.size() >= buflen - 4);
 
-		if (!connection->csCrypt->decrypt(reinterpret_cast< const unsigned char * >(encrypted), buffer.data(),
-										  buflen)) {
+		if (!connection->csCrypt->decrypt(reinterpret_cast< const unsigned char * >(audio), buffer.data(), buflen)) {
 			if (connection->csCrypt->tLastGood.elapsed() > std::chrono::seconds(5)) {
 				if (connection->csCrypt->tLastRequest.elapsed() > std::chrono::seconds(5)) {
 					connection->csCrypt->tLastRequest.restart();
@@ -295,6 +316,13 @@ void ServerHandler::udpReady() {
 					handleVoicePacket(audioData);
 					break;
 				};
+				case Mumble::Protocol::UDPMessageType::Video: {
+					// Unreachable: UDPDecoder::decode returns false for Video, so getMessageType() never
+					// yields it. Asserted rather than logged so that a hostile server cannot drive log output
+					// here. This is also where video reception will be implemented.
+					assert(false);
+					break;
+				};
 			}
 		}
 	}
@@ -317,8 +345,9 @@ void ServerHandler::handleVoicePacket(const Mumble::Protocol::AudioData &audioDa
 }
 
 void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) {
+	// One byte longer than the ciphertext: the audio channel byte goes in front of it.
 	static std::vector< unsigned char > crypto;
-	crypto.resize(static_cast< std::size_t >(len + 4));
+	crypto.resize(static_cast< std::size_t >(len + 5));
 
 	QMutexLocker qml(&qmUdp);
 
@@ -342,11 +371,96 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 		QApplication::postEvent(this,
 								new ServerHandlerMessageEvent(qba, Mumble::Protocol::TCPMessageType::UDPTunnel, true));
 	} else {
-		if (!connection->csCrypt->encrypt(reinterpret_cast< const unsigned char * >(data), crypto.data(),
+		crypto[0] = Mumble::Protocol::MEDIA_CHANNEL_AUDIO;
+
+		if (!connection->csCrypt->encrypt(reinterpret_cast< const unsigned char * >(data), crypto.data() + 1,
 										  static_cast< unsigned int >(len))) {
 			return;
 		}
-		qusUdp->writeDatagram(reinterpret_cast< const char * >(crypto.data()), len + 4, qhaRemote, usResolvedPort);
+		qusUdp->writeDatagram(reinterpret_cast< const char * >(crypto.data()), len + 5, qhaRemote, usResolvedPort);
+	}
+}
+
+void ServerHandler::sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload) {
+	ConnectionPtr connection(cConnection);
+
+	if (!connection || !connection->videoCrypt.isValid() || !qusUdp) {
+		return;
+	}
+
+	if (!bUdp) {
+		// The connection has fallen back to tunnelling audio over TCP, which means UDP is not getting
+		// through. Video would fare no better and would crowd out the control channel trying.
+		return;
+	}
+
+	const auto *begin = reinterpret_cast< const Mumble::Protocol::byte * >(payload.constData());
+
+	if (!m_videoFragmenter.fragment(
+			header, std::span< const Mumble::Protocol::byte >(begin, static_cast< std::size_t >(payload.size())))) {
+		// Only happens if the unit exceeds what a single unit may hold, which the encoder already avoids
+		// by re-quantising. Dropping it here would be silent, so it is worth knowing about.
+		qWarning("ServerHandler: Dropping oversized video unit of %lld bytes",
+				 static_cast< long long >(payload.size()));
+
+		return;
+	}
+
+	std::vector< Mumble::Protocol::byte > datagram;
+
+	for (const std::vector< Mumble::Protocol::byte > &packet : m_videoFragmenter.packets()) {
+		if (!connection->videoCrypt.encrypt(packet, datagram)) {
+			return;
+		}
+
+		qusUdp->writeDatagram(reinterpret_cast< const char * >(datagram.data()), static_cast< qint64 >(datagram.size()),
+							  qhaRemote, usResolvedPort);
+	}
+}
+
+void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, std::size_t len) {
+	ConnectionPtr connection(cConnection);
+
+	if (!connection || !connection->videoCrypt.isValid()) {
+		return;
+	}
+
+	std::vector< Mumble::Protocol::byte > plaintext;
+
+	if (connection->videoCrypt.decrypt(std::span< const Mumble::Protocol::byte >(datagram, len), plaintext)
+		!= Mumble::Protocol::VideoCryptState::Result::Ok) {
+		return;
+	}
+
+	if (plaintext.size() < 2
+		|| plaintext[0] != static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::Video)) {
+		return;
+	}
+
+	// The reassembler keys on an authenticated sender rather than on whatever the packet claims. On this
+	// side that identity is the one the server stamped: the server is the only party that can attribute a
+	// relayed packet, and it is already trusted to route them at all.
+	m_videoPeek.Clear();
+
+	if (!m_videoPeek.ParseFromArray(plaintext.data() + 1, static_cast< int >(plaintext.size() - 1))) {
+		return;
+	}
+
+	const std::uint32_t senderSession = m_videoPeek.sender_session();
+
+	if (senderSession == 0) {
+		// Unstamped, so unattributable. A conforming server always stamps.
+		return;
+	}
+
+	Mumble::Protocol::VideoUnit unit;
+
+	if (m_videoReassembler.processPacket(plaintext, senderSession,
+										 static_cast< std::uint64_t >(tTimestamp.elapsed().count()), unit)
+		== Mumble::Protocol::VideoReassemblyResult::Complete) {
+		emit videoUnitReceived(
+			unit.header.senderSession, unit.header.streamID, unit.header.x, unit.header.y,
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
 	}
 }
 
@@ -664,6 +778,10 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 		// send us packages via TCP but has now switched to UDP again and the first UDP packages arrive at the same time
 		// as the last TCP ones), we want to use a dedicated decoder for this (to make sure there is no concurrent
 		// access to the decoder's internal buffer).
+		// Note: when video is implemented, it has to be handled here as well as in the raw UDP path in
+		// ServerHandler::run. Forgetting this branch would silently disable video whenever media is
+		// tunnelled over TCP. For exactly the reason given just above, it also needs its own
+		// VideoReassembler instance, separate from the one the raw UDP path uses.
 		if (m_tcpTunnelDecoder.decode(
 				{ reinterpret_cast< const Mumble::Protocol::byte * >(ptr), static_cast< std::size_t >(qbaMsg.size()) })
 			&& m_tcpTunnelDecoder.getMessageType() == Mumble::Protocol::UDPMessageType::Audio) {

@@ -187,8 +187,11 @@ ACLEditor::ACLEditor(unsigned int channelid, const MumbleProto::ACL &mea, QWidge
 	def->bInherited = true;
 	def->iUserId    = -1;
 	def->qsGroup    = QLatin1String("all");
-	def->pAllow =
-		ChanACL::Traverse | ChanACL::Enter | ChanACL::Speak | ChanACL::Whisper | ChanACL::TextMessage | ChanACL::Listen;
+	// Video is granted by default alongside speaking, so that the feature works out of the box on a
+	// fresh server. An operator who wants it off denies it explicitly, which is the same posture the
+	// other media privileges take.
+	def->pAllow = ChanACL::Traverse | ChanACL::Enter | ChanACL::Speak | ChanACL::Whisper | ChanACL::TextMessage
+				  | ChanACL::Listen | ChanACL::ShareVideo | ChanACL::ReceiveVideo;
 	def->pDeny = (~def->pAllow) & ChanACL::All;
 
 	qlACLs << def;

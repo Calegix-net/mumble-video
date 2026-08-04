@@ -74,9 +74,16 @@ if(MSVC)
 	option(elevation "Set \"uiAccess=true\", required for global shortcuts to work with privileged applications. Requires the client's executable to be signed with a trusted code signing certificate." OFF)
 endif()
 
+# VP8, for camera video. Tiled JPEG has no temporal compression, which makes a camera cost tens of
+# megabits a second; VP8 predicts each frame from the last. This is a real third-party dependency, and on
+# the platforms that ship a static binary it is a packaging commitment rather than just a build flag.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
+
 find_pkg(Qt6
 	COMPONENTS
 		Concurrent
+		Multimedia
 		Sql
 		Svg
 		Widgets
@@ -90,6 +97,20 @@ set(MUMBLE_SOURCES
 	"Accessibility.h"
 	"ACLEditor.cpp"
 	"ACLEditor.h"
+	"VP8Codec.cpp"
+	"VP8Codec.h"
+	"VideoWizard.cpp"
+	"VideoWizard.h"
+	"VideoPreview.cpp"
+	"VideoPreview.h"
+	"VideoConfigDialog.cpp"
+	"VideoConfigDialog.h"
+	"VideoBandwidthProbe.cpp"
+	"VideoBandwidthProbe.h"
+	"VideoBroadcaster.cpp"
+	"VideoBroadcaster.h"
+	"CameraVideoSource.cpp"
+	"CameraVideoSource.h"
 	"ACLEditor.ui"
 	"API_v_1_x_x.cpp"
 	"API.h"
@@ -278,6 +299,12 @@ set(MUMBLE_SOURCES
 	"UserView.h"
 	"VersionCheck.cpp"
 	"VersionCheck.h"
+	"VideoEncoder.cpp"
+	"VideoEncoder.h"
+	"VideoGrid.cpp"
+	"VideoGrid.h"
+	"VideoSource.cpp"
+	"VideoSource.h"
 	"ViewCert.cpp"
 	"ViewCert.h"
 	"VoiceRecorder.cpp"
@@ -566,7 +593,9 @@ target_link_libraries(mumble_client_object_lib
 	PUBLIC
 		shared
 		utfcpp
+		PkgConfig::VPX
 		Qt6::Concurrent
+		Qt6::Multimedia
 		Qt6::Sql
 		Qt6::Svg
 		Qt6::Widgets

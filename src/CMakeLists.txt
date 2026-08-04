@@ -84,6 +84,8 @@ set(SHARED_SOURCES
 	"Timer.cpp"
 	"UnresolvedServerAddress.cpp"
 	"Version.cpp"
+	"VideoFragmentation.cpp"
+	"VideoTransport.cpp"
 	"VolumeAdjustment.cpp"
 
 	"crypto/CryptographicHash.cpp"
@@ -121,6 +123,8 @@ set(SHARED_HEADERS
 	"Timer.h"
 	"UnresolvedServerAddress.h"
 	"Version.h"
+	"VideoFragmentation.h"
+	"VideoTransport.h"
 	"VolumeAdjustment.h"
 
 	"crypto/CryptographicHash.h"

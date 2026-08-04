@@ -28,6 +28,7 @@
 #	include "OverlayClient.h"
 #endif
 #include "../SignalCurry.h"
+#include "CameraVideoSource.h"
 #include "ChannelListenerManager.h"
 #include "FailedConnectionDialog.h"
 #include "ListenerVolumeSlider.h"
@@ -56,6 +57,9 @@
 #include "UserModel.h"
 #include "Utils.h"
 #include "VersionCheck.h"
+#include "VideoBroadcaster.h"
+#include "VideoGrid.h"
+#include "VideoWizard.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
 #include "Global.h"
@@ -126,7 +130,9 @@ MainWindow::MainWindow(QWidget *p)
 	else
 		SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg"));
 #else
-	{ SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg")); }
+	{
+		SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg"));
+	}
 
 	// Set application icon except on MacOSX, where the window-icon
 	// shown in the title-bar usually serves as a draggable version of the
@@ -466,10 +472,140 @@ void MainWindow::createActions() {
 								   "Global Shortcut");
 }
 
+void MainWindow::setupVideoGrid() {
+	m_videoGrid = new VideoGrid(this);
+
+	m_videoDock = new QDockWidget(tr("Video"), this);
+	m_videoDock->setObjectName(QStringLiteral("qdwVideo"));
+	m_videoDock->setWidget(m_videoGrid);
+
+	addDockWidget(Qt::RightDockWidgetArea, m_videoDock);
+
+	// Hidden until somebody actually shares. A permanently empty black panel would be worse than no
+	// panel at all for the many users who never touch this.
+	m_videoDock->hide();
+
+	connect(m_videoGrid, &VideoGrid::senderCountChanged, this,
+			[this](int count) { m_videoDock->setVisible(count > 0); });
+}
+
+void MainWindow::setupVideoBroadcast() {
+	m_videoBroadcaster = new VideoBroadcaster(this);
+
+	m_shareCameraAction = new QAction(tr("Share &Camera"), this);
+	m_shareCameraAction->setCheckable(true);
+	m_shareCameraAction->setStatusTip(tr("Share your camera with this channel"));
+
+	qmSelf->addSeparator();
+	qmSelf->addAction(m_shareCameraAction);
+
+	// Beside the audio wizard, because it answers the same kind of question for the other medium.
+	m_videoWizardAction = new QAction(tr("&Video Wizard"), this);
+	m_videoWizardAction->setStatusTip(tr("Guided setup for sharing video"));
+	qmConfig->addAction(m_videoWizardAction);
+
+	connect(m_videoWizardAction, &QAction::triggered, this, &MainWindow::openVideoWizardDialog);
+
+	connect(m_shareCameraAction, &QAction::triggered, this, &MainWindow::toggleCameraShare);
+
+	// Keeps the menu item honest if capture stops on its own, for instance because the camera was
+	// unplugged.
+	connect(m_videoBroadcaster, &VideoBroadcaster::activeChanged, this,
+			[this](bool active) { m_shareCameraAction->setChecked(active); });
+
+	connect(m_videoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
+		Global::get().l->log(Log::Warning, tr("Camera sharing stopped: %1").arg(reason));
+	});
+
+	connect(m_videoBroadcaster, &VideoBroadcaster::unitReady, this,
+			[](const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload) {
+				if (Global::get().sh) {
+					Global::get().sh->sendVideoUnit(header, payload);
+				}
+			});
+}
+
+void MainWindow::toggleCameraShare(bool share) {
+	if (!m_videoBroadcaster || !Global::get().sh || !Global::get().sh->isRunning()) {
+		if (m_shareCameraAction) {
+			m_shareCameraAction->setChecked(false);
+		}
+
+		return;
+	}
+
+	if (!share) {
+		m_videoBroadcaster->stop();
+
+		// Announced before anything else, so receivers tear the picture down rather than leaving the last
+		// frame on screen.
+		MumbleProto::VideoState mpvs;
+		mpvs.set_stream_id(m_videoBroadcaster->streamID());
+		mpvs.set_active(false);
+		Global::get().sh->sendMessage(mpvs);
+
+		return;
+	}
+
+	// Honour the configured camera, falling back to the platform default if it has been unplugged since.
+	const Settings &settings = Global::get().s;
+
+	QCameraDevice camera;
+
+	for (const QCameraDevice &candidate : CameraVideoSource::availableCameras()) {
+		if (QString::fromUtf8(candidate.id()) == settings.qsVideoDevice) {
+			camera = candidate;
+			break;
+		}
+	}
+
+	if (camera.isNull()) {
+		camera = CameraVideoSource::defaultCamera();
+	}
+
+	if (camera.isNull()) {
+		Global::get().l->log(Log::Warning, tr("No camera is available."));
+		m_shareCameraAction->setChecked(false);
+
+		return;
+	}
+
+	m_videoBroadcaster->configure(settings.videoCodec, static_cast< unsigned int >(settings.iVideoBitrate),
+								  static_cast< unsigned int >(settings.iVideoFramerate), settings.iVideoTileQuality,
+								  settings.iVideoTileSize);
+
+	if (!m_videoBroadcaster->start(std::make_unique< CameraVideoSource >(camera))) {
+		Global::get().l->log(Log::Warning, tr("Could not start the camera."));
+		m_shareCameraAction->setChecked(false);
+
+		return;
+	}
+
+	// The announcement is what lets other clients subscribe; without it the server has no stream to route
+	// and the fragments would be dropped.
+	MumbleProto::VideoState mpvs;
+	mpvs.set_stream_id(m_videoBroadcaster->streamID());
+	mpvs.set_active(true);
+	mpvs.set_codec(settings.videoCodec == 1 ? MumbleProto::VideoState_Codec_TiledImage
+											: MumbleProto::VideoState_Codec_VP8);
+	mpvs.set_width(static_cast< unsigned int >(settings.iVideoWidth));
+	mpvs.set_height(static_cast< unsigned int >(settings.iVideoHeight));
+	mpvs.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
+	mpvs.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+	mpvs.set_source_name(u8(m_videoBroadcaster->describe()));
+
+	Global::get().sh->sendMessage(mpvs);
+
+	Global::get().l->log(Log::Information, tr("Sharing camera: %1").arg(m_videoBroadcaster->describe()));
+}
+
 void MainWindow::setupGui() {
 	updateWindowTitle();
 	setCentralWidget(qtvUsers);
 	setAcceptDrops(true);
+
+	setupVideoGrid();
+	setupVideoBroadcast();
 
 #ifdef Q_OS_MAC
 	QMenu *qmWindow = new QMenu(tr("&Window"), this);
@@ -3556,6 +3692,12 @@ void MainWindow::viewCertificate(bool) {
  * connection to the server is established but before the server Sync is complete.
  */
 void MainWindow::serverConnected() {
+	// Connected here rather than at construction because the ServerHandler is created per connection.
+	if (m_videoGrid && Global::get().sh) {
+		connect(Global::get().sh.get(), &ServerHandler::videoUnitReceived, m_videoGrid, &VideoGrid::onVideoUnitReceived,
+				Qt::QueuedConnection);
+	}
+
 	m_reconnectSoundBlocker.reset();
 
 	Global::get().uiSession    = 0;
@@ -3611,6 +3753,15 @@ void MainWindow::serverConnected() {
 }
 
 void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString reason) {
+	if (m_videoGrid) {
+		// Nobody's video survives the connection that carried it.
+		m_videoGrid->clear();
+	}
+
+	if (m_videoBroadcaster) {
+		m_videoBroadcaster->stop();
+	}
+
 	// clear ChannelListener
 	Global::get().channelListenerManager->clear();
 
@@ -4292,6 +4443,18 @@ void MainWindow::openConfigDialog() {
 	Global::get().inConfigUI = false;
 
 	delete dlg;
+}
+
+void MainWindow::openVideoWizardDialog() {
+	VideoWizard wizard(this);
+
+	// Marked as seen either way: somebody who cancels has decided against video, and re-prompting them
+	// on every launch would be the wrong reading of that.
+	if (wizard.exec() == QDialog::Accepted) {
+		wizard.applyTo(Global::get().s);
+	}
+
+	Global::get().s.videoWizardShown = true;
 }
 
 void MainWindow::openAudioWizardDialog() {

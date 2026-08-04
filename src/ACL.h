@@ -32,6 +32,14 @@ public:
 		TextMessage     = 0x200,
 		MakeTempChannel = 0x400,
 		Listen          = 0x800,
+		// Sending a video stream into the channel. Deliberately separate from Speak: screen sharing and
+		// camera are far more invasive, and far more expensive, than talking, so an operator has to be
+		// able to allow one without the other.
+		ShareVideo = 0x1000,
+		// Receiving a video stream from the channel. Separate from Enter so that the read side can be
+		// denied independently, and so that a subscription is authorised rather than granted merely by
+		// knowing a session id.
+		ReceiveVideo = 0x2000,
 
 		// Root channel only
 		Kick             = 0x10000,
@@ -42,7 +50,8 @@ public:
 
 		Cached = 0x8000000,
 		All = Write + Traverse + Enter + Speak + MuteDeafen + Move + MakeChannel + LinkChannel + Whisper + TextMessage
-			  + MakeTempChannel + Listen + Kick + Ban + Register + SelfRegister + ResetUserContent
+			  + MakeTempChannel + Listen + ShareVideo + ReceiveVideo + Kick + Ban + Register + SelfRegister
+			  + ResetUserContent
 	};
 
 	Q_DECLARE_FLAGS(Permissions, Perm)

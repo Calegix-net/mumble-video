@@ -35,6 +35,7 @@
 #include "UserModel.h"
 #include "Utils.h"
 #include "VersionCheck.h"
+#include "VideoGrid.h"
 #include "ViewCert.h"
 #include "crypto/CryptState.h"
 #include "crypto/CryptStateOCB2.h"
@@ -1080,6 +1081,10 @@ void MainWindow::msgCryptSetup(const MumbleProto::CryptSetup &msg) {
 		const std::string &key          = msg.key();
 		const std::string &client_nonce = msg.client_nonce();
 		const std::string &server_nonce = msg.server_nonce();
+		// The client takes the opposite role, so the two ends pick opposite nonce bases from the same
+		// derivation.
+		c->videoCrypt.deriveFromSessionKey(key, false);
+
 		if (!c->csCrypt->setKey(key, client_nonce, server_nonce)) {
 			qWarning("Messages: Cipher resync failed: Invalid key/nonce from the server!");
 		}
@@ -1296,6 +1301,56 @@ void MainWindow::msgPluginDataTransmission(const MumbleProto::PluginDataTransmis
 		Global::get().pluginManager->on_receiveData(sender, reinterpret_cast< const uint8_t * >(msgData.c_str()),
 													msgData.size(), msg.dataid().c_str());
 	}
+}
+
+/// Another client has started, updated or ended a video stream.
+///
+/// The server only relays this to clients that are permitted to watch, so an announcement arriving here
+/// means a subscription is worth attempting. Subscribing automatically keeps the common case -- someone
+/// shares, everyone sees it -- free of ceremony; the server still decides whether to honour it, and
+/// declines by replying with subscribe = false.
+void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
+	if (!msg.has_session()) {
+		return;
+	}
+
+	if (!msg.active()) {
+		if (m_videoGrid) {
+			m_videoGrid->removeSender(msg.session());
+		}
+
+		return;
+	}
+
+	if (!Global::get().sh) {
+		return;
+	}
+
+	MumbleProto::VideoSubscribe mpvs;
+	mpvs.set_session(msg.session());
+	mpvs.set_stream_id(msg.stream_id());
+	mpvs.set_subscribe(true);
+
+	Global::get().sh->sendMessage(mpvs);
+}
+
+/// The server's answer to a subscription request, or notice that an existing one has ended because the
+/// permissions behind it changed.
+void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
+	if (msg.subscribe() || !msg.has_session()) {
+		return;
+	}
+
+	// Subscription refused or withdrawn. Dropping the surface is what stops the user staring at a frozen
+	// last frame wondering whether the network died.
+	if (m_videoGrid) {
+		m_videoGrid->removeSender(msg.session());
+	}
+}
+
+/// A step of the server-mediated file transfer state machine. Not implemented yet - only the wire format
+/// exists. Silent for the same reason as msgVideoState.
+void MainWindow::msgFileTransfer(const MumbleProto::FileTransfer &) {
 }
 
 #undef ACTOR_INIT

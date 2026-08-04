@@ -9,9 +9,11 @@
 #include "AudioInput.h"
 #include "AudioOutput.h"
 #include "AudioWizard.h"
+#include "CameraVideoSource.h"
 #include "Cert.h"
 #include "Database.h"
 #include "DeveloperConsole.h"
+#include "VideoWizard.h"
 #ifdef Q_OS_WIN
 #	include "GlobalShortcut_win.h"
 #endif
@@ -846,6 +848,18 @@ int main(int argc, char **argv) {
 		wizard->exec();
 
 		Global::get().s.audioWizardShown = true;
+	}
+
+	// Only after audio, and only if a camera exists: prompting somebody with no camera to configure
+	// video would be pure noise. The wizard records that it has been shown even when cancelled.
+	if (!Global::get().s.videoWizardShown && !CameraVideoSource::availableCameras().isEmpty()) {
+		VideoWizard wizard(Global::get().mw);
+
+		if (wizard.exec() == QDialog::Accepted) {
+			wizard.applyTo(Global::get().s);
+		}
+
+		Global::get().s.videoWizardShown = true;
 	}
 
 	if (!CertWizard::validateCert(Global::get().s.kpCertificate)) {

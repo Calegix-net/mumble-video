@@ -23,3 +23,4 @@ disable_warnings_for_all_targets_in("${googlebenchmark_SOURCE_DIR}")
 
 add_subdirectory(protocol)
 add_subdirectory(AudioReceiverBuffer)
+add_subdirectory(video)

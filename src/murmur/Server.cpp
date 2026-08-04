@@ -87,7 +87,12 @@ QSslSocket *SslServer::nextPendingSSLConnection() {
 
 
 Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &connectionParam, QObject *p)
-	: QThread(p), m_dbWrapper(connectionParam) {
+	: QThread(p),
+	  // Declared before m_dbWrapper, so it must be initialised before it too.
+	  m_videoRouter(
+		  [this](unsigned int subscriber, unsigned int sender) { return mayReceiveVideo(subscriber, sender); },
+		  [this](unsigned int sender) { return mayShareVideo(sender); }),
+	  m_dbWrapper(connectionParam) {
 	tracy::SetThreadName("mumble-server");
 
 	bValid     = true;
@@ -773,13 +778,16 @@ void Server::run() {
 	tracy::SetThreadName("Audio");
 
 	qint32 len;
+	// Sized for the larger of the two media channels: audio and video share this socket and are only
+	// told apart after the datagram has been read, so a video datagram must not be truncated on the way
+	// in just because audio's limit is smaller.
 #if defined(__LP64__)
-	unsigned char encbuff[Mumble::Protocol::MAX_UDP_PACKET_SIZE + 8];
+	unsigned char encbuff[Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE + 8];
 	unsigned char *encrypt = encbuff + 4;
 #else
-	unsigned char encrypt[Mumble::Protocol::MAX_UDP_PACKET_SIZE];
+	unsigned char encrypt[Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE];
 #endif
-	unsigned char buffer[Mumble::Protocol::MAX_UDP_PACKET_SIZE];
+	unsigned char buffer[Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE];
 
 	sockaddr_storage from;
 	unsigned int nfds = static_cast< unsigned int >(qlUdpSocket.count());
@@ -861,7 +869,7 @@ void Server::run() {
 
 				fromlen = sizeof(from);
 #ifdef Q_OS_WIN
-				len = ::recvfrom(sock, reinterpret_cast< char * >(encrypt), Mumble::Protocol::MAX_UDP_PACKET_SIZE, 0,
+				len = ::recvfrom(sock, reinterpret_cast< char * >(encrypt), Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE, 0,
 								 reinterpret_cast< struct sockaddr * >(&from), &fromlen);
 #else
 #	ifdef Q_OS_LINUX
@@ -869,7 +877,7 @@ void Server::run() {
 				struct iovec iov[1];
 
 				iov[0].iov_base = encrypt;
-				iov[0].iov_len  = Mumble::Protocol::MAX_UDP_PACKET_SIZE;
+				iov[0].iov_len  = Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE;
 
 				uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
 
@@ -884,7 +892,7 @@ void Server::run() {
 				len = static_cast< qint32 >(::recvmsg(sock, &msg, 0));
 				Q_UNUSED(fromlen);
 #	else
-				len = static_cast< qint32 >(::recvfrom(sock, encrypt, Mumble::Protocol::MAX_UDP_PACKET_SIZE, 0,
+				len = static_cast< qint32 >(::recvfrom(sock, encrypt, Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE, 0,
 													   reinterpret_cast< struct sockaddr * >(&from), &fromlen));
 #	endif
 #endif
@@ -899,9 +907,9 @@ void Server::run() {
 				} else if (len < 5) {
 					// 4 bytes crypt header + type + session
 					continue;
-				} else if (static_cast< unsigned int >(len) > Mumble::Protocol::MAX_UDP_PACKET_SIZE) {
+				} else if (static_cast< unsigned int >(len) > Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE) {
 					// This will also catch the len == -1 case (indicating error)
-					static_assert(static_cast< unsigned int >(-1) > Mumble::Protocol::MAX_UDP_PACKET_SIZE,
+					static_assert(static_cast< unsigned int >(-1) > Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE,
 								  "Invalid assumption");
 					continue;
 				}
@@ -953,8 +961,36 @@ void Server::run() {
 				}
 
 
+				// Everything from here on is an encrypted media datagram, which carries a channel byte in
+				// the clear. Audio and video hold separate crypt states with separate sequence spaces, so
+				// the receiver has to know which one to use before it can decrypt anything.
+				if (len < 1) {
+					continue;
+				}
+
+				if (static_cast< Mumble::Protocol::byte >(encrypt[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
+					// Video is only accepted from a peer already identified on the audio channel. Trial
+					// decryption against every user on the host, which is how an unknown peer is matched
+					// below, is not worth doing for video: it is high rate, and a client always sends
+					// audio or a ping first.
+					if (u) {
+						relayVideo(u, reinterpret_cast< const Mumble::Protocol::byte * >(encrypt),
+								   static_cast< std::size_t >(len));
+					}
+
+					continue;
+				}
+
+				if (static_cast< Mumble::Protocol::byte >(encrypt[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+					continue;
+				}
+
+				// Past the channel byte is exactly what the audio crypt state used to receive.
+				const unsigned char *audio = encrypt + 1;
+				len -= 1;
+
 				if (u) {
-					if (!checkDecrypt(u, encrypt, buffer, static_cast< unsigned int >(len))) {
+					if (!checkDecrypt(u, audio, buffer, static_cast< unsigned int >(len))) {
 						continue;
 					}
 				} else {
@@ -963,7 +999,7 @@ void Server::run() {
 					// Unknown peer
 					for (ServerUser *usr : qhHostUsers.value(ha)) {
 						if (checkDecrypt(
-								usr, encrypt, buffer,
+								usr, audio, buffer,
 								static_cast< unsigned int >(len))) { // checkDecrypt takes the User's qrwlCrypt lock.
 							// Every time we relock, reverify users' existence.
 							// The main thread might delete the user while the lock isn't held.
@@ -1027,6 +1063,15 @@ void Server::run() {
 							}
 							break;
 						}
+						case Mumble::Protocol::UDPMessageType::Video: {
+							// Unreachable: UDPDecoder::decode returns false for Video, so getMessageType()
+							// never yields it. Asserted rather than logged, matching msgUDPTunnel, so that it
+							// fails loudly in a debug build if that ever stops being true instead of letting a
+							// remote peer write to the log. This is also where the video relay will be
+							// implemented.
+							assert(false);
+							break;
+						}
 					}
 				}
 #ifdef Q_OS_UNIX
@@ -1065,16 +1110,22 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 	ZoneScoped;
 
 	if ((u.aiUdpFlag.loadRelaxed() == 1 || force) && (u.sUdpSocket != INVALID_SOCKET)) {
+		// One byte longer than the ciphertext: audio datagrams are prefixed with their channel byte so the
+		// receiver can tell them from video before decrypting.
 #if defined(__LP64__)
 		static std::vector< char > ebuffer;
-		ebuffer.resize(static_cast< std::size_t >(len + 4 + 16));
-		char *buffer = reinterpret_cast< char * >(
+		ebuffer.resize(static_cast< std::size_t >(len + 5 + 16));
+		char *datagram = reinterpret_cast< char * >(
 			((reinterpret_cast< quint64 >(ebuffer.data()) + 8) & static_cast< quint64 >(~7)) + 4);
 #else
 		std::vector< char > bufVec;
-		bufVec.resize(static_cast< std::size_t >(len + 4));
-		char *buffer    = bufVec.data();
+		bufVec.resize(static_cast< std::size_t >(len + 5));
+		char *datagram = bufVec.data();
 #endif
+		char *buffer = datagram + 1;
+
+		datagram[0] = static_cast< char >(Mumble::Protocol::MEDIA_CHANNEL_AUDIO);
+
 		{
 			QMutexLocker wl(&u.qmCrypt);
 
@@ -1097,8 +1148,8 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 		struct msghdr msg;
 		struct iovec iov[1];
 
-		iov[0].iov_base = buffer;
-		iov[0].iov_len  = static_cast< unsigned int >(len + 4);
+		iov[0].iov_base = datagram;
+		iov[0].iov_len  = static_cast< unsigned int >(len + 5);
 
 		uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
 		memset(controldata, 0, sizeof(controldata));
@@ -1142,7 +1193,7 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 #	else
 		using size_type = std::size_t;
 #	endif
-		::sendto(u.sUdpSocket, buffer, static_cast< size_type >(len + 4), 0,
+		::sendto(u.sUdpSocket, datagram, static_cast< size_type >(len + 5), 0,
 				 reinterpret_cast< struct sockaddr * >(&u.saiUdpAddress),
 				 (u.saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
 #endif
@@ -1377,6 +1428,125 @@ void Server::processMsg(ServerUser *u, Mumble::Protocol::AudioData audioData, Au
 			currentRange = AudioReceiverBuffer::getReceiverRange(currentRange.end, receiverList.end());
 		}
 	}
+}
+
+void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagram, std::size_t len) {
+	ZoneScoped;
+
+	std::vector< Mumble::Protocol::byte > plaintext;
+
+	{
+		QMutexLocker l(&sender->qmCrypt);
+
+		if (!sender->videoCrypt.isValid()
+			|| sender->videoCrypt.decrypt(std::span< const Mumble::Protocol::byte >(datagram, len), plaintext)
+				   != Mumble::Protocol::VideoCryptState::Result::Ok) {
+			return;
+		}
+	}
+
+	// The routing decision needs the stream id, so the relay does have to look inside. The payload is
+	// left untouched: only the sender's session is stamped, by appending it, which Protobuf's
+	// last-occurrence-wins rule for singular scalars makes valid.
+	if (plaintext.size() < 2
+		|| plaintext[0] != static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::Video)) {
+		return;
+	}
+
+	m_relayedVideo.Clear();
+
+	if (!m_relayedVideo.ParseFromArray(plaintext.data() + 1, static_cast< int >(plaintext.size() - 1))) {
+		return;
+	}
+
+	// A client claiming to be someone else is refused rather than corrected, so that the mismatch shows
+	// up as its own stream failing instead of quietly appearing under another user's name.
+	if (m_relayedVideo.sender_session() != 0 && m_relayedVideo.sender_session() != sender->uiSession) {
+		return;
+	}
+
+	const std::vector< unsigned int > recipients =
+		m_videoRouter.subscribersOf(sender->uiSession, m_relayedVideo.stream_id());
+
+	if (recipients.empty()) {
+		return;
+	}
+
+	// Stamp the sender by appending field 1. Cheaper than reserialising, and the fragment budget already
+	// reserves room for it.
+	if (m_relayedVideo.sender_session() == 0) {
+		plaintext.push_back(0x08);
+
+		unsigned int session = sender->uiSession;
+
+		while (session >= 0x80) {
+			plaintext.push_back(static_cast< Mumble::Protocol::byte >((session & 0x7F) | 0x80));
+			session >>= 7;
+		}
+
+		plaintext.push_back(static_cast< Mumble::Protocol::byte >(session));
+	}
+
+	std::vector< Mumble::Protocol::byte > outgoing;
+
+	for (unsigned int session : recipients) {
+		ServerUser *recipient = qhUsers.value(session);
+
+		if (!recipient || recipient->sUdpSocket == INVALID_SOCKET || recipient->aiUdpFlag.loadRelaxed() != 1) {
+			// No UDP path to this user. Video is not tunnelled over TCP: it would head-of-line block the
+			// control channel, and the sender has no way to slow down for one recipient.
+			continue;
+		}
+
+		{
+			QMutexLocker l(&recipient->qmCrypt);
+
+			// Re-encrypted per recipient, because each holds its own sequence space and its own key.
+			if (!recipient->videoCrypt.isValid() || !recipient->videoCrypt.encrypt(plaintext, outgoing)) {
+				continue;
+			}
+		}
+
+#ifdef Q_OS_WIN
+		using size_type = int;
+#else
+		using size_type = std::size_t;
+#endif
+		::sendto(recipient->sUdpSocket, reinterpret_cast< const char * >(outgoing.data()),
+				 static_cast< size_type >(outgoing.size()), 0,
+				 reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress),
+				 static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6)
+											  ? sizeof(struct sockaddr_in6)
+											  : sizeof(struct sockaddr_in)));
+	}
+}
+
+bool Server::mayShareVideo(unsigned int senderSession) {
+	ServerUser *sender = qhUsers.value(senderSession);
+
+	if (!sender || !sender->cChannel) {
+		return false;
+	}
+
+	return ChanACL::hasPermission(sender, sender->cChannel, ChanACL::ShareVideo, &acCache);
+}
+
+bool Server::mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession) {
+	ServerUser *subscriber = qhUsers.value(subscriberSession);
+	ServerUser *sender     = qhUsers.value(senderSession);
+
+	if (!subscriber || !sender || !sender->cChannel) {
+		return false;
+	}
+
+	// Evaluated against the channel the sender is in *now*, not the one they were in when the
+	// subscription was made. Both parties move, and the question a receiver is really asking is "may I
+	// see what is happening in that room", which only that channel can answer.
+	//
+	// Enter is required as well as ReceiveVideo, so that video can never reach somewhere its recipient
+	// could not go and simply listen.
+	return ChanACL::hasPermission(subscriber, sender->cChannel, ChanACL::Enter, &acCache)
+		   && ChanACL::hasPermission(subscriber, sender->cChannel, ChanACL::ReceiveVideo, &acCache);
 }
 
 void Server::log(ServerUser *u, const QString &str) const {
@@ -1700,6 +1870,10 @@ void Server::connectionClosed(QAbstractSocket::SocketError err, const QString &r
 		QCoreApplication::instance()->postEvent(this, new ExecEvent(std::bind(func_ptr, this, old->iId)));
 	}
 
+	// Drop their streams and their subscriptions. Sessions are recycled from qqIds below, so leaving
+	// stale entries behind would attach them to whoever inherits the number next.
+	m_videoRouter.removeUser(u->uiSession);
+
 	if (u->uiSession > 0 && u->uiSession < iMaxUsers * 2)
 		qqIds.enqueue(u->uiSession); // Reinsert session id into pool
 
@@ -1741,6 +1915,14 @@ void Server::message(Mumble::Protocol::TCPMessageType type, const QByteArray &qb
 		if (m_tcpTunnelDecoder.decode(std::span< const Mumble::Protocol::byte >(
 				reinterpret_cast< const Mumble::Protocol::byte * >(qbaMsg.constData()),
 				static_cast< std::size_t >(qbaMsg.size())))) {
+			// Note: when video relaying is implemented, it has to be handled here as well as in the raw UDP
+			// path above. Forgetting this branch would silently disable video for every user whose media is
+			// tunnelled over TCP.
+			//
+			// It must use a *separate* VideoReassembler instance from the one the raw UDP path uses, for
+			// the same reason this code path has its own m_tcpTunnelDecoder: this function runs on the
+			// main thread holding only a read lock, so it is concurrent with Server::run(). Sharing one
+			// reassembler between the two would be a use-after-free on remote data, not just a data race.
 			if (m_tcpTunnelDecoder.getMessageType() == Mumble::Protocol::UDPMessageType::Audio) {
 				Mumble::Protocol::AudioData audioData = m_tcpTunnelDecoder.getAudioData();
 				// Allow all voice packets through by default.
@@ -1778,6 +1960,11 @@ void Server::message(Mumble::Protocol::TCPMessageType type, const QByteArray &qb
 			case Mumble::Protocol::TCPMessageType::CryptSetup:
 			case Mumble::Protocol::TCPMessageType::VoiceTarget:
 			case Mumble::Protocol::TCPMessageType::PluginDataTransmission:
+
+			// Note: VideoState and VideoSubscribe are deliberately absent. Video relaying should not need
+			// the database, so they will belong here eventually, but adding them now would allowlist a
+			// property of an implementation that does not exist yet and that nothing would re-check once
+			// it is written. FileTransfer will never belong here: it writes file metadata to the database.
 
 			// These are also possible, but not strictly required
 			case Mumble::Protocol::TCPMessageType::QueryUsers:
@@ -2175,8 +2362,30 @@ void Server::flushClientPermissionCache(ServerUser *u, MumbleProto::PermissionQu
 	sendMessage(u, mppq);
 }
 
+void Server::revalidateVideoSubscriptions() {
+	for (const VideoRouter::DroppedSubscription &dropped : m_videoRouter.revalidate()) {
+		ServerUser *subscriber = qhUsers.value(dropped.subscriber);
+
+		if (!subscriber || subscriber->sState != ServerUser::Authenticated) {
+			continue;
+		}
+
+		MumbleProto::VideoSubscribe mpvs;
+		mpvs.set_session(dropped.sender);
+		mpvs.set_stream_id(dropped.streamID);
+		mpvs.set_subscribe(false);
+
+		sendMessage(subscriber, mpvs);
+	}
+}
+
 void Server::clearACLCache(User *p) {
 	MumbleProto::PermissionQuery mppq;
+
+	// Subscriptions are authorised against the ACLs, so an ACL change can invalidate them. Delivery
+	// re-checks anyway, which is what actually stops the video, but dropping them here means a client is
+	// told its subscription ended instead of being left watching a frozen picture.
+	revalidateVideoSubscriptions();
 
 	{
 		QMutexLocker qml(&qmCache);

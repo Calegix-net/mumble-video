@@ -70,6 +70,10 @@ public:
 	OpenURLEvent(QUrl url);
 };
 
+
+class VideoBroadcaster;
+class VideoGrid;
+
 class MainWindow : public QMainWindow, public Ui::MainWindow {
 	friend class UserModel;
 
@@ -210,6 +214,32 @@ protected:
 
 	void createActions();
 	void setupGui();
+
+	/// Shows the video other participants are sharing. Created in setupGui and hidden until somebody
+	/// actually shares something, so the window looks unchanged for users who never use the feature.
+	VideoGrid *m_videoGrid   = nullptr;
+	QDockWidget *m_videoDock = nullptr;
+
+	/// Creates the video dock and connects it to the network.
+	void setupVideoGrid();
+
+	/// Sends and receives the local camera stream.
+	VideoBroadcaster *m_videoBroadcaster = nullptr;
+	QAction *m_shareCameraAction         = nullptr;
+
+	/// Creates the share-camera action and its wiring.
+	void setupVideoBroadcast();
+
+	QAction *m_videoWizardAction = nullptr;
+
+public slots:
+	/// Opens the guided video setup.
+	void openVideoWizardDialog();
+
+protected:
+public slots:
+	/// Starts or stops sharing the local camera, and tells the server either way.
+	void toggleCameraShare(bool share);
 	void updateWindowTitle();
 	/// updateToolbar updates the state of the toolbar depending on the current
 	/// window layout setting.

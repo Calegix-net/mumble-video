@@ -35,6 +35,7 @@
 #include "MumbleProtocol.h"
 #include "ServerAddress.h"
 #include "Timer.h"
+#include "VideoFragmentation.h"
 
 #include <memory>
 
@@ -96,6 +97,26 @@ protected:
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_udpDecoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_tcpTunnelDecoder;
 
+	/// Reassembles inbound video. Its own instance, separate from anything the TCP tunnel might later
+	/// use, because the two are driven from different threads.
+	Mumble::Protocol::VideoReassembler m_videoReassembler;
+
+	/// Scratch message used to read the server's sender stamp before reassembly. UDP thread only.
+	MumbleUDP::Video m_videoPeek;
+
+	/// Decrypts and reassembles one inbound video datagram.
+	void handleVideoDatagram(const Mumble::Protocol::byte *datagram, std::size_t len);
+
+	/// Fragmenter for the outbound video path. Its own instance, used only from the thread that sends.
+	Mumble::Protocol::VideoFragmenter m_videoFragmenter;
+
+public:
+	/// Fragments one encoded unit and sends it on the video channel. Silently does nothing when there is
+	/// no UDP path: video is never tunnelled over TCP, because it would head-of-line block the control
+	/// channel and the sender cannot slow down for one recipient.
+	void sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload);
+
+protected:
 	/// Flag indicating whether the server we are currently connected to has
 	/// finished synchronizing already.
 	bool serverSynchronized = false;
@@ -204,6 +225,10 @@ public:
 	void disconnect();
 	void run() Q_DECL_OVERRIDE;
 signals:
+	/// One fully reassembled video unit, ready to be decoded and drawn at (x, y) of the sender's frame.
+	void videoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
+						   const QByteArray &encodedTile);
+
 	void error(QAbstractSocket::SocketError, QString reason);
 	// This signal is basically the same as disconnected but it will be emitted
 	// *right before* disconnected is emitted. Thus this can be used by slots

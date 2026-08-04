@@ -78,6 +78,17 @@ const SettingsKey CUE_VOLUME_KEY                              = { "cue_volume" }
 const SettingsKey RESTRICT_WHISPERS_TO_FRIENDS_KEY            = { "restrict_whispers_to_friends" };
 const SettingsKey NOTIFICATION_USER_LIMIT_KEY                 = { "notification_user_limit" };
 
+// Video settings
+const SettingsKey VIDEO_DEVICE_KEY       = { "video_device" };
+const SettingsKey VIDEO_CODEC_KEY        = { "video_codec" };
+const SettingsKey VIDEO_WIDTH_KEY        = { "video_width" };
+const SettingsKey VIDEO_HEIGHT_KEY       = { "video_height" };
+const SettingsKey VIDEO_FRAMERATE_KEY    = { "video_framerate" };
+const SettingsKey VIDEO_BITRATE_KEY      = { "video_bitrate" };
+const SettingsKey VIDEO_TILE_QUALITY_KEY = { "video_tile_quality" };
+const SettingsKey VIDEO_TILE_SIZE_KEY    = { "video_tile_size" };
+const SettingsKey VIDEO_WIZARD_SHOWN_KEY = { "video_wizard_shown" };
+
 // Idle settings
 const SettingsKey IDLE_TIME_KEY                  = { "idle_time" };
 const SettingsKey IDLE_ACTION_KEY                = { "idle_action" };

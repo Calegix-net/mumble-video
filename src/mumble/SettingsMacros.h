@@ -69,6 +69,17 @@
 	PROCESS(idle, UNDO_IDLE_ACTION_UPON_ACTIVITY, bUndoIdleActionUponActivity)
 
 
+#define VIDEO_SETTINGS                                        \
+	PROCESS(video, VIDEO_DEVICE_KEY, qsVideoDevice)           \
+	PROCESS(video, VIDEO_CODEC_KEY, videoCodec)               \
+	PROCESS(video, VIDEO_WIDTH_KEY, iVideoWidth)              \
+	PROCESS(video, VIDEO_HEIGHT_KEY, iVideoHeight)            \
+	PROCESS(video, VIDEO_FRAMERATE_KEY, iVideoFramerate)      \
+	PROCESS(video, VIDEO_BITRATE_KEY, iVideoBitrate)          \
+	PROCESS(video, VIDEO_TILE_QUALITY_KEY, iVideoTileQuality) \
+	PROCESS(video, VIDEO_TILE_SIZE_KEY, iVideoTileSize)       \
+	PROCESS(video, VIDEO_WIZARD_SHOWN_KEY, videoWizardShown)
+
 #define POSITIONAL_AUDIO_SETTINGS                                                  \
 	PROCESS(positional_audio, ENABLE_POSITIONAL_AUDIO_KEY, bPositionalAudio)       \
 	PROCESS(positional_audio, POSITIONAL_MIN_DISTANCE_KEY, fAudioMinDistance)      \
@@ -323,6 +334,7 @@
 #define PROCESS_ALL_SETTINGS   \
 	MISC_SETTINGS              \
 	AUDIO_SETTINGS             \
+	VIDEO_SETTINGS             \
 	IDLE_SETTINGS              \
 	POSITIONAL_AUDIO_SETTINGS  \
 	NETWORK_SETTINGS           \
@@ -351,6 +363,7 @@
 	MISC_SETTINGS                                        \
 	INTERMEDIATE_OPERATION                               \
 	AUDIO_SETTINGS                                       \
+	VIDEO_SETTINGS                                       \
 	INTERMEDIATE_OPERATION                               \
 	IDLE_SETTINGS                                        \
 	INTERMEDIATE_OPERATION                               \

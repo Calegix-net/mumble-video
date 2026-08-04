@@ -9,6 +9,74 @@ package MumbleProto;
 
 option optimize_for = SPEED;
 
+// Optional protocol features a peer implements.
+//
+// Mumble has no capability handshake: protocolVersionsAreCompatible() collapses everything to a single
+// pre/post-1.5 boolean, Reject.WrongVersion is never sent, and both dispatch switches (in the client's
+// MainWindow and the server's Server) silently ignore unknown message types. Historically each new
+// capability therefore got its own bool (Authenticate.opus, CodecVersion.opus). This enum generalises
+// that pattern so that further features do not each need a new field.
+//
+// The client advertises its features in Authenticate; the server advertises its own in ServerConfig.
+// Because the client sends Version and Authenticate back-to-back without waiting for the server's
+// Version, the client's advertisement is unconditional.
+//
+// Ordering, which is easy to get wrong: the server sends ServerSync *before* ServerConfig (see
+// Server::sendUserList and the sync burst in murmur/Messages.cpp). ServerSync is what unblocks the
+// client's UI, so there is a window in which the user is fully connected and the server's feature set
+// has not arrived. A client MUST therefore keep all feature-gated UI disabled until it has seen a
+// ServerConfig, and MUST NOT infer feature support from the peer's version number.
+//
+// Both advertisements are read once, from the first message that carries them:
+//   - Authenticate is re-sent by clients to update tokens (ServerHandler::setTokens sends one
+//     containing only `tokens`). A server MUST read `features` only from the Authenticate that
+//     completes authentication and MUST ignore it on later ones, or updating a token would silently
+//     revoke the user's features.
+//   - ServerConfig doubles as a partial delta: Server::setLiveConf broadcasts one containing a single
+//     field whenever an admin changes bandwidth, user limit, message length or allow-HTML. A client
+//     MUST therefore treat `features` as authoritative only in the first ServerConfig of a session and
+//     MUST leave its view unchanged when a later ServerConfig omits it. Absence means "unchanged",
+//     never "disabled".
+//
+// A peer MUST NOT send a message belonging to a feature the other side did not advertise. Unknown
+// values in a repeated enum field are discarded by proto2 parsers, so a peer that does not know a
+// feature simply never advertises it and never receives it - degradation is silent but total, which is
+// the existing behaviour for every unknown message type. A receiver that is sent FEATURE_NONE MUST
+// ignore it.
+//
+// This is a top-level enum rather than a nested one (the file's usual style) only because it is shared
+// between two messages. Values are prefixed to avoid colliding with message names in the generated
+// MumbleProto namespace.
+enum Feature {
+	// Placeholder so that an empty repeated field and an explicitly-unknown feature are
+	// distinguishable. Never advertised.
+	FEATURE_NONE = 0;
+	// Real-time video streaming: the VideoState and VideoSubscribe control messages and the
+	// MumbleUDP.Video data message. Covers both webcam and screen sharing - they are one mechanism,
+	// distinguished by VideoState.SourceKind.
+	FEATURE_VIDEO = 1;
+	// Server-mediated file storage: the FileTransfer control message and TextMessage.attachments.
+	FEATURE_FILE_TRANSFER = 2;
+}
+
+// Neither feature above is implemented, and neither can be until Mumble's ACL system grows permissions
+// for them. This is recorded here because it is easy to miss: ChanACL::Perm currently ends at
+// Listen = 0x800 and has 0x1000, 0x2000, 0x4000 and 0x8000 free before the root-only block, which is
+// exactly enough for the four that are needed:
+//
+//   ShareVideo    - send VideoState with active=true into a channel. Must be separate from Speak:
+//                   an operator has to be able to allow talking while forbidding screen sharing.
+//   ReceiveVideo  - subscribe to a stream in a channel.
+//   UploadFile    - offer a file into a channel. Not equivalent to TextMessage: text is ephemeral,
+//                   files consume disk and persist.
+//   DownloadFile  - fetch a stored file, re-checked per request rather than implied by holding an id.
+//
+// Deletion should reuse the existing root-only ResetUserContent, which already exists to wipe a user's
+// comment and avatar. Adding a Perm is not a one-line change: it touches ChanACL::All, permName(),
+// whatsThis(), the client's ACL editor, the Ice and gRPC interfaces, and the ACL database schema. That
+// work is deliberately not part of this change, but shipping the wire format without it would all but
+// guarantee that the first implementation has no permission model at all.
+
 message Version {
 	// Legacy version number format.
 	optional uint32 version_v1 = 1;
@@ -43,6 +111,10 @@ message Authenticate {
 	optional bool opus = 5 [default = false];
 	// 0 = REGULAR, 1 = BOT
 	optional int32 client_type = 6 [default = 0];
+	// Optional protocol features this client implements. Sent unconditionally, as the client has not
+	// yet seen the server's Version at this point. Servers that do not know this field discard it,
+	// which is exactly the desired behaviour: they will never send the corresponding messages either.
+	repeated Feature features = 7;
 }
 
 // Sent by the client to notify the server that the client is still alive.
@@ -288,6 +360,25 @@ message TextMessage {
 	repeated uint32 tree_id = 4;
 	// The UTF-8 encoded message. May be HTML if the server allows.
 	required string message = 5;
+	// Files attached to this message, held in the server's file store. Only set between peers that
+	// advertised FEATURE_FILE_TRANSFER.
+	//
+	// The `message` field must always carry human-readable fallback text (and, for images, an inline
+	// thumbnail data-URI) so that clients which do not understand this field still see something
+	// sensible.
+	//
+	// The server MUST discard whatever the sender put here and re-populate each entry from its own
+	// authoritative metadata, having verified that the file exists, has not expired, and that the
+	// sender is permitted to reference it. Relaying client-supplied FileRefs verbatim would let any
+	// user fabricate an attachment attributed to anyone else. Note that declaring this field removed
+	// the protection that used to come free from DiscardUnknownFields, so a server that does not
+	// implement file transfer MUST clear it rather than ignore it.
+	//
+	// The server MUST also bound this field: at most 16 entries, and their encoded size counted against
+	// the same limit as `message`. Server::isTextAllowed inspects only `message`, so without an
+	// explicit bound a small text message carrying megabytes of attachment metadata would be fanned out
+	// to every user in the channel tree.
+	repeated FileRef attachments = 6;
 }
 
 message PermissionDenied {
@@ -607,6 +698,31 @@ message ServerConfig {
 	optional uint32 max_users = 6;
 	// Whether using Mumble's recording feature is allowed on the server
 	optional bool recording_allowed = 7;
+	// Optional protocol features this server implements and permits. A feature that is not listed here
+	// is disabled; there is deliberately no separate "enabled" boolean per feature. Absent for every
+	// pre-1.6 server, which is why the client must construct all video and file UI disabled and enable
+	// it only on receipt of this message.
+	repeated Feature features = 8;
+
+	// The following are only meaningful if FEATURE_VIDEO is advertised.
+
+	// Maximum bandwidth in bits per second a single video stream may use. The sender clamps to this;
+	// the server enforces it independently.
+	optional uint32 max_video_bandwidth = 9;
+	// Maximum number of users that may stream video simultaneously in one channel.
+	optional uint32 max_video_streams_per_channel = 10;
+
+	// The following are only meaningful if FEATURE_FILE_TRANSFER is advertised.
+
+	// Maximum size in bytes of a single uploaded file.
+	optional uint64 max_file_size = 11;
+	// Days an uploaded file is retained before the server deletes it. 0 means files are kept until the
+	// server's total storage quota forces eviction.
+	optional uint32 file_retention_days = 12;
+	// Maximum size in bytes of a single FileTransfer.data chunk the server will accept or send.
+	optional uint32 max_file_chunk_size = 13;
+	// Maximum sustained upload rate in bytes per second per client.
+	optional uint32 max_file_upload_rate = 14;
 }
 
 // Sent by the server to inform the clients of suggested client configuration
@@ -636,4 +752,257 @@ message PluginDataTransmission {
 	// The ID of the sent data. This will be used by plugins to check whether they will
 	// process it or not
 	optional string dataID = 4;
+}
+
+// Announces, updates or terminates one video stream. Sent by the streaming client to the server and
+// relayed by the server to those clients in the affected channel that advertised FEATURE_VIDEO.
+//
+// Webcam and screen sharing are the same mechanism; they differ only in `source_kind`. The frame data
+// itself travels out of band as MumbleUDP.Video packets, which the server relays without inspecting.
+//
+// This message is the authoritative stream lifecycle. There is no per-stream state in UserState, so a
+// client that joins mid-stream has to be told about streams already running. The server MUST therefore
+// replay the current VideoState for each streaming user, in the same way it replays UserState -- but
+// note that it must do so *after* ServerConfig, not during the ServerSync burst, because until the
+// client has seen ServerConfig it does not know the server supports video at all. No such replay exists
+// yet; this is a requirement on the implementation, not a description of one.
+//
+// Subscription is not authorisation. The server MUST reject a VideoSubscribe unless the subscriber
+// would be permitted to enter the streaming user's current channel, MUST re-evaluate that when either
+// party moves, and MUST tear subscriptions down when the ACL cache is cleared. Sessions are visible to
+// every client through the user list, including for channels they cannot enter, so a subscription that
+// is honoured on the strength of a session id alone would relay a screen share to someone with no
+// access to the channel it is being shared in.
+message VideoState {
+	// The codec used for the payloads of the corresponding MumbleUDP.Video packets.
+	enum Codec {
+		// Not a codec. This file is proto2, where enums are closed: a value the parser does not know is
+		// moved to the unknown-field set and the getter returns enumerator 0. Enumerator 0 must
+		// therefore be inert, or a peer adding a codec later would have its streams silently decoded as
+		// whatever happened to be first. A receiver MUST drop a stream whose codec resolves to this.
+		CODEC_UNKNOWN = 0;
+		// Independently coded rectangular tiles, each a complete JPEG or PNG. Decodable with QImage
+		// alone, so it requires no new library on either side. Suitable for screen content; poor for
+		// camera content.
+		TiledImage = 1;
+		// Reserved for a future libvpx-based codec.
+		VP8 = 2;
+		VP9 = 3;
+		AV1 = 4;
+	}
+
+	// What is being captured.
+	enum SourceKind {
+		// Inert enumerator 0, for the reason given on Codec above. A receiver MUST treat a stream whose
+		// source kind resolves to this as unknown rather than assuming a camera.
+		SOURCE_UNKNOWN = 0;
+		// A camera attached to the sending machine.
+		Camera = 1;
+		// An entire display.
+		Display = 2;
+		// A single window.
+		Window = 3;
+		// A single application, possibly spanning several windows. Only expressible on some platforms.
+		Application = 4;
+	}
+
+	// Session of the streaming client. Ignored when sent client to server; always set by the server
+	// when relaying.
+	optional uint32 session = 1;
+	// Identifies this stream within the sender. Incremented on every restart and on every change to
+	// codec, source_kind, width or height, so that receivers can discard stale fragments without having
+	// to inspect them. 0 is a valid id. A sender may hold several streams open at once, for instance a
+	// camera and a display.
+	optional uint32 stream_id = 2;
+	// False means the stream has ended; all other fields are then ignored. This, and not any flag on
+	// the UDP packets, is what terminates a stream, because only this message is delivered reliably.
+	// Defaults to false so that a truncated or empty VideoState cannot read as "start streaming".
+	// Activation must be explicit.
+	optional bool active = 3 [default = false];
+
+	// Both default to their inert enumerator rather than to a real value, so that a sender which omits
+	// them - or a receiver which does not know the value sent - resolves to "unknown" and drops the
+	// stream, instead of guessing a codec and feeding foreign bytes to a decoder.
+	optional Codec codec = 4 [default = CODEC_UNKNOWN];
+	optional SourceKind source_kind = 5 [default = SOURCE_UNKNOWN];
+	// Human readable description of the source (camera name, monitor name, window title, application
+	// name). Purely informational. Subject to the server's ServerConfig.message_length limit.
+	optional string source_name = 6;
+
+	// Nominal frame dimensions in pixels. Advisory: receivers must still cope with the decoder
+	// reporting different dimensions mid-stream.
+	optional uint32 width = 7;
+	optional uint32 height = 8;
+	// Nominal frames per second the sender intends to produce. Advisory.
+	optional uint32 max_framerate = 9;
+	// Bitrate in bits per second the sender intends to use. The server clamps this to
+	// ServerConfig.max_video_bandwidth and relays the clamped value.
+	optional uint32 target_bandwidth = 10;
+}
+
+// Sent by a receiving client to tell the server which streams to forward to it. The server forwards
+// MumbleUDP.Video packets only to sessions holding an active subscription; video is never broadcast to
+// a whole channel the way audio is, because a single stream fanned out to a large channel would
+// multiply the server's egress by the channel size and there is no natural silence period to bound the
+// cost.
+//
+// The same message also carries the receiver's feedback for the sender's rate control, which the
+// server relays to the sender.
+message VideoSubscribe {
+	// Session of the stream's sender.
+	optional uint32 session = 1;
+	// Stream id being subscribed to, as announced in VideoState.stream_id.
+	optional uint32 stream_id = 2;
+	// False unsubscribes.
+	// Defaults to false for the same reason as VideoState.active: this message also carries periodic
+	// receiver feedback, and a feedback report that happened to omit this field must not be read as a
+	// fresh subscription.
+	optional bool subscribe = 3 [default = false];
+	// Ask the sender to emit a keyframe or full refresh as soon as possible. Set on initial subscribe
+	// and after unrecoverable loss. Relayed to the sender, rate-limited by the server: unbounded
+	// keyframe requests from many subscribers are an amplification attack on the sender's uplink. This
+	// is the only loss-recovery mechanism; there is no FEC and no retransmission.
+	optional bool request_keyframe = 4;
+
+	// Fraction of coded units the receiver failed to reassemble since its last report, in parts per
+	// thousand.
+	optional uint32 observed_loss_permille = 5;
+	// Highest fully reassembled frame number the receiver has decoded.
+	optional uint64 last_complete_frame = 6;
+	// Receiver's preferred ceiling in bits per second, for instance because it is displaying the stream
+	// as a small thumbnail. 0 means no preference.
+	optional uint32 preferred_bandwidth = 7;
+}
+
+// Describes a file held in the server's file store. Announced inside TextMessage and returned by the
+// server during transfers.
+message FileRef {
+	// Server-assigned identifier, unique within the virtual server. Opaque to clients.
+	//
+	// MUST be at least 128 bits from a cryptographically secure random source, hex or base64 encoded.
+	// "Opaque" is not a security property: a database row id or the content hash would let anyone
+	// enumerate or guess every file on the server. Unguessability is defence in depth only - the server
+	// MUST still re-check permissions on every DOWNLOAD_REQUEST (see below), because an id travels in
+	// relayed TextMessages and outlives the sender's access to the channel.
+	optional string file_id = 1;
+	// File name as supplied by the uploader, for display.
+	//
+	// The server MUST normalise this before storing it and before relaying it, and MUST NOT rely on
+	// clients to do so: reduce to a bare basename, reject absolute paths and any path separator, strip
+	// C0/C1 control characters and Unicode bidi overrides (which turn "invoice<U+202E>gpj.exe" into
+	// something that renders as "invoiceexe.jpg"), reject the Windows reserved device names and trailing
+	// dots or spaces, require valid UTF-8, and cap the result at 255 bytes. Clients SHOULD sanitise
+	// again before using it as a path component, but the server is the enforcement point. Putting that
+	// obligation on every third-party client instead would mint one vulnerability per implementation.
+	optional string name = 2;
+	// Size of the file in bytes.
+	optional uint64 size = 3;
+	// SHA-256 over the file's contents, used for de-duplication and integrity checking.
+	optional bytes sha256 = 4;
+	// IANA media type claimed by the uploader. Advisory; never trusted.
+	// Content type. The server MUST overwrite whatever the client claimed with a value derived from the
+	// stored bytes and drawn from a fixed allowlist, in the same way it overwrites TextMessage.actor;
+	// an unrecognised type becomes application/octet-stream. image/svg+xml and any text/html variant
+	// MUST NOT be on that allowlist: both are script and external-fetch vectors when rendered in a chat
+	// log. Receivers MUST NOT content-sniff, and MUST treat anything that is not a known-safe image
+	// type as an opaque download that is never opened automatically.
+	optional string mime_type = 5;
+	// Session of the uploading user, if that user is still connected.
+	optional uint32 uploader_session = 6;
+	// Name of the uploading user, retained after that user disconnects.
+	optional string uploader_name = 7;
+	// Seconds since the UNIX epoch at which the server will delete this file. Derived from
+	// ServerConfig.file_retention_days.
+	optional uint64 expires_at = 8;
+}
+
+// Carries the whole file upload and download state machine. Transfers are chunked because a single
+// control message is capped at 0x7fffff bytes (see Connection.cpp) and because the control channel is
+// head-of-line blocking for clients whose audio is tunnelled over TCP.
+message FileTransfer {
+	enum Action {
+		// Not an action. proto2 enums are closed, so a value the receiver does not know reads back as
+		// enumerator 0. If that were UPLOAD_OFFER, a peer sending an action added in a later version
+		// would drive an older server into the *upload* state machine with an empty FileRef rather than
+		// being ignored. A receiver MUST reply ABORT with REJECT_UNSPECIFIED when it resolves to this.
+		ACTION_UNSPECIFIED = 0;
+		// Client to server: announce an upload. `file` carries name, size and mime_type.
+		UPLOAD_OFFER = 1;
+		// Server to client: accepted. `offset` states the first byte the server wants, which is non-zero
+		// only when this client is resuming its own interrupted transfer. It MUST NOT reveal that the
+		// server already holds matching content: de-duplication happens in the storage layer after the
+		// bytes have been received and hashed, never in this reply. Otherwise a non-zero offset is an
+		// oracle for "does this exact file exist anywhere on the server", and a peer could claim a
+		// file_id for content it never possessed and never had permission to read.
+		UPLOAD_ACCEPT = 2;
+		// Either direction: one chunk of file data at `offset`.
+		DATA = 3;
+		// Server to client: all bytes received and the SHA-256 computed by the server. `file` is fully
+		// populated, including file_id and expires_at.
+		UPLOAD_DONE = 4;
+		// Client to server: request the bytes of a file. `file.file_id` is set.
+		DOWNLOAD_REQUEST = 5;
+		// Server to client: accepted, DATA messages follow. `file` is fully populated.
+		DOWNLOAD_ACCEPT = 6;
+		// Server to client: the final DATA for this transfer_id has been sent.
+		DOWNLOAD_DONE = 7;
+		// Either direction: abort. `reject_reason` says why.
+		ABORT = 8;
+		// Client to server: delete a stored file. Permitted for the uploader, and for a user holding the
+		// ResetUserContent permission on the file's channel. Defined now rather than later because
+		// adding an action after release would hit the enumerator-0 problem described above on every
+		// already-deployed peer.
+		DELETE_REQUEST = 9;
+		// Server to client: the file is gone. Also broadcast to the channel so that clients can drop it
+		// from any TextMessage they are still displaying.
+		DELETE_DONE = 10;
+	}
+
+	enum RejectReason {
+		// Inert enumerator 0, for the reason given on Action above. A receiver that resolves a reason to
+		// this MUST treat the transfer as failed for an unspecified reason - never as success, which is
+		// what a `NONE = 0` would have meant to a peer that did not know a newer reason code.
+		REJECT_UNSPECIFIED = 0;
+		PERMISSION_DENIED = 1;
+		TOO_LARGE = 2;
+		QUOTA_EXCEEDED = 3;
+		RATE_LIMITED = 4;
+		UNKNOWN_FILE = 5;
+		EXPIRED = 6;
+		HASH_MISMATCH = 7;
+		STORAGE_ERROR = 8;
+		DISABLED = 9;
+		// The client wrote outside the region the server accepted; see FileTransfer.offset.
+		BAD_OFFSET = 10;
+	}
+
+	optional Action action = 1;
+	// Identifies the transfer for its lifetime. Chosen by the client, which initiates both uploads and
+	// downloads, and unique per connection.
+	optional uint32 transfer_id = 2;
+	optional FileRef file = 3;
+	// Byte offset of `data` within the file. Present on every DATA message so that resumption is
+	// explicit rather than implied by ordering.
+	//
+	// This does not license arbitrary random access. The server MUST reject, with BAD_OFFSET, any DATA
+	// whose offset is not the current high-water mark of the transfer, other than the single resume
+	// point it named in UPLOAD_ACCEPT, and MUST reject any write where offset + len(data) exceeds both
+	// the offered size and ServerConfig.max_file_size. It MUST NOT preallocate from the client-declared
+	// size. Honouring an arbitrary offset would let a one-byte upload seek to 2^63 and create an
+	// exabyte-scale sparse file, which costs an attacker nothing and fills the volume the server's own
+	// database lives on.
+	optional uint64 offset = 4;
+	// Chunk payload. Must not exceed ServerConfig.max_file_chunk_size.
+	optional bytes data = 5;
+	// Channel the file is being shared into. Used for the upload ACL check and to scope who may later
+	// download it.
+	//
+	// Also required on DOWNLOAD_REQUEST. The server MUST resolve file_id to the channel the file was
+	// stored in and re-evaluate the requester's permission on it for every request, rather than
+	// treating possession of a file_id as authorisation: Mumble ACLs are revocable at runtime, and a
+	// file_id reaches everyone a TextMessage was relayed to, including users who later lose access.
+	optional uint32 channel_id = 6;
+	optional RejectReason reject_reason = 7 [default = REJECT_UNSPECIFIED];
+	// Optional human-readable detail accompanying ABORT.
+	optional string reason_text = 8;
 }

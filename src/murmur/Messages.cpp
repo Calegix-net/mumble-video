@@ -347,6 +347,11 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 
 		uSource->csCrypt->genKey();
 
+		// Video is keyed from the same session key, with its own derived key and nonce bases, so no extra
+		// exchange is needed. See VideoCryptState::deriveFromSessionKey for why the key is derived rather
+		// than shared with audio.
+		uSource->videoCrypt.deriveFromSessionKey(uSource->csCrypt->getRawKey(), true);
+
 		MumbleProto::CryptSetup mpcrypt;
 		mpcrypt.set_key(uSource->csCrypt->getRawKey());
 		mpcrypt.set_server_nonce(uSource->csCrypt->getEncryptIV());
@@ -1608,6 +1613,17 @@ void Server::msgTextMessage(ServerUser *uSource, MumbleProto::TextMessage &msg) 
 	MSG_SETUP(ServerUser::Authenticated);
 	QMutexLocker qml(&qmCache);
 
+	// File transfer is not implemented, so nothing may legitimately reference a file yet. This message is
+	// relayed to the other users largely as received, so without this the client's own FileRefs would be
+	// forwarded verbatim: a user could fabricate an attachment attributed to anyone, and the repeated
+	// field would escape the length limit isTextAllowed applies to `message`, turning one large message
+	// into a fan-out to the whole channel tree. Before this field was declared, the dispatcher's
+	// DiscardUnknownFields call stripped it; declaring it removed that protection.
+	//
+	// When file transfer is implemented this must become "clear, then repopulate from the server's own
+	// metadata", never a check that trusts what the client sent.
+	msg.clear_attachments();
+
 	// For signal userTextMessage (RPC consumers)
 	TextMessage tm;
 
@@ -2532,7 +2548,7 @@ void Server::msgPluginDataTransmission(ServerUser *sender, MumbleProto::PluginDa
 	// Copy needed data from message in order to be able to remove info about receivers from the message as this doesn't
 	// matter for the client
 	size_t receiverAmount = static_cast< std::size_t >(msg.receiversessions_size());
-	const ::google::protobuf::RepeatedField<::google::protobuf::uint32 > receiverSessions = msg.receiversessions();
+	const ::google::protobuf::RepeatedField< ::google::protobuf::uint32 > receiverSessions = msg.receiversessions();
 
 	msg.clear_receiversessions();
 
@@ -2556,6 +2572,78 @@ void Server::msgPluginDataTransmission(ServerUser *sender, MumbleProto::PluginDa
 			sendMessage(receiver, msg);
 		}
 	}
+}
+
+/// Announcement, update or termination of a video stream by the sending client.
+///
+/// The server owns `session`: whatever the client put there is discarded and replaced with the session
+/// the message actually arrived on, exactly as msgTextMessage does for `actor`. Otherwise a client could
+/// announce a stream in someone else's name.
+void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
+	ZoneScoped;
+
+	MSG_SETUP(ServerUser::Authenticated);
+	RATELIMIT(uSource);
+
+	msg.set_session(uSource->uiSession);
+
+	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
+		// Either the user may not share video here, or they already hold too many streams. Both are
+		// reported as a permission denial rather than distinguished, since the stream count is a server
+		// implementation detail and telling a client which limit it hit is of no use to it.
+		PERM_DENIED(uSource, uSource->cChannel, ChanACL::ShareVideo);
+
+		return;
+	}
+
+	// Relayed only to those who could actually subscribe. Announcing a stream to a user who is not
+	// permitted to watch it would leak that the sender is sharing, and offer them a button that can only
+	// ever fail.
+	for (ServerUser *user : qhUsers) {
+		if (user == uSource || user->sState != ServerUser::Authenticated) {
+			continue;
+		}
+
+		if (mayReceiveVideo(user->uiSession, uSource->uiSession)) {
+			sendMessage(user, msg);
+		}
+	}
+}
+
+/// A client asking to start or stop receiving a stream.
+///
+/// Refusal is deliberately not silent: a client whose subscription was denied needs to stop waiting for
+/// frames that will never come.
+void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe &msg) {
+	ZoneScoped;
+
+	MSG_SETUP(ServerUser::Authenticated);
+	RATELIMIT(uSource);
+
+	const unsigned int sender = msg.session();
+
+	if (!m_videoRouter.subscribe(uSource->uiSession, sender, msg.stream_id(), msg.subscribe())) {
+		ServerUser *senderUser = qhUsers.value(sender);
+
+		// The channel named in the denial is the sender's, since that is the one the privilege is
+		// evaluated against. If the sender has vanished there is nothing meaningful to name, so fall back
+		// to the requester's own channel. Bound to a local first because PERM_DENIED pastes its argument
+		// straight in front of `->`, which would otherwise split a conditional expression.
+		Channel *deniedIn = (senderUser && senderUser->cChannel) ? senderUser->cChannel : uSource->cChannel;
+
+		PERM_DENIED(uSource, deniedIn, ChanACL::ReceiveVideo);
+
+		return;
+	}
+
+	// Echoed back so the client knows the subscription took effect, rather than inferring it from the
+	// arrival of frames it may have to wait for.
+	sendMessage(uSource, msg);
+}
+
+/// A step of the server-mediated file transfer state machine. Not implemented yet - only the wire format
+/// exists. Silent for the same reason as msgVideoState.
+void Server::msgFileTransfer(ServerUser *, MumbleProto::FileTransfer &) {
 }
 
 #undef RATELIMIT

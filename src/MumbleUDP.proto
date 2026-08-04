@@ -83,3 +83,96 @@ message Ping {
 	// The maximum bandwidth each user is allowed to use for sending audio to the server
 	uint32 max_bandwidth_per_user = 6;
 }
+
+/**
+ * One MTU-sized fragment of a video stream, whether that stream is a camera or a captured screen. This
+ * is what rides the UDP socket, or the TCP UDPTunnel when UDP is unavailable.
+ *
+ * It must fit, encrypted, inside Mumble::Protocol::MAX_UDP_PACKET_SIZE (1024 bytes): 4 bytes of OCB2
+ * overhead plus 1 header byte plus this Protobuf. The sender must additionally leave headroom for the
+ * server to stamp sender_session. Do not hardcode the resulting payload budget: it is whatever remains
+ * after a worst-case encoding of every field below, and it shrinks whenever a field is added. Compute it
+ * the way VideoFragmenter::maxPayloadPerFragment does, by measuring a message with every field at its
+ * widest varint. At the time of writing that is 926 bytes, not the round number it is tempting to
+ * assume.
+ * MAX_UDP_PACKET_SIZE cannot be raised without breaking every deployed peer, so fragmentation is
+ * mandatory.
+ *
+ * There are deliberately three levels of structure:
+ *   frame_number         one complete update of the source
+ *   unit_id              an independently decodable region within that frame: one tile for TiledImage,
+ *                        always 0 for whole-frame codecs such as VP8
+ *   fragment_index/count the MTU chopping of a single unit
+ * Losing a fragment therefore costs one unit rather than the whole frame.
+ *
+ * There is no FEC and no retransmission. A unit that does not reassemble within a short timeout is
+ * dropped; its region stays stale until the sender resends it, either through a periodic refresh or in
+ * response to VideoSubscribe.request_keyframe. Receivers must bound the number of in-flight units per
+ * sender and must not allocate based on fragment_count, which is attacker-controlled.
+ *
+ * The stream's codec, dimensions and source kind are not repeated here; they are carried reliably over
+ * TCP in VideoState. A receiver drops any fragment whose (sender_session, stream_id) pair it has no
+ * subscription for, which is also what makes a mid-stream parameter change safe: the sender allocates
+ * a new stream_id.
+ */
+message Video {
+	// The session of the client this video was originally sent from. Not set when sending to the
+	// server; always set by the server when relaying.
+	//
+	// A server may stamp it by appending an encoded field-1 varint to the received buffer, since
+	// Protobuf takes the last occurrence of a singular scalar field. That is valid, but it does not make
+	// the relay allocation-free: the server must re-encrypt per recipient using that recipient's OCB2
+	// state, so a copy happens either way. The fragment budget reserves room for a second copy of this
+	// field regardless of which method the server uses.
+	uint32 sender_session = 1;
+
+	// Identifies the stream within the sender. Matches the stream_id announced in the corresponding
+	// VideoState.
+	uint32 stream_id = 2;
+
+	// Monotonically increasing frame counter within the stream, and a sequence number rather than a
+	// timestamp. It is 64 bits and will not wrap in any real session; reassembly orders on it directly
+	// and implements no wrap-around comparison, so a sender MUST NOT restart it within a stream --
+	// allocate a new stream_id instead.
+	uint64 frame_number = 3;
+
+	// Index of the independently decodable unit within this frame.
+	uint32 unit_id = 4;
+
+	// Position of this fragment within its unit, and how many fragments the unit was split into. A
+	// fragment_count of 1 means the unit is unfragmented.
+	uint32 fragment_index = 5;
+	uint32 fragment_count = 6;
+
+	// The coded bytes of this fragment.
+	bytes payload = 7;
+
+	// True if this unit does not depend on any previously received unit, that is, the region it covers
+	// can be decoded and displayed standalone. Every TiledImage unit is a keyframe by construction; for
+	// VP8 and later codecs this is the real keyframe flag. Receivers discard everything until the first
+	// keyframe and after any reassembly failure.
+	bool is_keyframe = 8;
+
+	// True on the last unit of a frame, so that the receiver knows when to present rather than waiting
+	// for a timeout.
+	bool is_frame_end = 9;
+
+	// Capture time of the frame in microseconds on the sender's monotonic clock. Nothing else in the
+	// protocol carries a wall-clock timestamp -- audio only has a 10 ms frame counter -- so this is the
+	// only anchor available for pacing and, eventually, for A/V alignment. It is not comparable across
+	// senders.
+	uint64 capture_timestamp_usec = 10;
+
+	// Field indices 11 to 15 are deliberately left free, for the same reason as in Audio above: they
+	// cost only a single byte of tag overhead and are reserved for fields that later turn out to be
+	// present on every fragment.
+
+	// The fields below are only set on fragment_index == 0 of a unit.
+
+	// Destination rectangle of this unit within the full frame, in pixels. For whole-frame codecs this
+	// is the whole frame.
+	uint32 x = 16;
+	uint32 y = 17;
+	uint32 width = 18;
+	uint32 height = 19;
+}
