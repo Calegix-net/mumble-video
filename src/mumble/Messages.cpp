@@ -523,6 +523,11 @@ void MainWindow::msgUserState(const MumbleProto::UserState &msg) {
 		QString oldName = pDst->qsName;
 		QString newName = u8(msg.name());
 		pmModel->renameUser(pDst, newName);
+
+		// Keeps a video tile's label in step with the rename. Harmless for users with no tile.
+		if (m_videoGrid) {
+			m_videoGrid->setSenderName(pDst->uiSession, newName);
+		}
 		if (!oldName.isNull() && oldName != newName) {
 			if (pSrc != pDst) {
 				Global::get().l->log(Log::UserRenamed, tr("%1 renamed to %2 by %3.")
@@ -1330,6 +1335,11 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 	// it the units are undecodable: nothing in the UDP payload says which codec produced it, by design.
 	if (m_videoGrid) {
 		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.codec()));
+
+		// Named after the surface exists, since that is what holds the label.
+		if (ClientUser *sender = ClientUser::get(msg.session())) {
+			m_videoGrid->setSenderName(msg.session(), sender->qsName);
+		}
 	}
 
 	MumbleProto::VideoSubscribe mpvs;

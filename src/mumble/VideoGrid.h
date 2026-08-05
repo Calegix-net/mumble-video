@@ -9,6 +9,7 @@
 #include "VP8Codec.h"
 
 #include <QtCore/QByteArray>
+#include <QtCore/QString>
 #include <QtGui/QImage>
 #include <QtWidgets/QWidget>
 
@@ -91,6 +92,18 @@ public slots:
 	 */
 	void setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec);
 
+	/**
+	 * Sets the name drawn on a sender's tile.
+	 *
+	 * Passed in rather than looked up, so the grid stays a plain widget over session ids and can be
+	 * tested without the client's user model. An unnamed sender is drawn with no label rather than with
+	 * a session number, which would mean nothing to anybody looking at it.
+	 */
+	void setSenderName(unsigned int senderSession, const QString &name);
+
+	/// The name a sender's tile is labelled with, empty if none is known.
+	QString senderName(unsigned int senderSession) const;
+
 	/// Drops a sender's surface, on disconnect or when their stream ends.
 	void removeSender(unsigned int senderSession);
 
@@ -108,6 +121,9 @@ protected:
 
 		/// MumbleProto::VideoState::Codec. 0 is CODEC_UNKNOWN, whose units are dropped.
 		int codec = 0;
+
+		/// Drawn on the tile. Empty until the sender is identified.
+		QString name;
 
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.

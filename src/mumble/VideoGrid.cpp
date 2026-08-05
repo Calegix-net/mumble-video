@@ -102,6 +102,24 @@ QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
 	}
 }
 
+void VideoGrid::setSenderName(unsigned int senderSession, const QString &name) {
+	const auto it = m_surfaces.find(senderSession);
+
+	if (it == m_surfaces.end() || it->second.name == name) {
+		return;
+	}
+
+	it->second.name = name;
+
+	update();
+}
+
+QString VideoGrid::senderName(unsigned int senderSession) const {
+	const auto it = m_surfaces.find(senderSession);
+
+	return it == m_surfaces.end() ? QString() : it->second.name;
+}
+
 void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec) {
 	// Bounded on surfaces held, not on surfaces drawn: the cap is there to stop a peer forcing unbounded
 	// allocation by announcing streams, and an announced-but-blank surface still costs memory.
@@ -246,8 +264,19 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		painter.drawImage(target, image);
 
 		if (!label.isEmpty()) {
+			// Drawn inside the picture rather than the cell. A letterboxed tile leaves black margins, and
+			// a name sitting out in one of those reads as belonging to nothing in particular.
+			const QRect labelRect = target.adjusted(4, 4, -4, -4);
+
+			// A dark strip behind it, because white text over a bright frame is unreadable and the frame
+			// is somebody's camera - its brightness is not ours to predict.
+			QRect backdrop = painter.fontMetrics().boundingRect(labelRect, Qt::AlignBottom | Qt::AlignLeft, label);
+			backdrop.adjust(-3, -1, 3, 1);
+
+			painter.fillRect(backdrop, QColor(0, 0, 0, 140));
+
 			painter.setPen(Qt::white);
-			painter.drawText(cell.adjusted(4, 4, -4, -4), Qt::AlignBottom | Qt::AlignLeft, label);
+			painter.drawText(labelRect, Qt::AlignBottom | Qt::AlignLeft, label);
 		}
 	};
 
@@ -260,6 +289,6 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 			continue;
 		}
 
-		drawInto(it->second.canvas, index++, QString());
+		drawInto(it->second.canvas, index++, it->second.name);
 	}
 }

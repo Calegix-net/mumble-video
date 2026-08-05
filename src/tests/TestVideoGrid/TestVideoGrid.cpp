@@ -86,6 +86,7 @@ private slots:
 	void aVp8StreamIsDecoded();
 	void unitsForAnUnannouncedStreamAreDropped();
 	void anUnknownCodecIsDropped();
+	void aSenderKeepsItsNameAcrossANewStream();
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
@@ -351,6 +352,30 @@ void TestVideoGrid::anAnnouncedButBlankStreamPaintsWithoutCrashing() {
 
 	QImage target(320, 240, QImage::Format_RGB32);
 	grid.render(&target);
+}
+
+// Every tile except your own went unlabelled, because the paint code had a name for the self view and
+// an empty string for everyone else.
+void TestVideoGrid::aSenderKeepsItsNameAcrossANewStream() {
+	VideoGrid grid;
+
+	// No surface yet, so there is nothing to name.
+	grid.setSenderName(SENDER, QStringLiteral("alice"));
+	QCOMPARE(grid.senderName(SENDER), QString());
+
+	announce(grid, SENDER, STREAM);
+	grid.setSenderName(SENDER, QStringLiteral("alice"));
+	QCOMPARE(grid.senderName(SENDER), QStringLiteral("alice"));
+
+	// A new stream is the same person: the picture is discarded, the name is not.
+	announce(grid, SENDER, STREAM + 1);
+	QCOMPARE(grid.senderName(SENDER), QStringLiteral("alice"));
+
+	grid.setSenderName(SENDER, QStringLiteral("alice-renamed"));
+	QCOMPARE(grid.senderName(SENDER), QStringLiteral("alice-renamed"));
+
+	grid.removeSender(SENDER);
+	QCOMPARE(grid.senderName(SENDER), QString());
 }
 
 void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
