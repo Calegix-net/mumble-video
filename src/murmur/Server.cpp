@@ -1878,6 +1878,8 @@ void Server::connectionClosed(QAbstractSocket::SocketError err, const QString &r
 		it = it->first.first == u->uiSession ? m_videoAnnouncements.erase(it) : std::next(it);
 	}
 
+	m_lastKeyframeRelayUsec.erase(u->uiSession);
+
 	if (u->uiSession > 0 && u->uiSession < iMaxUsers * 2)
 		qqIds.enqueue(u->uiSession); // Reinsert session id into pool
 

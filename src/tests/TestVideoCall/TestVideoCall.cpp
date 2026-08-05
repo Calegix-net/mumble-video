@@ -224,6 +224,7 @@ private slots:
 	void aVideoCallWorksEndToEnd();
 	void anUnsubscribedClientReceivesNothing();
 	void aClientJoiningLaterLearnsOfExistingStreams();
+	void aKeyframeRequestReachesTheSenderOnceASecond();
 
 private:
 	QTemporaryDir m_dir;
@@ -443,6 +444,67 @@ void TestVideoCall::aClientJoiningLaterLearnsOfExistingStreams() {
 	// every unit it is about to be sent.
 	QCOMPARE(replayed.codec(), MumbleProto::VideoState_Codec_VP8);
 	QCOMPARE(replayed.width(), 640u);
+}
+
+// The only loss-recovery mechanism in the protocol. A new subscriber can decode nothing until a
+// keyframe arrives, so its request has to reach the sender - but at most once per second per sender,
+// because a keyframe costs several normal frames and a burst of subscribers would otherwise multiply
+// into the sender's uplink.
+void TestVideoCall::aKeyframeRequestReachesTheSenderOnceASecond() {
+	TestClient alice;
+	TestClient bob;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-kf", m_port));
+	QVERIFY(bob.connectAndAuthenticate("bob-kf", m_port));
+
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(3);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+	QByteArray ignored;
+	QVERIFY(bob.waitFor(TCPMessageType::VideoState, ignored));
+
+	MumbleProto::VideoSubscribe subscribe;
+	subscribe.set_session(alice.session);
+	subscribe.set_stream_id(3);
+	subscribe.set_subscribe(true);
+	subscribe.set_request_keyframe(true);
+	bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+
+	QByteArray body;
+	QVERIFY2(alice.waitFor(TCPMessageType::VideoSubscribe, body), "the keyframe request never reached the sender");
+
+	MumbleProto::VideoSubscribe relayed;
+	QVERIFY(relayed.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+
+	QVERIFY(relayed.request_keyframe());
+	// Addressed by the sender's own session, which is how the sending client knows the message concerns
+	// its stream rather than somebody else's refusal.
+	QCOMPARE(relayed.session(), alice.session);
+	QCOMPARE(relayed.stream_id(), 3u);
+
+	// The subscriber's own confirmation must not reflect the request back at it, where it would read as
+	// a request for the subscriber's stream.
+	QByteArray echoBody;
+	QVERIFY(bob.waitFor(TCPMessageType::VideoSubscribe, echoBody));
+
+	MumbleProto::VideoSubscribe echo;
+	QVERIFY(echo.ParseFromArray(echoBody.constData(), static_cast< int >(echoBody.size())));
+	QVERIFY(!echo.request_keyframe());
+
+	// A second request inside the window is absorbed by the server.
+	bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+
+	QByteArray second;
+	QVERIFY2(!alice.waitFor(TCPMessageType::VideoSubscribe, second, 700),
+			 "a second request inside the rate-limit window was relayed");
+
+	// And after the window has passed, requests work again - the limit is a throttle, not a fuse.
+	QThread::msleep(1200);
+	bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+	QVERIFY2(alice.waitFor(TCPMessageType::VideoSubscribe, second), "the rate limit never re-opened");
 }
 
 void TestVideoCall::anUnsubscribedClientReceivesNothing() {

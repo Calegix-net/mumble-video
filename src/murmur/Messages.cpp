@@ -2652,8 +2652,39 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 		return;
 	}
 
+	// A new subscriber needs a keyframe before it can decode anything, and after heavy loss an existing
+	// one needs a fresh point to resume from. The request is relayed to the sender, rate-limited per
+	// sender: a keyframe costs several normal frames of bandwidth, so a burst of subscribers must cost
+	// the sender one keyframe between them, not one each.
+	if (msg.request_keyframe()) {
+		ServerUser *senderUser = qhUsers.value(sender);
+
+		constexpr quint64 KEYFRAME_RELAY_INTERVAL_USEC = 1000 * 1000;
+
+		const quint64 now  = static_cast< quint64 >(tUptime.elapsed().count());
+		const auto lastIt  = m_lastKeyframeRelayUsec.find(sender);
+		const bool allowed = lastIt == m_lastKeyframeRelayUsec.end() || now - lastIt->second >= KEYFRAME_RELAY_INTERVAL_USEC;
+
+		if (senderUser && allowed) {
+			m_lastKeyframeRelayUsec[sender] = now;
+
+			MumbleProto::VideoSubscribe request;
+			// The session names the stream's sender, here the recipient itself: that is how the sending
+			// client recognises the message as being about its own stream. subscribe stays true so that a
+			// client which predates keyframe requests ignores this instead of reading it as a refusal.
+			request.set_session(sender);
+			request.set_stream_id(msg.stream_id());
+			request.set_subscribe(true);
+			request.set_request_keyframe(true);
+
+			sendMessage(senderUser, request);
+		}
+	}
+
 	// Echoed back so the client knows the subscription took effect, rather than inferring it from the
-	// arrival of frames it may have to wait for.
+	// arrival of frames it may have to wait for. The keyframe request is stripped first: it was meant
+	// for the sender, and reflecting it at the subscriber would look like a request for *its* stream.
+	msg.set_request_keyframe(false);
 	sendMessage(uSource, msg);
 }
 

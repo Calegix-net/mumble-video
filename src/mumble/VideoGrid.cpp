@@ -157,8 +157,23 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	const QImage tile = decodeUnit(surface, encodedTile);
 
 	if (tile.isNull()) {
+		// Only for codecs this build can decode. An unknown codec fails on every unit forever, and
+		// asking its sender for keyframes would be a request nothing can satisfy.
+		const bool decodable = surface.codec == MumbleProto::VideoState_Codec_TiledImage
+							   || surface.codec == MumbleProto::VideoState_Codec_VP8;
+
+		if (decodable && ++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
+			// Reset on emit, so a sender that ignores the request is asked again only after another full
+			// run of failures rather than on every subsequent unit.
+			surface.consecutiveFailures = 0;
+
+			emit keyframeNeeded(senderSession, streamID);
+		}
+
 		return;
 	}
+
+	surface.consecutiveFailures = 0;
 
 	// A surface exists from the announcement onwards but holds no picture until now, so this is what
 	// makes the sender count - and with it the video panel - appear.

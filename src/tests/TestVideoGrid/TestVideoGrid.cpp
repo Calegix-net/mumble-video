@@ -87,6 +87,7 @@ private slots:
 	void unitsForAnUnannouncedStreamAreDropped();
 	void anUnknownCodecIsDropped();
 	void aSenderKeepsItsNameAcrossANewStream();
+	void aStuckDecoderAsksForAKeyframe();
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
@@ -376,6 +377,50 @@ void TestVideoGrid::aSenderKeepsItsNameAcrossANewStream() {
 
 	grid.removeSender(SENDER);
 	QCOMPARE(grid.senderName(SENDER), QString());
+}
+
+// After lost reference frames a VP8 decoder fails on every unit until a keyframe arrives, so a run of
+// failures is the signal that waiting is pointless. The grid reports it; sending the actual request is
+// its owner's job, since the grid has no connection.
+void TestVideoGrid::aStuckDecoderAsksForAKeyframe() {
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const QByteArray garbage("no decoder will make sense of this");
+
+	for (int i = 0; i < VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES - 1; ++i) {
+		grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+	}
+
+	QCOMPARE(needed.count(), 0);
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+	QCOMPARE(needed.count(), 1);
+	QCOMPARE(needed.at(0).at(0).toUInt(), SENDER);
+	QCOMPARE(needed.at(0).at(1).toUInt(), STREAM);
+
+	// The counter restarts after each report, so a sender that never answers is asked again only after
+	// another full run - not on every subsequent unit.
+	for (int i = 0; i < VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES - 1; ++i) {
+		grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+	}
+
+	QCOMPARE(needed.count(), 1);
+
+	// A stream announced with a codec this build cannot decode must never generate requests: they would
+	// ask for something no keyframe can fix.
+	VideoGrid unknowing;
+	QSignalSpy futile(&unknowing, &VideoGrid::keyframeNeeded);
+
+	announce(unknowing, SENDER, STREAM, MumbleProto::VideoState_Codec_CODEC_UNKNOWN);
+
+	for (int i = 0; i < 3 * VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES; ++i) {
+		unknowing.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+	}
+
+	QCOMPARE(futile.count(), 0);
 }
 
 void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {

@@ -210,6 +210,12 @@ public:
 	/// only its own picture until the sender happens to stop and start again.
 	std::map< std::pair< unsigned int, unsigned int >, MumbleProto::VideoState > m_videoAnnouncements;
 
+	/// When each sender last had a keyframe request relayed to it, in microseconds of tUptime. Kept so
+	/// that many subscribers arriving at once cost the sender one keyframe, not one per subscriber: a
+	/// keyframe is several times the size of a normal frame, so unbounded requests amplify into the
+	/// sender's uplink.
+	std::map< unsigned int, quint64 > m_lastKeyframeRelayUsec;
+
 	/// Sends `user` the announcement for every active stream it is permitted to receive, as though each
 	/// had just started. Used when a client joins, and when an ACL change grants it video it could not
 	/// previously see.

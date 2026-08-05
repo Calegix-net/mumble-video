@@ -51,6 +51,11 @@ public:
 	/// each surface costs real memory.
 	static constexpr int MAX_SENDERS = 16;
 
+	/// Consecutive undecodable units from one stream before keyframeNeeded() is emitted. VP8 after lost
+	/// reference frames fails on every unit until a keyframe arrives, so a run of this length means
+	/// waiting will not help. High enough that a single corrupt unit stays a non-event.
+	static constexpr int KEYFRAME_REQUEST_AFTER_FAILURES = 10;
+
 	explicit VideoGrid(QWidget *parent = nullptr);
 
 	/// Number of senders currently on screen. Counts only those with a picture: a surface exists from a
@@ -114,6 +119,11 @@ signals:
 	/// Emitted when a sender appears or disappears, so the containing window can show or hide itself.
 	void senderCountChanged(int count);
 
+	/// Emitted when a stream has produced KEYFRAME_REQUEST_AFTER_FAILURES undecodable units in a row,
+	/// meaning its decoder has lost the reference frames it needs and only a keyframe can restart it.
+	/// The grid has no connection of its own, so acting on this is the owner's job.
+	void keyframeNeeded(unsigned int senderSession, unsigned int streamID);
+
 protected:
 	struct Surface {
 		QImage canvas;
@@ -124,6 +134,9 @@ protected:
 
 		/// Drawn on the tile. Empty until the sender is identified.
 		QString name;
+
+		/// Undecodable units in a row, for the keyframeNeeded() threshold. Reset by any success.
+		int consecutiveFailures = 0;
 
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.

@@ -36,6 +36,7 @@
 #include "Utils.h"
 #include "VersionCheck.h"
 #include "VideoGrid.h"
+#include "VideoBroadcaster.h"
 #include "ViewCert.h"
 #include "crypto/CryptState.h"
 #include "crypto/CryptStateOCB2.h"
@@ -1346,6 +1347,8 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 	mpvs.set_session(msg.session());
 	mpvs.set_stream_id(msg.stream_id());
 	mpvs.set_subscribe(true);
+	// Nothing decodes until a keyframe arrives, and the sender's next scheduled one may be seconds out.
+	mpvs.set_request_keyframe(true);
 
 	Global::get().sh->sendMessage(mpvs);
 }
@@ -1353,6 +1356,18 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 /// The server's answer to a subscription request, or notice that an existing one has ended because the
 /// permissions behind it changed.
 void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
+	// A message about one's own stream is a relayed keyframe request from a subscriber. Honouring it is
+	// what turns "subscriber joins" into "subscriber sees a picture now" rather than "at the encoder's
+	// next scheduled keyframe, up to several seconds away". The server rate-limits these per sender, so
+	// obeying unconditionally cannot be amplified into re-encoding every frame.
+	if (msg.request_keyframe() && msg.has_session() && msg.session() == Global::get().uiSession) {
+		if (m_videoBroadcaster && m_videoBroadcaster->isActive() && m_videoBroadcaster->streamID() == msg.stream_id()) {
+			m_videoBroadcaster->requestKeyframe();
+		}
+
+		return;
+	}
+
 	if (msg.subscribe() || !msg.has_session()) {
 		return;
 	}

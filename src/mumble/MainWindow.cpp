@@ -488,6 +488,24 @@ void MainWindow::setupVideoGrid() {
 	// panel at all for the many users who never touch this.
 	m_videoDock->hide();
 
+	// The grid can tell that a stream's decoder is stuck - a run of undecodable units means its
+	// reference frames are gone - but it deliberately knows nothing about the server. The request goes
+	// out from here, as a re-subscribe carrying request_keyframe: re-subscribing is idempotent, and the
+	// server rate-limits what it relays, so a stuck decoder cannot flood the sender.
+	connect(m_videoGrid, &VideoGrid::keyframeNeeded, this, [](unsigned int senderSession, unsigned int streamID) {
+		if (!Global::get().sh) {
+			return;
+		}
+
+		MumbleProto::VideoSubscribe mpvs;
+		mpvs.set_session(senderSession);
+		mpvs.set_stream_id(streamID);
+		mpvs.set_subscribe(true);
+		mpvs.set_request_keyframe(true);
+
+		Global::get().sh->sendMessage(mpvs);
+	});
+
 	connect(m_videoGrid, &VideoGrid::senderCountChanged, this, [this](int count) {
 		const bool show = count > 0;
 
