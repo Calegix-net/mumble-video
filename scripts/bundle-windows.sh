@@ -86,6 +86,10 @@ while [ ${#queue[@]} -gt 0 ]; do
     done < <("${OBJDUMP}" -p "${current}" 2>/dev/null | awk '/DLL Name:/ { print $3 }')
 done
 
+# The user-facing README ships from the repository, exactly as the Linux bundler does, and for the same
+# reason: this script deletes its output directory first, so anything hand-copied is lost every build.
+cp "$(dirname "$0")/../docs/dist/README-windows.txt" "${OUT_DIR}/README.txt"
+
 # Debug symbols roughly double the download and are of no use without the matching build tree, so they
 # come off here rather than at compile time - a stripped build would also strip what the crash reporter
 # needs when debugging locally.
