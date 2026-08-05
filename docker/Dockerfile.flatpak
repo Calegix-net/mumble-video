@@ -1,0 +1,13 @@
+# Build environment for the client flatpak.
+#
+# flatpak-builder sandboxes each module build with bubblewrap, so a container running this needs
+# --privileged. See scripts/build-flatpak.sh.
+#
+# This is deliberately not the upstream flatpak-github-actions image: that image only publishes KDE
+# runtimes up to 6.7, and the manifest targets 6.9. Pinning the runtime to whatever a CI image happens
+# to offer is the wrong way round.
+FROM fedora:42
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        flatpak flatpak-builder git git-lfs zip elfutils \
+    && dnf clean all

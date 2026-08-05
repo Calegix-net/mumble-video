@@ -1,12 +1,13 @@
-# Builds both release artifacts on every push: the Linux client bundle and the Windows MSI.
+# Builds every release artifact on every push: the Linux bundle, the Linux flatpak, and the Windows
+# installers.
 #
-# Both jobs run in the same containers the maintainers build in locally (docker/Dockerfile and
-# docker/Dockerfile.windows), so CI green means "the documented environment works", not "some runner
-# image happened to have the right libraries". The images take a while to build cold; the registry
-# cache keeps warm runs reasonable.
+# Every job runs in the same container the maintainers build in locally (docker/Dockerfile,
+# docker/Dockerfile.windows, docker/Dockerfile.flatpak), so CI green means "the documented environment
+# works", not "some runner image happened to have the right libraries". The images take a while to
+# build cold; the layer cache keeps warm runs reasonable.
 #
-# A tag starting with v additionally publishes a GitHub release carrying both artifacts and their
-# checksums.
+# Every push to main rolls the dev-latest prerelease; a tag starting with v publishes a versioned
+# release. Both carry all artifacts and their checksums.
 
 name: build
 
@@ -113,12 +114,60 @@ jobs:
             out/mumble-video-x64.msi
             out/mumble-video-windows-x86_64.zip
 
+  flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the flatpak build image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile.flatpak
+          tags: mumble-flatpak-build
+          load: true
+          cache-from: type=gha,scope=flatpak-image
+          cache-to: type=gha,scope=flatpak-image,mode=max
+
+      # The runtime download and the per-module build cache are the whole cost of this job. Keyed on
+      # the manifest, since that is what decides both the runtime version and the modules; the prefix
+      # restore key means an unrelated manifest edit still starts from the last runtimes rather than
+      # from nothing.
+      - uses: actions/cache@v4
+        with:
+          path: flatpak-state
+          key: flatpak-${{ hashFiles('flatpak/com.calegix.MumbleVideo.yml') }}
+          restore-keys: flatpak-
+
+      - name: Build the flatpak
+        run: |
+          mkdir -p flatpak-state out
+          # --privileged because flatpak-builder isolates each module with bubblewrap, which cannot
+          # set up its namespaces in a default container.
+          docker run --rm --privileged \
+            -v "$PWD":/src -v "$PWD/flatpak-state":/state -v "$PWD/out":/out \
+            mumble-flatpak-build \
+            bash /src/scripts/build-flatpak.sh /src /state /out/mumble-video.flatpak
+          # The container writes as root; the cache and artifact steps that follow run as the runner
+          # user. Reclaiming ownership here is what stops them failing on unreadable files - the same
+          # trap that broke the Linux bundle step on the first real CI run.
+          sudo chown -R "$(id -u):$(id -g)" flatpak-state out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble-video-flatpak
+          path: out/mumble-video.flatpak
+
   # Two kinds of release. A v* tag publishes a proper versioned release. A push to main rolls the
   # dev-latest prerelease forward, so the Releases page always carries current artifacts without
   # anyone having to tag - CI artifacts expire and are buried behind a login; releases are neither.
   release:
     if: github.event_name == 'push'
-    needs: [linux, windows]
+    needs: [linux, windows, flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,7 +177,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: sha256sum mumble-video-* > SHA256SUMS
+        run: sha256sum mumble-video* > SHA256SUMS
 
       - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -136,6 +185,7 @@ jobs:
         with:
           files: |
             mumble-video-linux-x86_64.zip
+            mumble-video.flatpak
             mumble-video-setup.exe
             mumble-video-x64.msi
             mumble-video-windows-x86_64.zip
@@ -155,5 +205,5 @@ jobs:
             --prerelease \
             --title "Development build" \
             --notes "Rolling build of main at $GITHUB_SHA. Prefer a versioned release unless you want the newest changes." \
-            mumble-video-linux-x86_64.zip mumble-video-setup.exe mumble-video-x64.msi \
-            mumble-video-windows-x86_64.zip SHA256SUMS
+            mumble-video-linux-x86_64.zip mumble-video.flatpak mumble-video-setup.exe \
+            mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS
