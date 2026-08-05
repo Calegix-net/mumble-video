@@ -13,6 +13,12 @@ runtime-version: "6.9"
 sdk: org.kde.Sdk
 command: mumble
 
+# Debug symbols are generated for every module, compressed, and split into a .Debug extension that
+# build-bundle does not ship - so the whole exercise is time and disk spent on output nobody receives.
+# It is a visible share of a cold build: the log is mostly elfutils compressing sections.
+build-options:
+  no-debuginfo: true
+
 rename-desktop-file: info.mumble.Mumble.desktop
 rename-icon: mumble
 
