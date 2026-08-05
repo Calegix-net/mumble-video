@@ -13,10 +13,15 @@ runtime-version: "6.9"
 sdk: org.kde.Sdk
 command: mumble
 
-# Debug symbols are generated for every module, compressed, and split into a .Debug extension that
-# build-bundle does not ship - so the whole exercise is time and disk spent on output nobody receives.
-# It is a visible share of a cold build: the log is mostly elfutils compressing sections.
+# By default flatpak-builder splits debug symbols into a .Debug extension, which build-bundle does not
+# ship - time and disk spent generating and compressing output nobody receives.
+#
+# no-debuginfo alone is a trap: it stops the *split*, not the symbols, leaving them inline in every
+# binary. That turned a 24 MB bundle into a 127 MB one. strip is the half that actually removes them,
+# so both are needed: strip the binaries, and do not build the extension that would have held what was
+# stripped.
 build-options:
+  strip: true
   no-debuginfo: true
 
 rename-desktop-file: info.mumble.Mumble.desktop
@@ -120,6 +125,19 @@ modules:
     sources:
       - type: dir
         path: ..
+        # The build needs the source tree, not its history. .git is 595 MB of the repository's 700 MB
+        # and flatpak-builder copies sources per module stage, so carrying it was a large part of the
+        # "No space left on device" this build hit on a CI runner. The build outputs are skipped for
+        # the same reason: a local checkout has them, a fresh one does not, and neither should be
+        # copied into the sandbox.
+        skip:
+          - .git
+          - build
+          - build-win
+          - build-rel
+          - build-full
+          - out
+          - flatpak-state
       # Must match 3rdparty/rnnoise/model_version: the URL embeds the hash and the hash verifies the
       # archive, so bumping the submodule means updating both here.
       - type: archive
