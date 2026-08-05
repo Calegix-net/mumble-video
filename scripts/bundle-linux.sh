@@ -76,6 +76,10 @@ exec "${here}/bin/mumble" "$@"
 LAUNCHER
 chmod +x "${OUT_DIR}/mumble"
 
+# The user-facing README lives in the repository, not in anyone's memory: it was hand-copied into the
+# bundle twice and lost twice, because this script starts by deleting its output directory.
+cp "$(dirname "$0")/../docs/dist/README-linux.txt" "${OUT_DIR}/README.txt"
+
 # Stamped so a published archive says which commit produced it. A bundle was once built from a stale
 # tree and shipped as new - byte-identical to the previous one - and nothing in it could have revealed
 # that. The binary's own checksum is recorded for the same reason.
