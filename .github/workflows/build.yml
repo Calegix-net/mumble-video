@@ -185,6 +185,9 @@ jobs:
     needs: [linux, windows, flatpak]
     runs-on: ubuntu-latest
     permissions:
+      # Declaring any permissions sets every unlisted scope to none, so actions:read has to be spelled
+      # out - without it this job cannot download the artifacts the other three just uploaded.
+      actions: read
       contents: write
     steps:
       - uses: actions/download-artifact@v4
