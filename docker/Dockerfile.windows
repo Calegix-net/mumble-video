@@ -18,7 +18,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         mingw64-openssl mingw64-protobuf mingw64-boost mingw64-opus \
         mingw64-zlib mingw64-winpthreads \
         mingw64-flac mingw64-libvorbis mingw64-libogg \
-        cmake make git pkgconf protobuf-compiler \
+        cmake make git pkgconf protobuf-compiler msitools \
         yasm nasm diffutils file findutils which perl \
     && dnf clean all
 

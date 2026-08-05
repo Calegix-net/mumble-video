@@ -1,142 +1,99 @@
-name: Build
+# Builds both release artifacts on every push: the Linux client bundle and the Windows MSI.
+#
+# Both jobs run in the same containers the maintainers build in locally (docker/Dockerfile and
+# docker/Dockerfile.windows), so CI green means "the documented environment works", not "some runner
+# image happened to have the right libraries". The images take a while to build cold; the registry
+# cache keeps warm runs reasonable.
+#
+# A tag starting with v additionally publishes a GitHub release carrying both artifacts and their
+# checksums.
+
+name: build
 
 on:
   push:
-    branches: '*'
+    branches: [main]
+    tags: ["v*"]
   pull_request:
-    branches: '*'
-  workflow_dispatch:
-    inputs:
-      SIGN_WINDOWS_INSTALLER:
-        description: 'Sign Windows Installer'
-        required: true
-        type: boolean
-        default: false
-
-env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  BUILD_TYPE: Release
-  CMAKE_OPTIONS: -Dtests=ON -Dsymbols=ON -Ddisplay-install-paths=ON -Dtest-lto=OFF -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache
-
 
 jobs:
-
-  fetch_build_number:
+  linux:
     runs-on: ubuntu-latest
-    outputs:
-      build_number: ${{ steps.fetch.outputs.build_number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
-            fetch-depth: 1
-      - id: fetch
-        shell: bash
+          submodules: recursive
+
+      - name: Build the build image
+        run: docker build -t mumble-build -f docker/Dockerfile docker/
+
+      - name: Configure, build and test
         run: |
-          build_version="$("${{ github.workspace }}/scripts/mumble-version.py")"
-          build_number="$("${{ github.workspace }}/scripts/mumble-build-number.py" \
-            --commit "${{ github.sha }}" --version "${build_version}" \
-            --password "${{ secrets.BUILD_NUMBER_TOKEN }}" --default 0)"
-          echo "Build Number: ${build_version}.${build_number}"
-          echo "build_number=${build_number}" >> "$GITHUB_OUTPUT"
+          docker run --rm -v "$PWD":/src -v "$PWD/build":/build mumble-build bash -c '
+            set -e
+            cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF
+            cmake --build /build -j"$(nproc)"
+            cd /build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure'
 
+      - name: Bundle
+        run: |
+          docker run --rm -v "$PWD":/src -v "$PWD/build":/build -v "$PWD/out":/out mumble-build \
+            bash /src/scripts/bundle-linux.sh /build /out/bundle
+          cd out && zip -q -r -9 mumble-video-linux-x86_64.zip bundle
 
-  build:
-    needs: [ fetch_build_number ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble-video-linux-x86_64
+          path: out/mumble-video-linux-x86_64.zip
 
-    strategy:
-        fail-fast: false
-        matrix:
-            os: [ubuntu-22.04, ubuntu-24.04, windows-2025-vs2026, macos-14]
-            type: [static, shared]
-            arch: [x86_64]
-            exclude:
-              - os: windows-2025-vs2026
-                type: shared
-              - os: macos-14
-                type: shared
-              - os: ubuntu-22.04
-                type: static
-            
-    runs-on: ${{ matrix.os }}
-
+  windows:
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
-      with:
-          submodules: 'recursive'
-          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
+      - name: Build the cross-build image
+        run: docker build -t mumble-build-windows -f docker/Dockerfile.windows docker/
 
-      # The Bash version installed on macOS is ancient. We need a newer version
-    - name: Install Bash
-      if: startswith(matrix.os, 'macos')
-      run: brew install bash
+      - name: Cross-compile
+        run: |
+          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows \
+            bash /src/scripts/build-windows.sh
 
-    - name: Set environment variables
-      run: $GITHUB_WORKSPACE/.github/workflows/set_environment_variables.sh "${{ matrix.os }}" "${{ matrix.type }}" "${{ matrix.arch }}" "${{ github.workspace }}"
-      shell: bash
+      - name: Bundle and build the MSI
+        run: |
+          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out mumble-build-windows bash -c '
+            set -e
+            bash /src/scripts/bundle-windows.sh /build /out/mumble-windows
+            bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi'
+          cd out && zip -q -r -9 mumble-video-windows-x86_64.zip mumble-windows
 
-    - uses: actions/cache/restore@v5
-      with:
-          path: '${{ env.MUMBLE_ENVIRONMENT_DIR }}'
-          key: ${{ env.MUMBLE_ENVIRONMENT_VERSION }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble-video-windows-x86_64
+          path: |
+            out/mumble-video-x64.msi
+            out/mumble-video-windows-x86_64.zip
 
-    - uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: ${{ github.base_ref || github.ref_name }}.${{ matrix.os }}.${{ matrix.type }}
-        save: ${{ github.event_name != 'pull_request' }}
-        append-timestamp: false
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
-    - uses: ./.github/actions/install-dependencies
-      with:
-          type: ${{ matrix.type }}
-          os: ${{ matrix.os }}
-          arch: ${{ matrix.arch }}
+      - name: Checksums
+        run: sha256sum mumble-video-* > SHA256SUMS
 
-    - name: Build
-      run: ./.github/workflows/build.sh "${{ matrix.os }}" "${{ matrix.type }}" "${{ matrix.arch }}"
-      shell: bash
-      env:
-          MUMBLE_BUILD_NUMBER: ${{ needs.fetch_build_number.outputs.build_number }}
-
-    - name: Test
-      working-directory: ${{ github.workspace }}/build
-      shell: bash
-      run: ctest --output-on-failure -C $BUILD_TYPE
-
-    - if: ${{ inputs.SIGN_WINDOWS_INSTALLER && startsWith(matrix.os, 'windows') }}
-      uses: ./.github/actions/sign-binaries
-      with:
-          signpath-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          build-number: ${{ needs.fetch_build_number.outputs.build_number }}
-          type: ${{ matrix.type }}
-          os: ${{ matrix.os }}
-          arch: ${{ matrix.arch }}
-
-    - if: ${{ !inputs.SIGN_WINDOWS_INSTALLER && matrix.type == 'static' }}
-      name: Publish
-      uses: actions/upload-artifact@v7
-      with:
-        name: 'Mumble-${{ matrix.os }}'
-        compression-level: 9
-        path: |
-          build/mumble
-          build/Mumble.app
-          build/mumble-server
-          build/**/mumble*.msi
-          build/**/mumble*.exe
-          build/**/plugins/*.pdb
-          build/**/mumble.pdb
-          build/**/mumble_ol*.pdb
-          build/**/mumble-server.pdb
-          build/**/rnnoise.pdb
-          build/**/speexdsp.pdb
-
-      # We don't want to save the build env in a cache on a PR as caches are scoped
-      # to branches and while PRs can access caches from the default branch, they
-      # can't access the cache of other PRs. Hence, it is kind of a waste to save
-      # the cache on a PR
-    - if: ${{ matrix.type  == 'static' && github.event_name != 'pull_request' }}
-      uses: actions/cache/save@v5
-      with:
-          path: '${{ env.MUMBLE_ENVIRONMENT_DIR }}'
-          key: ${{ env.MUMBLE_ENVIRONMENT_VERSION }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mumble-video-linux-x86_64.zip
+            mumble-video-x64.msi
+            mumble-video-windows-x86_64.zip
+            SHA256SUMS

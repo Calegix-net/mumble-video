@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Product definition for the Windows installer, built with wixl (msitools) so the MSI can be produced
+  from Linux alongside the cross-compiled binaries. Upstream's installer is WixSharp, which needs .NET
+  on a Windows host; this deliberately is not that.
+
+  The file list is not here: it is harvested from the bundle directory by wixl-heat at build time (see
+  scripts/build-msi.sh), so adding a DLL to the bundle never requires editing this file.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <!-- Product Id="*" makes every build a distinct product; the fixed UpgradeCode is what ties them
+       together so that installing a newer MSI replaces the older one. The UpgradeCode must never
+       change for the lifetime of the fork. -->
+  <Product Id="*"
+           Name="Mumble Video"
+           Manufacturer="the mumble-video project"
+           Version="$(var.Version)"
+           UpgradeCode="7f2a9b64-3c81-4e1f-9d5a-4b8e2c6f0a17"
+           Language="1033">
+
+    <Package Description="Mumble Video - voice and video chat client"
+             Comments="Fork of Mumble with camera sharing. Not affiliated with the Mumble project."
+             InstallerVersion="500"
+             Compressed="yes"/>
+
+    <!-- Newer version replaces older in one step; downgrades are refused with a message rather than
+         producing a silent side-by-side mess. -->
+    <Upgrade Id="7f2a9b64-3c81-4e1f-9d5a-4b8e2c6f0a17">
+      <UpgradeVersion Minimum="$(var.Version)" OnlyDetect="yes" Property="NEWERVERSIONDETECTED"/>
+      <UpgradeVersion Minimum="0.0.0" Maximum="$(var.Version)" IncludeMinimum="yes" IncludeMaximum="no"
+                      Property="OLDERVERSIONBEINGUPGRADED"/>
+    </Upgrade>
+    <Condition Message="A newer version of Mumble Video is already installed.">NOT NEWERVERSIONDETECTED</Condition>
+
+    <InstallExecuteSequence>
+      <RemoveExistingProducts After="InstallValidate"/>
+    </InstallExecuteSequence>
+
+    <Media Id="1" Cabinet="mumble.cab" EmbedCab="yes"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Mumble Video"/>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppMenuDir" Name="Mumble Video"/>
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="AppMenuDir">
+      <Component Id="AppShortcuts" Guid="b4c1d2e3-8a45-4f6b-9c7d-1e2f3a4b5c6d" Win64="yes">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Mumble Video"
+                  Target="[INSTALLDIR]mumble.exe"
+                  WorkingDirectory="INSTALLDIR"/>
+        <RemoveFolder Id="RemoveAppMenuDir" On="uninstall"/>
+        <RegistryValue Root="HKCU" Key="Software\mumble-video" Name="installed" Type="integer" Value="1"
+                       KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Level="1">
+      <ComponentGroupRef Id="CG.Bundle"/>
+      <ComponentRef Id="AppShortcuts"/>
+    </Feature>
+  </Product>
+</Wix>

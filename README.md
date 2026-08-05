@@ -1,154 +1,77 @@
-![Mumble screenshot](screenshots/Mumble.png)
+# Mumble Video
 
-# Mumble - Open Source voice-chat software
+A fork of [Mumble](https://github.com/mumble-voip/mumble) that adds camera sharing to the
+low-latency voice chat Mumble is known for.
 
-[![https://www.mumble.info](https://img.shields.io/badge/Website-https%3A%2F%2Fwww.mumble.info-blue?style=for-the-badge)](https://www.mumble.info)
+**This is not the Mumble project**, and it is not affiliated with or endorsed by it. "Mumble" is
+their name and their work; everything good about the audio path here is theirs. This fork exists
+because video kept being requested upstream and never fit their scope.
 
-[![#mumble:matrix.org](https://img.shields.io/matrix/mumble:matrix.org?label=%23mumble:matrix.org&style=for-the-badge)](https://matrix.to/#/#mumble:matrix.org)
+## What it adds
 
-[![Codacy](https://img.shields.io/codacy/grade/262a5e20c83a40599050e22e700d8a3e?label=Codacy&style=for-the-badge)](https://app.codacy.com/manual/mumble-voip/mumble)
-[![Azure](https://img.shields.io/azure-devops/build/Mumble-VoIP/c819eb06-7b22-4ef3-bbcd-860094454eb3/1?label=Azure&style=for-the-badge)](https://dev.azure.com/Mumble-VoIP/Mumble)
-[![Cirrus CI](https://img.shields.io/cirrus/github/mumble-voip/mumble?label=Cirrus%20CI&style=for-the-badge)](https://cirrus-ci.com/github/mumble-voip/mumble)
-[![Travis CI](https://img.shields.io/travis/com/mumble-voip/mumble?label=Travis%20CI&style=for-the-badge)](https://travis-ci.com/mumble-voip/mumble)
+- **Camera sharing** - a toolbar button next to mute/deafen, a first-run video wizard that measures
+  what bitrates actually cost on your camera, and a video panel that appears when somebody shares.
+- **A dedicated video transport** - video runs on its own UDP channel with its own encryption state,
+  its own sequence space and its own MTU, so video loss cannot degrade voice.
+- **Two codecs** - VP8 for cameras (roughly 0.5 Mbit/s at 480p), and a tiled-JPEG scheme intended
+  for future screen sharing, where unchanged regions cost nothing to send.
+- **Permissioned routing** - two new ACL privileges, `ShareVideo` and `ReceiveVideo`, enforced by
+  the server on every packet delivered, not just at subscribe time. Video is subscribe-on-demand
+  rather than broadcast.
+- **Keyframe-on-demand** - new subscribers get a keyframe immediately instead of waiting for the
+  next scheduled one; stuck decoders re-request. Rate-limited server-side.
 
-Mumble is an Open Source, low-latency and high-quality voice-chat program
-written on top of Qt and Opus.
+Screen sharing is designed for in the protocol but **not implemented** - nothing captures a screen
+yet.
 
-There are two modules in Mumble; the client (mumble) and the server (mumble-server formerly known as murmur).
-The client works on Windows, Linux, FreeBSD, OpenBSD, and macOS,
-while the server should work on anything Qt can be installed on.
+## The one caveat that matters
 
-The documentation of the project can be found on [the website](https://www.mumble.info/documentation/).
+This is a **clean-break fork**: the UDP framing carries an extra media-channel byte, so this client
+cannot talk to a stock Mumble server and stock clients cannot talk to this server. Run both halves.
 
+The video transport contains new cryptographic code (sequence-derived nonces, sliding replay window,
+keys derived from the TLS session). The construction is conventional and tested, but it has had
+**no independent security review**. Treat it accordingly.
 
-## Contributing
+## Downloads
 
-We always welcome contributions to the project. If you have some code that you would like to contribute, please go ahead and create a PR. While doing so,
-please try to make sure that you follow our [commit guidelines](COMMIT_GUIDELINES.md).
-
-If you are new to the Mumble project, you may want to check out the general [introduction to the Mumble source code](docs/dev/TheMumbleSourceCode.md).
-
-### Translating
-
-Mumble supports various languages. We are always looking for qualified people to contribute translations.
-
-We are using Weblate as a translation platform. [Register on Weblate](https://hosted.weblate.org/accounts/register/), and join [our translation project](https://hosted.weblate.org/projects/mumble/).
-
-### Writing plugins
-
-Mumble supports general-purpose plugins that can provide functionality that is not implemented in the main Mumble application. You can find more
-information on how this works and how these have to be created in the [plugin documentation](docs/dev/plugins/README.md).
+CI builds a Linux bundle and a Windows MSI on every push (see Actions); tagged versions publish
+GitHub releases with checksums. Every Linux bundle contains `BUILD-INFO.txt` naming the exact commit
+it was built from.
 
 ## Building
 
-For information on how to build Mumble, check out [the dedicated documentation](docs/dev/build-instructions/README.md).
+Everything builds in containers so the host is never touched:
 
-Make sure to switch to the appropriate branch in this repository to get the correct build documentation. The current ``master`` branch contains
-the unstable code for a future release of Mumble. If you want to build an already released stable version of Mumble, e.g. ``1.5.735``, select the
-corresponding branch, e.g. ``1.5.x``, in the dropdown menu above. Alternatively, use the documentation in the respective release tarball.
+```sh
+# Linux client + server + tests
+docker build -t mumble-build -f docker/Dockerfile docker/
+docker run --rm -v "$PWD":/src -v "$PWD/build":/build mumble-build bash -c \
+  'cmake -S /src -B /build -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF && cmake --build /build -j$(nproc)'
 
-
-## Reporting issues
-
-If you want to report a bug or create a feature request, you can open a new issue (after you have checked that there is none already) on
-[GitHub](https://github.com/mumble-voip/mumble/issues/new/choose).
-
-
-## Code Signing
-
-We graciously acknowledge that this program uses free code signing provided by
-[SignPath.io](https://signpath.io?utm_source=foundation&utm_medium=github&utm_campaign=mumble), and a free code signing certificate by the
-[SignPath Foundation](https://signpath.org?utm_source=foundation&utm_medium=github&utm_campaign=mumble).
-
-## Windows
-
-### Running Mumble
-
-After installation, you should have a new Mumble folder in your
-Start Menu, from which you can start Mumble.
-
-### Running Mumble-Server
-
-Double-click the icon to start ``mumble-server``. There will be a small icon on your
-taskbar from which you can view the log.
-
-To set the superuser password, run ``mumble-server`` with the parameters `--set-su-pw <password>`.
-
-
-## MacOS
-
-### Running Mumble
-
-To install Mumble, drag the application from the downloaded
-disk image into your `/Applications` folder.
-
-### Running Mumble-Server
-
-``mumble-server`` is distributed separately from the Mumble client on MacOS.
-It is called Static OS X Server and can be downloaded from the main webpage.
-
-Once downloaded it can be run in the same way as on any other Unix-like system.
-For more information please see the "Running mumble-server" in the Linux/Unix section below.
-
-
-## Linux/Unix
-
-### Running Mumble
-
-If you have installed Mumble through your distribution package
-repository, you should be able to find Mumble in your start menu. No
-additional steps are necessary.
-
-### Running Mumble-Server
-
-``mumble-server`` should be run from the command line, so start a shell (command prompt)
-and go to wherever you installed Mumble. Run ``mumble-server`` as
-
-```
-mumble-server [--set-su-pw <password>] [--ini <inifile>] [--foreground] [--verbose]
-
---set-su-pw     Set a new password for the user SuperUser, which is hardcoded to
-                bypass ACLs. Keep this password safe. Until you set a password,
-                the SuperUser is disabled. If you use this option, mumble-server will
-                set the password in the database and then exit.
-
---ini           Use an inifile other than mumble-server.ini, use this to run several instances
-                of mumble-server from the same directory. Make sure each instance is using
-                a separate database.
-
---foreground    Run in the foreground, logging to standard output.
-
---verbose       More verbose logging.
+# Windows client (MinGW cross-compile) + MSI
+docker build -t mumble-build-windows -f docker/Dockerfile.windows docker/
+docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows bash /src/scripts/build-windows.sh
+docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out mumble-build-windows bash -c \
+  'bash /src/scripts/bundle-windows.sh /build /out/bundle && bash /src/scripts/build-msi.sh /out/bundle /out/mumble-video-x64.msi'
 ```
 
-#### Docker image
+The test suite (30 suites, including an integration test that spawns a real server and completes a
+two-client video call over the wire) runs with `ctest` in the build directory.
 
-Our official Docker image along with instructions on how to use it can be found at https://github.com/mumble-voip/mumble-docker
+## Where the video code lives
 
+| | |
+|---|---|
+| `src/VideoTransport.*` | per-stream crypt state, nonce derivation, replay window |
+| `src/VideoFragmentation.*` | fragment/reassemble units across 1200-byte datagrams |
+| `src/murmur/VideoRouter.*` | subscription routing and permission enforcement |
+| `src/mumble/VideoGrid.*` | the panel: per-sender surfaces, decoding, layout |
+| `src/mumble/VideoBroadcaster.*` | capture-to-encoder pipeline |
+| `src/mumble/VP8Codec.*` | libvpx encode/decode |
+| `src/mumble/VideoWizard.*` | first-run setup with measured bitrates |
 
-### Server configuration
+## License
 
-You can find an up-to-date ``mumble-server`` configuration template in [this repository](auxiliary_files/mumble-server.ini).
-Further server configuration documentation can be found [on the project website](https://www.mumble.info/documentation/administration/).
-
-### OpenGL Overlay
-
-The OpenGL overlay works by intercepting the call to switch buffers, and just
-before the buffer switch, we draw our nice GUI.
-
-To load a game with the overlay enabled, start the game like this:
-```bash
-LD_PRELOAD=/path/to/libmumble.so.1.1 gamename
-```
-
-If you have Mumble installed through the binary packages, this can be done by
-simply typing:
-```bash
-mumble-overlay gamename
-```
-
-## Sponsors
-
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
-
-<!-- Verified on DartNode: DNOS-A23FFD68 -->
+Same as upstream: BSD-style, see [LICENSE](LICENSE). Upstream's full documentation, contribution
+guidelines and source-code introduction remain in the tree and largely apply here too.
