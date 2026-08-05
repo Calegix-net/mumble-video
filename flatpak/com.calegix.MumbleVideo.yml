@@ -120,3 +120,6 @@ modules:
         url: https://media.xiph.org/rnnoise/models/rnnoise_data-5e7841199cf2947fc32f6eeaf6faffab5c2dd3da69e6a6e4830625a10285a09d.tar.gz
         sha256: 5e7841199cf2947fc32f6eeaf6faffab5c2dd3da69e6a6e4830625a10285a09d
         dest: rnnoise-model-src
+        # The tarball has src/ at its top level with no wrapper directory, so the default of stripping
+        # one component would strip src/ itself.
+        strip-components: 0
