@@ -15,6 +15,9 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Manual trigger, for re-running without an artificial commit and for the first run if the org's
+  # Actions policy was enabled after the initial push.
+  workflow_dispatch:
 
 jobs:
   linux:
