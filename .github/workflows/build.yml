@@ -117,6 +117,17 @@ jobs:
   flatpak:
     runs-on: ubuntu-latest
     steps:
+      # A runner has about 14 GB free, and a full flatpak build needs most of that: the KDE runtime
+      # and SDK alone are several GB before Boost, protobuf and Poco are built. The preinstalled
+      # toolchains here are worth ~25 GB and none of them are used by this job.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules \
+                      /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          df -h /
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -133,15 +144,14 @@ jobs:
           cache-from: type=gha,scope=flatpak-image
           cache-to: type=gha,scope=flatpak-image,mode=max
 
-      # The runtime download and the per-module build cache are the whole cost of this job. Keyed on
-      # the manifest, since that is what decides both the runtime version and the modules; the prefix
-      # restore key means an unrelated manifest edit still starts from the last runtimes rather than
-      # from nothing.
+      # Only flatpak-builder's module cache is kept. Caching the installed runtimes as well would be
+      # 5.6 GB against a 10 GB repository budget, evicting the container layer caches that save more
+      # time than re-downloading a runtime does.
       - uses: actions/cache@v4
         with:
-          path: flatpak-state
-          key: flatpak-${{ hashFiles('flatpak/com.calegix.MumbleVideo.yml') }}
-          restore-keys: flatpak-
+          path: flatpak-state/builder
+          key: flatpak-builder-${{ hashFiles('flatpak/com.calegix.MumbleVideo.yml') }}
+          restore-keys: flatpak-builder-
 
       - name: Build the flatpak
         run: |
@@ -156,6 +166,10 @@ jobs:
           # user. Reclaiming ownership here is what stops them failing on unreadable files - the same
           # trap that broke the Linux bundle step on the first real CI run.
           sudo chown -R "$(id -u):$(id -g)" flatpak-state out
+          # The bundle is built; the exported repository and checkout are just occupying the disk the
+          # cache step is about to need.
+          sudo rm -rf flatpak-state/build flatpak-state/repo
+          df -h /
 
       - uses: actions/upload-artifact@v4
         with:

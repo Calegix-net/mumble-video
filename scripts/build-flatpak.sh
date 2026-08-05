@@ -25,7 +25,9 @@ flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/fl
 flatpak install --user -y --noninteractive flathub \
     "org.kde.Platform//${RUNTIME_VERSION}" "org.kde.Sdk//${RUNTIME_VERSION}"
 
-flatpak-builder --user --force-clean --disable-rofiles-fuse \
+# --delete-build-dirs keeps the footprint down: each module's unpacked tree is several hundred MB and
+# is of no use once the module is built.
+flatpak-builder --user --force-clean --disable-rofiles-fuse --delete-build-dirs \
     --state-dir="${STATE_DIR}/builder" \
     --repo="${STATE_DIR}/repo" \
     "${STATE_DIR}/build" "${MANIFEST}"
