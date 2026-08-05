@@ -23,6 +23,13 @@
              InstallerVersion="500"
              Compressed="yes"/>
 
+    <!-- ALLUSERS=1 makes this a per-machine install, which is what lets it write to Program Files.
+         Without it the package runs in the per-user context, fails on the first file, and rolls back -
+         which from the outside looks exactly like double-clicking the MSI doing nothing at all. That is
+         what the first published MSI did. (InstallScope and InstallPrivileges are the modern spellings
+         and wixl supports neither, hence the raw property.) -->
+    <Property Id="ALLUSERS" Value="1"/>
+
     <!-- Newer version replaces older in one step; downgrades are refused with a message rather than
          producing a silent side-by-side mess. -->
     <Upgrade Id="7f2a9b64-3c81-4e1f-9d5a-4b8e2c6f0a17">

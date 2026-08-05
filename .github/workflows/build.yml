@@ -96,18 +96,20 @@ jobs:
           docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows \
             bash /src/scripts/build-windows.sh
 
-      - name: Bundle and build the MSI
+      - name: Bundle and build the installers
         run: |
           docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out mumble-build-windows bash -c '
             set -e
             bash /src/scripts/bundle-windows.sh /build /out/mumble-windows
-            bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi'
+            bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi
+            bash /src/scripts/build-nsis.sh /out/mumble-windows /out/mumble-video-setup.exe'
           cd out && zip -q -r -9 mumble-video-windows-x86_64.zip mumble-windows
 
       - uses: actions/upload-artifact@v4
         with:
           name: mumble-video-windows-x86_64
           path: |
+            out/mumble-video-setup.exe
             out/mumble-video-x64.msi
             out/mumble-video-windows-x86_64.zip
 
@@ -134,6 +136,7 @@ jobs:
         with:
           files: |
             mumble-video-linux-x86_64.zip
+            mumble-video-setup.exe
             mumble-video-x64.msi
             mumble-video-windows-x86_64.zip
             SHA256SUMS
@@ -152,4 +155,5 @@ jobs:
             --prerelease \
             --title "Development build" \
             --notes "Rolling build of main at $GITHUB_SHA. Prefer a versioned release unless you want the newest changes." \
-            mumble-video-linux-x86_64.zip mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS
+            mumble-video-linux-x86_64.zip mumble-video-setup.exe mumble-video-x64.msi \
+            mumble-video-windows-x86_64.zip SHA256SUMS
