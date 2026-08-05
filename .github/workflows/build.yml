@@ -32,6 +32,9 @@ jobs:
 
       - name: Configure, build and test
         run: |
+          # Pre-created so docker does not create them root-owned: the zip step below runs as the
+          # unprivileged runner user and must be able to write here.
+          mkdir -p build out
           docker run --rm -v "$PWD":/src -v "$PWD/build":/build mumble-build bash -c '
             set -e
             cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF
@@ -61,6 +64,7 @@ jobs:
 
       - name: Cross-compile
         run: |
+          mkdir -p build-win out
           docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows \
             bash /src/scripts/build-windows.sh
 

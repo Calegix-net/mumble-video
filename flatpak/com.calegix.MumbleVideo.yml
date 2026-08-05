@@ -1,0 +1,122 @@
+# Flatpak manifest for the Mumble Video client.
+#
+# The KDE runtime supplies Qt (including Qt Multimedia), and its freedesktop base supplies libvpx,
+# libsndfile and opus - so only Boost, protobuf, Poco and the client itself build from source here.
+# That is why the flatpak is by far the smallest Linux artifact this project ships: the 300 MB of
+# libraries the portable zip has to carry are the runtime's problem instead.
+#
+# Build with scripts/build-flatpak.sh, which produces a single-file .flatpak bundle.
+
+app-id: com.calegix.MumbleVideo
+runtime: org.kde.Platform
+runtime-version: "6.9"
+sdk: org.kde.Sdk
+command: mumble
+
+rename-desktop-file: info.mumble.Mumble.desktop
+rename-icon: mumble
+
+finish-args:
+  # A voice and video chat client: the network, the microphone path and the camera are the product.
+  # Cameras are raw V4L2 devices to Qt's ffmpeg backend, which the camera portal cannot yet mediate,
+  # hence device access rather than a portal permission.
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=all
+
+modules:
+  - name: boost
+    buildsystem: simple
+    build-commands:
+      - ./bootstrap.sh --prefix=/app --with-libraries=system,thread
+      - ./b2 -j"$FLATPAK_BUILDER_N_JOBS" install
+    sources:
+      - type: archive
+        url: https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2
+        sha256: af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89
+    cleanup:
+      - /include
+      - /lib/cmake
+
+  - name: protobuf
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -Dprotobuf_BUILD_TESTS=OFF
+      - -Dprotobuf_BUILD_SHARED_LIBS=ON
+      - -Dprotobuf_ABSL_PROVIDER=module
+    sources:
+      - type: git
+        url: https://github.com/protocolbuffers/protobuf
+        tag: v29.3
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /bin/protoc*
+
+  - name: poco
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_FOUNDATION=ON
+      - -DENABLE_XML=ON
+      - -DENABLE_UTIL=ON
+      - -DENABLE_ZIP=ON
+      - -DENABLE_JSON=ON
+      - -DENABLE_NET=OFF
+      - -DENABLE_NETSSL=OFF
+      - -DENABLE_CRYPTO=OFF
+      - -DENABLE_DATA=OFF
+      - -DENABLE_DATA_ODBC=OFF
+      - -DENABLE_DATA_SQLITE=OFF
+      - -DENABLE_DATA_MYSQL=OFF
+      - -DENABLE_DATA_POSTGRESQL=OFF
+      - -DENABLE_MONGODB=OFF
+      - -DENABLE_REDIS=OFF
+      - -DENABLE_PROMETHEUS=OFF
+      - -DENABLE_ENCODINGS=OFF
+      - -DENABLE_JWT=OFF
+      - -DENABLE_ACTIVERECORD=OFF
+      - -DENABLE_TESTS=OFF
+      - -DENABLE_SAMPLES=OFF
+    sources:
+      - type: git
+        url: https://github.com/pocoproject/poco
+        tag: poco-1.14.2-release
+    cleanup:
+      - /include
+      - /lib/cmake
+
+  - name: mumble-video
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -Dserver=OFF
+      - -Dtests=OFF
+      - -Dbenchmarks=OFF
+      - -Dice=OFF
+      - -Doverlay=OFF
+      - -Doverlay-xcompile=OFF
+      - -Dg15=OFF
+      - -Dupdate=OFF
+      - -Dzeroconf=OFF
+      - -Djackaudio=OFF
+      - -Dspeechd=OFF
+      # The SDK's compiler is not the one the warning set was tuned against, and a fork must not fail
+      # to package because a newer GCC learned a new complaint.
+      - -Dwarnings-as-errors=OFF
+      # Module builds have no network, so the rnnoise model the build normally fetches at configure
+      # time is declared below as a source and FetchContent is pointed at the extracted copy.
+      - -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=/run/build/mumble-video/rnnoise-model-src
+    sources:
+      - type: dir
+        path: ..
+      # Must match 3rdparty/rnnoise/model_version: the URL embeds the hash and the hash verifies the
+      # archive, so bumping the submodule means updating both here.
+      - type: archive
+        url: https://media.xiph.org/rnnoise/models/rnnoise_data-5e7841199cf2947fc32f6eeaf6faffab5c2dd3da69e6a6e4830625a10285a09d.tar.gz
+        sha256: 5e7841199cf2947fc32f6eeaf6faffab5c2dd3da69e6a6e4830625a10285a09d
+        dest: rnnoise-model-src
