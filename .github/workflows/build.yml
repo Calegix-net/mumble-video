@@ -19,6 +19,13 @@ on:
   # Actions policy was enabled after the initial push.
   workflow_dispatch:
 
+# Stacked pushes to the same branch supersede each other rather than queueing a cold build apiece.
+# Tag runs are exempt from cancellation: a release must never be killed by an unrelated push landing
+# while it builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -27,8 +34,20 @@ jobs:
         with:
           submodules: recursive
 
+      # The image builds are most of a cold run's wall time and identical between runs, so their
+      # layers are cached in the Actions cache. mode=max includes intermediate layers - the ones that
+      # actually cost, like the from-source dependency builds.
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build the build image
-        run: docker build -t mumble-build -f docker/Dockerfile docker/
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          tags: mumble-build
+          load: true
+          cache-from: type=gha,scope=linux-image
+          cache-to: type=gha,scope=linux-image,mode=max
 
       - name: Configure, build and test
         run: |
@@ -59,8 +78,17 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build the cross-build image
-        run: docker build -t mumble-build-windows -f docker/Dockerfile.windows docker/
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile.windows
+          tags: mumble-build-windows
+          load: true
+          cache-from: type=gha,scope=windows-image
+          cache-to: type=gha,scope=windows-image,mode=max
 
       - name: Cross-compile
         run: |
