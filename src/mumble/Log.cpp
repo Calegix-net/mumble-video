@@ -892,10 +892,28 @@ void Log::log(MsgType mt, const QString &console, const QString &terse, bool own
 			&& !NotificationSoundBlocker::s_blockedNotificationSounds.contains(mt)) {
 			QString sSound    = Global::get().s.qmMessageSounds.value(mt);
 			AudioOutputPtr ao = Global::get().ao;
+			bool soundPlayed  = false;
 
-			if (!ao || !ao->playSample(sSound, Global::get().s.notificationVolume)) {
-				qWarning() << "Sound file" << sSound << "is not a valid audio file, fallback to TTS.";
-				flags ^= Settings::LogSoundfile | Settings::LogTTS; // Fallback to TTS
+			// playSample() returns an empty token for several unrelated reasons - the file failed to
+			// decode, but also "there is no audio output at all" and "the mixer did not come up within a
+			// second". Blaming the file for all of them sent people looking for a missing codec when the
+			// real fault was an output device that never started, so say which case this is. The specific
+			// reason is logged by playSample()/loadSndfile() on the line above this one.
+			if (!ao) {
+				qWarning() << "No audio output available, cannot play" << sSound << "- falling back to TTS.";
+			} else if (!ao->playSample(sSound, Global::get().s.notificationVolume)) {
+				qWarning() << "Failed to play sound file" << sSound
+						   << "- it could not be decoded, or the audio output is not ready. Falling back to TTS.";
+			} else {
+				soundPlayed = true;
+			}
+
+			if (!soundPlayed) {
+				// Was an XOR of both bits, which is only a fallback when LogTTS is currently clear. For a
+				// message type configured with both, it cleared both instead and the notification was lost
+				// entirely - no sound, and no speech either.
+				flags &= ~static_cast< quint32 >(Settings::LogSoundfile);
+				flags |= static_cast< quint32 >(Settings::LogTTS);
 			}
 		}
 	} else if (!Global::get().s.bTTSMessageReadBack) {

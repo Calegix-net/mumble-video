@@ -295,11 +295,17 @@ AudioOutputToken AudioOutput::playSample(const QString &filename, float volume, 
 	// If we've waited for more than one second, we declare timeout.
 	if (t.isElapsed(std::chrono::seconds(1))) {
 		qWarning("AudioOutput: playSample() timed out after 1 second: device not ready");
+		// Ownership of the handle only passes to AudioOutputSample below, so the bail-outs have to free
+		// it themselves. They did not, which leaked a decoded sound file on every notification whenever
+		// the output device never came up - once per message, indefinitely.
+		delete handle;
 		return AudioOutputToken();
 	}
 
-	if (!iMixerFreq)
+	if (!iMixerFreq) {
+		delete handle;
 		return AudioOutputToken();
+	}
 
 	QWriteLocker locker(&qrwlOutputs);
 	AudioOutputSample *sample = new AudioOutputSample(handle, volume, loop, iMixerFreq, iBufferSize);

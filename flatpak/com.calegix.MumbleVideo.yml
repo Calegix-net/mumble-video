@@ -36,6 +36,24 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --socket=pulseaudio
+  # --socket=pulseaudio only binds the PulseAudio compatibility socket, so /run/user/$UID/pipewire-0
+  # does not exist in the sandbox. The saved settings select the native PipeWire backend
+  # (audio.input_system/output_system = PipeWire), which then has nothing to connect to and gives
+  # silence in both directions. Exposing the PipeWire socket is what makes that backend work.
+  - --filesystem=xdg-run/pipewire-0
+  # The client implements the net.sourceforge.mumble.mumble RPC interface (startTalking, setSelfMuted,
+  # setTransmitMode, ...) but cannot claim the name without an own-name grant, so external push-to-talk
+  # clients get "The name is not activatable" on every call. That path matters more than usual here:
+  # the evdev global shortcut engine cannot open a display connection under Wayland, so in-app global
+  # shortcuts do not work there and D-Bus is the only remaining way to drive PTT from outside.
+  - --own-name=net.sourceforge.mumble.mumble
+  # devices=all is broader than the camera: it also hands over /dev/input, which is the whole keyboard
+  # and mouse. It is kept deliberately, because the evdev global shortcut engine reads /dev/input
+  # directly and narrowing this to a camera path would silently remove global shortcuts on X11. Note
+  # that those shortcuts do not work under Wayland regardless (GlobalShortcutX cannot open a dedicated
+  # display connection there), which is why the D-Bus name granted above is the supported way to drive
+  # push-to-talk from outside the sandbox. Revisit if the camera portal ever covers raw V4L2, since at
+  # that point both halves of this permission could go.
   - --device=all
 
 modules:

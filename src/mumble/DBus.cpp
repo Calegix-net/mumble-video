@@ -86,22 +86,31 @@ void MumbleDBus::focus() {
 }
 
 void MumbleDBus::setTransmitMode(unsigned int mode, const QDBusMessage &msg) {
+	Settings::AudioTransmit transmitMode;
+
 	switch (mode) {
 		case 0:
-			Global::get().s.atTransmit = Settings::Continuous;
+			transmitMode = Settings::Continuous;
 			break;
 		case 1:
-			Global::get().s.atTransmit = Settings::VAD;
+			transmitMode = Settings::VAD;
 			break;
 		case 2:
-			Global::get().s.atTransmit = Settings::PushToTalk;
+			transmitMode = Settings::PushToTalk;
 			break;
 		default:
 			QDBusConnection::sessionBus().send(msg.createErrorReply(dbusErrorPrefix() + QLatin1String(".transmitMode"),
 																	QLatin1String("Invalid transmit mode")));
 			return;
 	}
-	QMetaObject::invokeMethod(Global::get().mw, "updateTransmitModeComboBox", Qt::QueuedConnection);
+
+	// Goes through MainWindow rather than writing the setting here: setTransmissionMode is what logs the
+	// change and emits transmissionModeChanged, which is already connected to updateTransmitModeComboBox.
+	// The previous code assigned the setting directly and then tried to invoke that slot by name with no
+	// arguments, but it takes a Settings::AudioTransmit, so the lookup failed
+	// ("QMetaObject::invokeMethod: No such method MainWindow::updateTransmitModeComboBox()") and the combo
+	// box kept showing the old mode. Same-thread direct call, as with the other handlers in this file.
+	Global::get().mw->setTransmissionMode(transmitMode);
 }
 
 unsigned int MumbleDBus::getTransmitMode() {
