@@ -145,18 +145,16 @@ jobs:
           cache-from: type=gha,scope=flatpak-image
           cache-to: type=gha,scope=flatpak-image,mode=max
 
-      # Only flatpak-builder's module cache is kept. Caching the installed runtimes as well would be
-      # 5.6 GB against a 10 GB repository budget, evicting the container layer caches that save more
-      # time than re-downloading a runtime does.
-      - uses: actions/cache@v4
-        with:
-          path: flatpak-state/builder
-          key: flatpak-builder-${{ hashFiles('flatpak/com.calegix.MumbleVideo.yml') }}
-          restore-keys: flatpak-builder-
+      # No module cache. The one run that built this flatpak successfully was the one with no cache to
+      # restore; every run since, with an identical manifest and an identical job, has failed at the
+      # build step within seconds of starting. Restoring flatpak-builder's ostree cache through a tar
+      # round-trip is the only thing that differed, and a build that takes half an hour is worth more
+      # than one that is fast and does not run. Reinstate this once the failure is understood.
 
       - name: Build the flatpak
         run: |
           mkdir -p flatpak-state out
+          df -h /
           # --privileged because flatpak-builder isolates each module with bubblewrap, which cannot
           # set up its namespaces in a default container.
           docker run --rm --privileged \
