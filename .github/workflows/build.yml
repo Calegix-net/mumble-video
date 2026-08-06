@@ -188,9 +188,20 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
+      # gh rather than actions/download-artifact: the action failed here twice with nothing legible
+      # about why, and this prints exactly what it fetched and where it landed, so the next failure is
+      # diagnosable from the log instead of by elimination.
+      - name: Download build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -x
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
+          find artifacts -type f -printf '%s\t%p\n'
+          # The action's merge-multiple put every artifact's contents in the working directory; the
+          # release steps below still expect that layout.
+          find artifacts -type f -exec mv -t . {} +
+          ls -l mumble-video*
 
       - name: Checksums
         run: sha256sum mumble-video* > SHA256SUMS
