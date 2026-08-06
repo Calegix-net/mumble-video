@@ -196,7 +196,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -x
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
+          # Restricted to our own artifacts. docker/build-push-action also uploads a .dockerbuild
+          # build record per job, and those three carry identically-named files inside - merging them
+          # all into one directory is what has been failing this step since the caching change
+          # introduced that action.
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'mumble-video-*' --dir artifacts
           find artifacts -type f -printf '%s\t%p\n'
           # The action's merge-multiple put every artifact's contents in the working directory; the
           # release steps below still expect that layout.
