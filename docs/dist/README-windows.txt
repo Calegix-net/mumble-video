@@ -48,6 +48,9 @@ there is no macOS build.
 This Windows build is cross-compiled from Linux and has had far less real-world exercise than the
 Linux one. If it fails, the useful thing to report is whatever appears in a console window.
 
+Earlier Windows builds started and then closed immediately. That was GCC's link-time optimisation
+miscompiling the client; LTO is now off for Windows builds and this one runs.
+
 WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
 --------------------------------------
   * Camera sharing, as above.

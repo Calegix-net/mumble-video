@@ -50,6 +50,15 @@ find_package(Python 3 COMPONENTS Interpreter REQUIRED)
 
 check_ipo_supported(RESULT LTO_DEFAULT)
 
+if(MINGW)
+	# GCC's LTO miscompiles this client for Windows. The build succeeds, the binary starts and prints
+	# its version banner, and then faults on execute access to an address that is not code - the
+	# signature of a call through a pointer LTO got wrong. Verified by building the same tree with LTO
+	# off, which runs. check_ipo_supported() only answers whether the toolchain accepts -flto, not
+	# whether the result works, so the default has to be overridden here.
+	set(LTO_DEFAULT OFF)
+endif()
+
 
 
 option(optimize "Build a heavily optimized version, specific to the machine it's being compiled on." OFF)
