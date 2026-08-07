@@ -111,6 +111,13 @@ set(MUMBLE_SOURCES
 	"VideoBroadcaster.h"
 	"CameraVideoSource.cpp"
 	"CameraVideoSource.h"
+	"VideoStreamDispatcher.cpp"
+	"VideoStreamDispatcher.h"
+	"AudioLoopbackSource.h"
+	"AudioOutputScreenShare.cpp"
+	"AudioOutputScreenShare.h"
+	"ScreenAudioBroadcaster.cpp"
+	"ScreenAudioBroadcaster.h"
 	"ACLEditor.ui"
 	"API_v_1_x_x.cpp"
 	"API.h"
@@ -634,6 +641,21 @@ if(WIN32)
 		"os_win.cpp"
 
 		"${CMAKE_SOURCE_DIR}/overlay/ods.cpp"
+
+		# Screen sharing: whole-display capture (DXGI Desktop Duplication), whole-window capture
+		# (Windows.Graphics.Capture), system-audio capture (WASAPI loopback), per-application audio capture
+		# (WASAPI per-process loopback), and the picker dialog that chooses between them.
+		"DxgiDisplayVideoSource.cpp"
+		"DxgiDisplayVideoSource.h"
+		"WgcWindowVideoSource.cpp"
+		"WgcWindowVideoSource.h"
+		"WasapiLoopbackSource.cpp"
+		"WasapiLoopbackSource.h"
+		"WasapiProcessLoopbackSource.cpp"
+		"WasapiProcessLoopbackSource.h"
+		"WasapiProcessLoopbackTypes.h"
+		"ScreenSharePickerDialog.cpp"
+		"ScreenSharePickerDialog.h"
 	)
 
 	# WinGUIDs.cpp includes initguid.h which causes a macro definition in guiddef.h to be
@@ -702,6 +724,17 @@ if(WIN32)
 			# which MinGW does not honour.
 			crypt32
 			shlwapi
+			# DXGI Desktop Duplication (DxgiDisplayVideoSource) - nothing linked against Direct3D before
+			# this, so unlike dxguid above these two are newly needed rather than already present.
+			d3d11
+			dxgi
+			# Windows.Graphics.Capture (WgcWindowVideoSource) and per-process WASAPI loopback
+			# (WasapiProcessLoopbackSource) both go through WinRT activation - RoInitialize,
+			# RoGetActivationFactory, WindowsCreateString/DeleteString - plus ActivateAudioInterfaceAsync for
+			# the latter. windowsapp is the one MinGW-w64 import library that covers all of those, the same
+			# umbrella WindowsApp.lib is in the real Windows SDK, so a single new dependency covers both
+			# rather than pulling in separate stub libraries for each piece.
+			windowsapp
 	)
 else()
 	target_sources(mumble_client_object_lib PRIVATE "SharedMemory_unix.cpp")

@@ -58,18 +58,19 @@ public:
 
 	explicit VideoGrid(QWidget *parent = nullptr);
 
-	/// Number of senders currently on screen. Counts only those with a picture: a surface exists from a
-	/// stream's announcement onward, but one with nothing decoded into it yet occupies no cell and must
-	/// not reserve one, or the grid lays out around an empty square.
+	/// Number of other participants' tiles currently drawable - one per stream with a picture, not one
+	/// per person, since a sender may hold more than one stream (a camera and a screen, say). A surface
+	/// exists from its stream's announcement onward, but one with nothing decoded into it yet occupies no
+	/// cell and must not reserve one, or the grid lays out around an empty square.
 	int senderCount() const;
 
 	/// Everything drawn, including your own picture. This is what decides whether the panel is worth
 	/// showing at all.
 	int tileCount() const { return senderCount() + (m_selfFrame.isNull() ? 0 : 1); }
 
-	/// The surface accumulated for a sender, or a null image if there is none. Exposed so that the
-	/// composition can be tested without going through a paint event.
-	QImage surfaceFor(unsigned int senderSession) const;
+	/// The surface accumulated for one of a sender's streams, or a null image if there is none. Exposed
+	/// so that the composition can be tested without going through a paint event.
+	QImage surfaceFor(unsigned int senderSession, unsigned int streamID) const;
 
 public slots:
 	/**
@@ -88,14 +89,15 @@ public slots:
 	void clearSelfFrame();
 
 	/**
-	 * Records the codec a sender's stream is encoded with, from its VideoState announcement.
+	 * Records the codec and source kind a sender's stream carries, from its VideoState announcement.
 	 *
 	 * Must arrive before the stream's units do, which the protocol guarantees: the announcement is what
 	 * causes a receiver to subscribe, and the server relays nothing until it has.
 	 *
+	 * @param sourceKind A MumbleProto::VideoState::SourceKind value, used only to label the tile.
 	 * @param codec A MumbleProto::VideoState::Codec value.
 	 */
-	void setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec);
+	void setStreamCodec(unsigned int senderSession, unsigned int streamID, int sourceKind, int codec);
 
 	/**
 	 * Sets the name drawn on a sender's tile.
@@ -109,7 +111,11 @@ public slots:
 	/// The name a sender's tile is labelled with, empty if none is known.
 	QString senderName(unsigned int senderSession) const;
 
-	/// Drops a sender's surface, on disconnect or when their stream ends.
+	/// Drops one of a sender's streams, when that stream ends. Their other streams, if any, are
+	/// unaffected - ending a screen share must not blank a still-active camera tile from the same person.
+	void removeSender(unsigned int senderSession, unsigned int streamID);
+
+	/// Drops everything belonging to a sender, on disconnect.
 	void removeSender(unsigned int senderSession);
 
 	/// Drops everything, on disconnect from the server.
@@ -127,13 +133,16 @@ signals:
 protected:
 	struct Surface {
 		QImage canvas;
-		unsigned int streamID = 0;
+		unsigned int senderSession = 0;
+		unsigned int streamID      = 0;
 
 		/// MumbleProto::VideoState::Codec. 0 is CODEC_UNKNOWN, whose units are dropped.
 		int codec = 0;
 
-		/// Drawn on the tile. Empty until the sender is identified.
-		QString name;
+		/// MumbleProto::VideoState::SourceKind. 0 is SOURCE_UNKNOWN. Used only to label the tile - a
+		/// sender showing a camera and a screen at once needs the two told apart, since they now share
+		/// the same name.
+		int sourceKind = 0;
 
 		/// Undecodable units in a row, for the keyframeNeeded() threshold. Reset by any success.
 		int consecutiveFailures = 0;
@@ -143,9 +152,25 @@ protected:
 		std::unique_ptr< VP8Decoder > vp8;
 	};
 
+	/// Combines a sender and their stream into one lookup key. A sender may hold several streams open at
+	/// once (camera, screen, screen audio), and nothing about the surfaces themselves may be conflated
+	/// across them - least of all a VP8 decoder's reference frames.
+	static std::uint64_t surfaceKey(unsigned int senderSession, unsigned int streamID) {
+		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
+	}
+
 	// std::unordered_map rather than QHash: a Surface owns its decoder through a unique_ptr, which makes
 	// it move-only, and QHash requires its values to be copyable.
-	std::unordered_map< unsigned int, Surface > m_surfaces;
+	std::unordered_map< std::uint64_t, Surface > m_surfaces;
+
+	/// Number of distinct senders currently holding at least one surface, regardless of how many streams
+	/// each holds. What MAX_SENDERS actually bounds: the cap exists to stop the grid drawing more people
+	/// than a cell size can make worthwhile, not to stop one person from sharing a camera and a screen.
+	std::size_t distinctSenderCount() const;
+
+	/// Drawn on a sender's tile. Kept apart from Surface because a name belongs to the person, not to any
+	/// one of their streams.
+	std::unordered_map< unsigned int, QString > m_senderNames;
 
 	/// The local camera, kept apart from m_surfaces because it has no session and is always drawn first.
 	QImage m_selfFrame;

@@ -30,6 +30,7 @@
 #include "ServerHandler.h"
 #include "TalkingUI.h"
 #include "User.h"
+#include "VideoStreamDispatcher.h"
 #include "UserEdit.h"
 #include "UserInformation.h"
 #include "UserModel.h"
@@ -1321,9 +1322,17 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 	}
 
 	if (!msg.active()) {
+		// Only this stream ends. A sender may hold several open at once - a camera and a screen, or a
+		// screen and its audio - and the others must keep showing/playing.
 		if (m_videoGrid) {
-			m_videoGrid->removeSender(msg.session());
+			m_videoGrid->removeSender(msg.session(), msg.stream_id());
 		}
+
+		if (m_videoStreamDispatcher) {
+			m_videoStreamDispatcher->removeSender(msg.session(), msg.stream_id());
+		}
+
+		removeScreenShareAudioBuffer(msg.session(), msg.stream_id());
 
 		return;
 	}
@@ -1334,13 +1343,21 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 
 	// Recorded before subscribing, so the codec is known by the time the first unit can arrive. Without
 	// it the units are undecodable: nothing in the UDP payload says which codec produced it, by design.
-	if (m_videoGrid) {
-		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.codec()));
+	// An OpusAudio stream never gets a surface here - it has no picture, and letting VideoGrid track it
+	// as an undecodable codec would only earn it endless, pointless keyframe requests. The dispatcher
+	// tracks every codec, OpusAudio included - it is the one that actually acts on it.
+	if (m_videoGrid && msg.codec() != MumbleProto::VideoState_Codec_OpusAudio) {
+		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.source_kind()),
+									static_cast< int >(msg.codec()));
 
 		// Named after the surface exists, since that is what holds the label.
 		if (ClientUser *sender = ClientUser::get(msg.session())) {
 			m_videoGrid->setSenderName(msg.session(), sender->qsName);
 		}
+	}
+
+	if (m_videoStreamDispatcher) {
+		m_videoStreamDispatcher->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.codec()));
 	}
 
 	MumbleProto::VideoSubscribe mpvs;
@@ -1372,11 +1389,18 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 		return;
 	}
 
-	// Subscription refused or withdrawn. Dropping the surface is what stops the user staring at a frozen
-	// last frame wondering whether the network died.
+	// Subscription refused or withdrawn, for this one stream. Dropping its surface is what stops the user
+	// staring at a frozen last frame wondering whether the network died; a sender's other streams, if
+	// they still have separate subscriptions, are untouched.
 	if (m_videoGrid) {
-		m_videoGrid->removeSender(msg.session());
+		m_videoGrid->removeSender(msg.session(), msg.stream_id());
 	}
+
+	if (m_videoStreamDispatcher) {
+		m_videoStreamDispatcher->removeSender(msg.session(), msg.stream_id());
+	}
+
+	removeScreenShareAudioBuffer(msg.session(), msg.stream_id());
 }
 
 /// A step of the server-mediated file transfer state machine. Not implemented yet - only the wire format

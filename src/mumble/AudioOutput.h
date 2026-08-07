@@ -124,6 +124,18 @@ public:
 
 	void addFrameToBuffer(ClientUser *sender, const Mumble::Protocol::AudioData &audioData);
 	AudioOutputToken playSample(const QString &filename, float volume, bool loop = false);
+
+	/**
+	 * Adds an already-constructed AudioOutputBuffer to the mixer, associated with sender.
+	 *
+	 * For sources that are neither the ordinary one-voice-per-user path (addFrameToBuffer, which
+	 * replaces whatever buffer a sender already has) nor a positionless UI sound (playSample, which
+	 * inserts under a null sender): screen-share audio is the first such case, keyed on its sender so a
+	 * future per-user volume/mute control could find it, but inserted alongside - not in place of - that
+	 * sender's ordinary voice buffer, since the two coexist and must not be confused for each other.
+	 * Ownership of buffer passes to the mixer; the returned token is how the caller later removes it.
+	 */
+	AudioOutputToken addExternalBuffer(const ClientUser *sender, AudioOutputBuffer *buffer);
 	void run() Q_DECL_OVERRIDE = 0;
 	virtual bool isAlive() const;
 	const float *getSpeakerPos(unsigned int &nspeakers);

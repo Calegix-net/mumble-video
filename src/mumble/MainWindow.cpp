@@ -28,8 +28,11 @@
 #	include "OverlayClient.h"
 #endif
 #include "../SignalCurry.h"
+#include "AudioLoopbackSource.h"
+#include "AudioOutputScreenShare.h"
 #include "CameraVideoSource.h"
 #include "ChannelListenerManager.h"
+#include "DxgiDisplayVideoSource.h"
 #include "FailedConnectionDialog.h"
 #include "ListenerVolumeSlider.h"
 #include "Markdown.h"
@@ -40,6 +43,8 @@
 #include "QtWidgetUtils.h"
 #include "RichTextEditor.h"
 #include "Screen.h"
+#include "ScreenAudioBroadcaster.h"
+#include "ScreenSharePickerDialog.h"
 #include "SearchDialog.h"
 #include "ServerHandler.h"
 #include "ServerInformation.h"
@@ -59,9 +64,13 @@
 #include "VersionCheck.h"
 #include "VideoBroadcaster.h"
 #include "VideoGrid.h"
+#include "VideoStreamDispatcher.h"
 #include "VideoWizard.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
+#include "WasapiLoopbackSource.h"
+#include "WasapiProcessLoopbackSource.h"
+#include "WgcWindowVideoSource.h"
 #include "Global.h"
 
 #ifdef Q_OS_WIN
@@ -476,6 +485,10 @@ void MainWindow::createActions() {
 void MainWindow::setupVideoGrid() {
 	m_videoGrid = new VideoGrid(this);
 
+	// Not a widget, and not shown - it exists purely to pull OpusAudio-coded units off the same
+	// video-unit signal the grid listens to and hand them to whatever plays screen-share audio.
+	m_videoStreamDispatcher = new VideoStreamDispatcher(this);
+
 	m_videoDock = new QDockWidget(tr("Video"), this);
 	m_videoDock->setObjectName(QStringLiteral("qdwVideo"));
 	m_videoDock->setWidget(m_videoGrid);
@@ -521,6 +534,7 @@ void MainWindow::setupVideoGrid() {
 
 void MainWindow::setupVideoBroadcast() {
 	m_videoBroadcaster = new VideoBroadcaster(this);
+	m_videoBroadcaster->setNextStreamID(allocateStreamID());
 
 	m_shareCameraAction = new QAction(tr("Share &Camera"), this);
 	m_shareCameraAction->setCheckable(true);
@@ -581,6 +595,80 @@ void MainWindow::setupVideoBroadcast() {
 					Global::get().sh->sendVideoUnit(header, payload);
 				}
 			});
+}
+
+void MainWindow::setupScreenShare() {
+	m_screenVideoBroadcaster = new VideoBroadcaster(this);
+	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
+
+	m_screenAudioBroadcaster = new ScreenAudioBroadcaster(this);
+
+	m_shareScreenAction = new QAction(tr("Share &Screen"), this);
+	m_shareScreenAction->setCheckable(true);
+	m_shareScreenAction->setStatusTip(tr("Share your screen with this channel"));
+
+	// Off/On icon states, same reasoning as the camera action: a checked toolbar button is too subtle a
+	// change on most styles for "your screen is live".
+	QIcon screenIcon;
+	screenIcon.addFile(QLatin1String("skin:actions/screen-share.svg"), QSize(), QIcon::Normal, QIcon::Off);
+	screenIcon.addFile(QLatin1String("skin:actions/screen-share-active.svg"), QSize(), QIcon::Normal, QIcon::On);
+	m_shareScreenAction->setIcon(screenIcon);
+	m_shareScreenAction->setIconVisibleInMenu(false);
+
+	qmSelf->addAction(m_shareScreenAction);
+
+	// Directly after the camera action, so the two toggles that do the same kind of thing sit together.
+	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
+	const qsizetype afterCamera             = toolbarActions.indexOf(m_shareCameraAction) + 1;
+	qtIconToolbar->insertAction(
+		afterCamera > 0 && afterCamera < toolbarActions.size() ? toolbarActions.at(afterCamera) : nullptr,
+		m_shareScreenAction);
+
+	connect(m_shareScreenAction, &QAction::triggered, this, &MainWindow::toggleScreenShare);
+
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, this,
+			[this](bool active) { m_shareScreenAction->setChecked(active); });
+
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
+		Global::get().l->log(Log::Warning, tr("Screen sharing stopped: %1").arg(reason));
+	});
+
+	// Without this the video dock never appears at all when screen-sharing alone: VideoGrid::setSelfFrame
+	// is what fires senderCountChanged and makes the dock visible, and nothing else does. Shares the same
+	// self-preview slot the camera uses - if both are active at once the preview shows whichever posted a
+	// frame most recently, which is a real limitation worth revisiting, not a deliberate design choice.
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfFrame);
+
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
+		if (!active) {
+			m_videoGrid->clearSelfFrame();
+		}
+	});
+
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::unitReady, this,
+			[](const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload) {
+				if (Global::get().sh) {
+					Global::get().sh->sendVideoUnit(header, payload);
+				}
+			});
+
+	connect(m_screenAudioBroadcaster, &ScreenAudioBroadcaster::failed, this, [this](const QString &reason) {
+		Global::get().l->log(Log::Warning, tr("Screen-share audio stopped: %1").arg(reason));
+	});
+
+	connect(m_screenAudioBroadcaster, &ScreenAudioBroadcaster::unitReady, this,
+			[](const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload) {
+				if (Global::get().sh) {
+					Global::get().sh->sendVideoUnit(header, payload);
+				}
+			});
+
+	// Received screen-share audio - VideoStreamDispatcher is constructed in setupVideoGrid(), which runs
+	// before this in setupGui(), so it already exists here.
+	if (m_videoStreamDispatcher) {
+		connect(m_videoStreamDispatcher, &VideoStreamDispatcher::opusUnitReceived, this,
+				&MainWindow::onScreenShareOpusUnitReceived);
+	}
 }
 
 void MainWindow::toggleCameraShare(bool share) {
@@ -657,6 +745,208 @@ void MainWindow::toggleCameraShare(bool share) {
 	Global::get().l->log(Log::Information, tr("Sharing camera: %1").arg(m_videoBroadcaster->describe()));
 }
 
+void MainWindow::toggleScreenShare(bool share) {
+	if (!m_screenVideoBroadcaster || !Global::get().sh || !Global::get().sh->isRunning()) {
+		if (m_shareScreenAction) {
+			m_shareScreenAction->setChecked(false);
+		}
+
+		return;
+	}
+
+	if (!share) {
+		const bool audioWasActive         = m_screenAudioBroadcaster && m_screenAudioBroadcaster->isActive();
+		const std::uint32_t audioStreamID = audioWasActive ? m_screenAudioBroadcaster->streamID() : 0;
+
+		m_screenVideoBroadcaster->stop();
+
+		// Announced before anything else, so receivers tear the picture down rather than leaving the last
+		// frame on screen.
+		MumbleProto::VideoState videoEnd;
+		videoEnd.set_stream_id(m_screenVideoBroadcaster->streamID());
+		videoEnd.set_active(false);
+		Global::get().sh->sendMessage(videoEnd);
+
+		if (audioWasActive) {
+			m_screenAudioBroadcaster->stop();
+
+			MumbleProto::VideoState audioEnd;
+			audioEnd.set_stream_id(audioStreamID);
+			audioEnd.set_active(false);
+			Global::get().sh->sendMessage(audioEnd);
+		}
+
+		return;
+	}
+
+	// Unlike the camera, there is no sensible default to fall back to - Discord always asks too.
+	ScreenSharePickerDialog picker(this);
+
+	if (picker.exec() != QDialog::Accepted) {
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
+
+	const ScreenShareTargetKind targetKind = picker.targetKind();
+	const Settings &settings                = Global::get().s;
+
+	// Always TiledImage, never VP8: screen content is mostly static and often text-heavy, exactly what
+	// the tiled codec is built for, matching the guidance VideoWizard already gives for its own "screen"
+	// quality profile - just as true of a captured window as a captured display.
+	m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(settings.iVideoBitrate),
+										static_cast< unsigned int >(settings.iVideoFramerate),
+										settings.iVideoTileQuality, settings.iVideoTileSize);
+	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
+
+	MumbleProto::VideoState_SourceKind sourceKind = MumbleProto::VideoState_SourceKind_Display;
+
+	// Only set when targetKind == Window: the owning process of the shared window, needed if the user
+	// also asked to scope audio to just that application rather than all system sound.
+	unsigned long windowOwnerProcessId = 0;
+
+	if (targetKind == ScreenShareTargetKind::Window) {
+		const WgcWindowVideoSource::WindowInfo window = picker.chosenWindow();
+
+		if (!window.handle) {
+			Global::get().l->log(Log::Warning, tr("No window was chosen."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		DWORD ownerProcessId = 0;
+		GetWindowThreadProcessId(window.handle, &ownerProcessId);
+		windowOwnerProcessId = ownerProcessId;
+
+		sourceKind = MumbleProto::VideoState_SourceKind_Window;
+
+		if (!m_screenVideoBroadcaster->start(
+				std::make_unique< WgcWindowVideoSource >(window, picker.showCursor()))) {
+			Global::get().l->log(Log::Warning, tr("Could not start capturing this window."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+	} else if (targetKind == ScreenShareTargetKind::Display) {
+		const DxgiDisplayVideoSource::DisplayInfo display = picker.chosenDisplay();
+
+		if (display.deviceName.isEmpty()) {
+			Global::get().l->log(Log::Warning, tr("No display was chosen."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		if (!m_screenVideoBroadcaster->start(std::make_unique< DxgiDisplayVideoSource >(display))) {
+			Global::get().l->log(Log::Warning, tr("Could not start capturing this display."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+	} else {
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
+
+	MumbleProto::VideoState videoState;
+	videoState.set_stream_id(m_screenVideoBroadcaster->streamID());
+	videoState.set_active(true);
+	videoState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+	videoState.set_source_kind(sourceKind);
+	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+
+	Global::get().sh->sendMessage(videoState);
+
+	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
+
+	if (picker.includeAudio() && m_screenAudioBroadcaster) {
+		m_screenAudioBroadcaster->configure(96);
+
+		const std::uint32_t audioStreamID = allocateStreamID();
+
+		// windowAudioOnly() is only ever true when a window (not a display) was chosen - the picker
+		// disables that checkbox otherwise - so this branch is safe without re-checking targetKind.
+		std::unique_ptr< AudioLoopbackSource > audioSource;
+
+		if (picker.windowAudioOnly()) {
+			audioSource = std::make_unique< WasapiProcessLoopbackSource >(windowOwnerProcessId,
+																		   m_screenVideoBroadcaster->describe());
+		} else {
+			audioSource = std::make_unique< WasapiLoopbackSource >();
+		}
+
+		if (m_screenAudioBroadcaster->start(std::move(audioSource), audioStreamID)) {
+			MumbleProto::VideoState audioState;
+			audioState.set_stream_id(audioStreamID);
+			audioState.set_active(true);
+			audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
+			audioState.set_source_kind(sourceKind);
+			audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+
+			Global::get().sh->sendMessage(audioState);
+		} else {
+			// The picture keeps going without it - a screen share that silently failed to start at all
+			// would be a worse outcome than one missing audio.
+			Global::get().l->log(Log::Warning,
+								 tr("Could not capture system audio; sharing the screen without it."));
+		}
+	}
+}
+
+void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID,
+											   const QByteArray &opusPacket) {
+	if (!Global::get().ao) {
+		return;
+	}
+
+	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+
+	auto it = m_screenShareAudioBuffers.find(key);
+
+	if (it == m_screenShareAudioBuffers.end()) {
+		ClientUser *sender = ClientUser::get(senderSession);
+
+		if (!sender) {
+			return;
+		}
+
+		auto *buffer                 = new AudioOutputScreenShare(Global::get().ao->getMixerFreq());
+		const AudioOutputToken token = Global::get().ao->addExternalBuffer(sender, buffer);
+
+		if (!token) {
+			delete buffer;
+
+			return;
+		}
+
+		ScreenShareAudioEntry entry;
+		entry.token  = token;
+		entry.buffer = buffer;
+
+		it = m_screenShareAudioBuffers.emplace(key, entry).first;
+	}
+
+	it->second.buffer->addOpusPacket(opusPacket);
+}
+
+void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID) {
+	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+
+	const auto it = m_screenShareAudioBuffers.find(key);
+
+	if (it == m_screenShareAudioBuffers.end()) {
+		return;
+	}
+
+	if (Global::get().ao) {
+		Global::get().ao->invalidateToken(it->second.token);
+	}
+
+	m_screenShareAudioBuffers.erase(it);
+}
+
 void MainWindow::setupGui() {
 	updateWindowTitle();
 	setCentralWidget(qtvUsers);
@@ -664,6 +954,7 @@ void MainWindow::setupGui() {
 
 	setupVideoGrid();
 	setupVideoBroadcast();
+	setupScreenShare();
 
 #ifdef Q_OS_MAC
 	QMenu *qmWindow = new QMenu(tr("&Window"), this);
@@ -3756,6 +4047,13 @@ void MainWindow::serverConnected() {
 				Qt::QueuedConnection);
 	}
 
+	// Connected to the same signal as VideoGrid, in parallel: neither knows about the other, and each
+	// only acts on the codecs it cares about.
+	if (m_videoStreamDispatcher && Global::get().sh) {
+		connect(Global::get().sh.get(), &ServerHandler::videoUnitReceived, m_videoStreamDispatcher,
+				&VideoStreamDispatcher::onVideoUnitReceived, Qt::QueuedConnection);
+	}
+
 	m_reconnectSoundBlocker.reset();
 
 	Global::get().uiSession    = 0;
@@ -3816,9 +4114,27 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 		m_videoGrid->clear();
 	}
 
+	if (m_videoStreamDispatcher) {
+		m_videoStreamDispatcher->clear();
+	}
+
 	if (m_videoBroadcaster) {
 		m_videoBroadcaster->stop();
 	}
+
+	if (m_screenVideoBroadcaster) {
+		m_screenVideoBroadcaster->stop();
+	}
+
+	if (m_screenAudioBroadcaster) {
+		m_screenAudioBroadcaster->stop();
+	}
+
+	// Not individually invalidated through AudioOutput here: the connection that carried these streams
+	// is already gone, and Global::get().ao's own teardown on disconnect is what actually frees them,
+	// the same as it does for every other buffer in its map. This just stops this class from holding
+	// onto pointers that are about to become dangling.
+	m_screenShareAudioBuffers.clear();
 
 	// clear ChannelListener
 	Global::get().channelListenerManager->clear();

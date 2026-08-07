@@ -29,10 +29,22 @@ int VideoGrid::senderCount() const {
 	return count;
 }
 
-QImage VideoGrid::surfaceFor(unsigned int senderSession) const {
-	const auto it = m_surfaces.find(senderSession);
+QImage VideoGrid::surfaceFor(unsigned int senderSession, unsigned int streamID) const {
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
 
 	return it == m_surfaces.end() ? QImage() : it->second.canvas;
+}
+
+std::size_t VideoGrid::distinctSenderCount() const {
+	// Small map, and this is only ever called on the announce path (once per stream start), not per
+	// frame - a linear scan costs nothing worth avoiding here.
+	std::unordered_map< unsigned int, bool > seen;
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		seen[it->second.senderSession] = true;
+	}
+
+	return seen.size();
 }
 
 bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
@@ -103,52 +115,83 @@ QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
 }
 
 void VideoGrid::setSenderName(unsigned int senderSession, const QString &name) {
-	const auto it = m_surfaces.find(senderSession);
+	// Gated on holding at least one surface, same as before this held names in their own map: a name
+	// with nothing to attach to would just accumulate for every session that ever crosses this call,
+	// announced stream or not.
+	bool hasSurface = false;
 
-	if (it == m_surfaces.end() || it->second.name == name) {
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (it->second.senderSession == senderSession) {
+			hasSurface = true;
+			break;
+		}
+	}
+
+	if (!hasSurface) {
 		return;
 	}
 
-	it->second.name = name;
+	auto &stored = m_senderNames[senderSession];
+
+	if (stored == name) {
+		return;
+	}
+
+	stored = name;
 
 	update();
 }
 
 QString VideoGrid::senderName(unsigned int senderSession) const {
-	const auto it = m_surfaces.find(senderSession);
+	const auto it = m_senderNames.find(senderSession);
 
-	return it == m_surfaces.end() ? QString() : it->second.name;
+	return it == m_senderNames.end() ? QString() : it->second;
 }
 
-void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec) {
-	// Bounded on surfaces held, not on surfaces drawn: the cap is there to stop a peer forcing unbounded
-	// allocation by announcing streams, and an announced-but-blank surface still costs memory.
-	if (m_surfaces.find(senderSession) == m_surfaces.end()
-		&& m_surfaces.size() >= static_cast< std::size_t >(MAX_SENDERS)) {
-		return;
+void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int sourceKind, int codec) {
+	const std::uint64_t key = surfaceKey(senderSession, streamID);
+
+	if (m_surfaces.find(key) == m_surfaces.end()) {
+		bool senderAlreadyPresent = false;
+
+		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+			if (it->second.senderSession == senderSession) {
+				senderAlreadyPresent = true;
+				break;
+			}
+		}
+
+		// Bounded on distinct senders, not on surfaces held: the cap exists so the grid does not draw
+		// more people than a cell size makes worthwhile, and must not stop one person sharing a camera
+		// and a screen at once, which is the same sender opening a second stream, not a new one.
+		if (!senderAlreadyPresent && distinctSenderCount() >= static_cast< std::size_t >(MAX_SENDERS)) {
+			return;
+		}
 	}
 
-	Surface &surface = m_surfaces[senderSession];
+	Surface &surface = m_surfaces[key];
 
-	// A codec announcement for a stream that is not the one being shown replaces it wholesale: a stream
-	// id changes precisely when the codec, source or dimensions do, so nothing about the old one carries
+	// A codec or source-kind announcement for a stream id already in use replaces it wholesale: a stream
+	// id changes whenever the codec, source or dimensions do, so nothing about the old content carries
 	// over - least of all a decoder holding reference frames from different content.
 	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.canvas = QImage();
 		surface.vp8.reset();
 	}
 
-	surface.streamID = streamID;
-	surface.codec    = codec;
+	surface.senderSession = senderSession;
+	surface.streamID      = streamID;
+	surface.codec         = codec;
+	surface.sourceKind    = sourceKind;
 }
 
 void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
 									const QByteArray &encodedTile) {
 	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
 	// no codec, and are dropped rather than assumed to be anything.
-	const auto existing = m_surfaces.find(senderSession);
+	const auto existing = m_surfaces.find(surfaceKey(senderSession, streamID));
 
-	if (existing == m_surfaces.end() || existing->second.streamID != streamID) {
+	if (existing == m_surfaces.end()) {
 		return;
 	}
 
@@ -218,8 +261,28 @@ void VideoGrid::clearSelfFrame() {
 	update();
 }
 
+void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) {
+	if (m_surfaces.erase(surfaceKey(senderSession, streamID)) > 0) {
+		emit senderCountChanged(senderCount());
+		update();
+	}
+}
+
 void VideoGrid::removeSender(unsigned int senderSession) {
-	if (m_surfaces.erase(senderSession) > 0) {
+	bool removedAny = false;
+
+	for (auto it = m_surfaces.begin(); it != m_surfaces.end();) {
+		if (it->second.senderSession == senderSession) {
+			it          = m_surfaces.erase(it);
+			removedAny = true;
+		} else {
+			++it;
+		}
+	}
+
+	m_senderNames.erase(senderSession);
+
+	if (removedAny) {
 		emit senderCountChanged(senderCount());
 		update();
 	}
@@ -231,6 +294,7 @@ void VideoGrid::clear() {
 	}
 
 	m_surfaces.clear();
+	m_senderNames.clear();
 
 	emit senderCountChanged(0);
 	update();
@@ -300,10 +364,32 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (it->second.canvas.isNull()) {
+		const Surface &surface = it->second;
+
+		if (surface.canvas.isNull()) {
 			continue;
 		}
 
-		drawInto(it->second.canvas, index++, it->second.name);
+		const auto nameIt = m_senderNames.find(surface.senderSession);
+		QString label      = nameIt == m_senderNames.end() ? QString() : nameIt->second;
+
+		// A camera tile is unlabelled beyond the name, matching today's behaviour. Anything else - a
+		// screen or a window - is called out, since a sender showing a camera and a screen at once would
+		// otherwise present as one person with two identical names.
+		switch (surface.sourceKind) {
+			case MumbleProto::VideoState_SourceKind_Display:
+				label = label.isEmpty() ? tr("Screen") : tr("%1 (screen)").arg(label);
+				break;
+			case MumbleProto::VideoState_SourceKind_Window:
+				label = label.isEmpty() ? tr("Window") : tr("%1 (window)").arg(label);
+				break;
+			case MumbleProto::VideoState_SourceKind_Application:
+				label = label.isEmpty() ? tr("App") : tr("%1 (app)").arg(label);
+				break;
+			default:
+				break;
+		}
+
+		drawInto(surface.canvas, index++, label);
 	}
 }

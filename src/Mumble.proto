@@ -789,6 +789,13 @@ message VideoState {
 		VP8 = 2;
 		VP9 = 3;
 		AV1 = 4;
+		// Opus-encoded PCM, not a picture. Carried as a video stream so a screen share's accompanying
+		// audio can ride the same per-sender subscribe/route/crypto path as the picture it goes with,
+		// instead of the voice pipeline, which has no room for a second stream per session. A receiver
+		// seeing this value must not attempt to decode units as an image, and a stream announced with
+		// it produces no picture surface - only x/y/width/height are meaningless here and MUST be
+		// ignored.
+		OpusAudio = 5;
 	}
 
 	// What is being captured.

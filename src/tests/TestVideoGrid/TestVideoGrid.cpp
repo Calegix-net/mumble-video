@@ -31,8 +31,9 @@ constexpr unsigned int STREAM = 1;
 /// Announces a stream, as the VideoState message does. Nothing is decoded without this: the payload
 /// never says which codec produced it, so an unannounced stream has no decoder to hand it to.
 void announce(VideoGrid &grid, unsigned int sender, unsigned int stream,
-			  int codec = MumbleProto::VideoState_Codec_TiledImage) {
-	grid.setStreamCodec(sender, stream, codec);
+			  int codec = MumbleProto::VideoState_Codec_TiledImage,
+			  int sourceKind = MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN) {
+	grid.setStreamCodec(sender, stream, sourceKind, codec);
 }
 
 /// Feeds every tile of one encoded frame into the grid, as the network path would.
@@ -79,7 +80,8 @@ private slots:
 	void anEncodedFrameIsReassembledIntoThePicture();
 	void aPartialFrameShowsWhatArrived();
 	void surfaceGrowthKeepsWhatWasAlreadyDrawn();
-	void aNewStreamFromTheSameSenderStartsFresh();
+	void twoStreamsFromTheSameSenderCoexist();
+	void reannouncingAStreamDiscardsItsOldPicture();
 	void sendersAppearAndDisappear();
 	void theSenderCountIsCapped();
 	void tilesOutsideTheSurfaceBoundAreRefused();
@@ -108,7 +110,7 @@ void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
 	VideoGrid grid;
 	deliverFrame(grid, encoder.encode(original, STREAM, 1, 1), SENDER, STREAM);
 
-	const QImage shown = grid.surfaceFor(SENDER);
+	const QImage shown = grid.surfaceFor(SENDER, STREAM);
 
 	QCOMPARE(shown.size(), original.size());
 
@@ -139,7 +141,7 @@ void TestVideoGrid::aPartialFrameShowsWhatArrived() {
 	VideoGrid grid;
 	deliverFrame(grid, units, SENDER, STREAM);
 
-	const QImage shown = grid.surfaceFor(SENDER);
+	const QImage shown = grid.surfaceFor(SENDER, STREAM);
 	QVERIFY(!shown.isNull());
 
 	// Something was drawn, rather than the surface staying blank waiting for a complete frame.
@@ -171,19 +173,23 @@ void TestVideoGrid::surfaceGrowthKeepsWhatWasAlreadyDrawn() {
 
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
-	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(64, 64));
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(64, 64));
 
 	// A tile further right and down forces the surface to grow.
 	grid.onVideoUnitReceived(SENDER, STREAM, 64, 64, encoded);
-	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 
 	// And the first tile is still there. Reallocating blank would make a resolution change flash black.
-	const QRgb corner = grid.surfaceFor(SENDER).pixel(10, 10);
+	const QRgb corner = grid.surfaceFor(SENDER, STREAM).pixel(10, 10);
 	QVERIFY(qRed(corner) > 150);
 	QVERIFY(qGreen(corner) < 100);
 }
 
-void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
+// Regression test for the bug this class shipped with: a second VideoState from a sender who already had
+// a surface replaced it wholesale, so a camera and a screen from one person could never both be shown -
+// whichever was announced second silently ate the first. Two different stream ids from one sender must
+// now produce two independent surfaces, neither disturbing the other.
+void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 	VideoGrid grid;
 
 	QImage big(128, 128, QImage::Format_RGB32);
@@ -197,10 +203,8 @@ void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
 
 	announce(grid, SENDER, 1);
 	grid.onVideoUnitReceived(SENDER, 1, 0, 0, encoded);
-	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
 
-	// A different stream id means a different source or different dimensions, so the old picture is not
-	// part of the same image any more.
 	QImage small(32, 32, QImage::Format_RGB32);
 	small.fill(Qt::white);
 
@@ -210,9 +214,46 @@ void TestVideoGrid::aNewStreamFromTheSameSenderStartsFresh() {
 	QVERIFY(small.save(&smallBuffer, "JPEG", 90));
 	smallBuffer.close();
 
+	// A second stream id from the same sender - camera plus screen, in practice.
 	announce(grid, SENDER, 2);
 	grid.onVideoUnitReceived(SENDER, 2, 0, 0, smallEncoded);
-	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(32, 32));
+	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(32, 32));
+
+	// The first stream's picture is untouched by the second one arriving.
+	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
+
+	// Both count toward what gets drawn: this is two tiles, not one replacing the other.
+	QCOMPARE(grid.senderCount(), 2);
+
+	// Ending just the second stream leaves the first exactly as it was.
+	grid.removeSender(SENDER, 2);
+	QVERIFY(grid.surfaceFor(SENDER, 2).isNull());
+	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
+	QCOMPARE(grid.senderCount(), 1);
+}
+
+// Re-announcing the *same* stream id with a new codec discards whatever was drawn under it: the protocol
+// guarantees a stream id is reused only when nothing about its content is still valid.
+void TestVideoGrid::reannouncingAStreamDiscardsItsOldPicture() {
+	VideoGrid grid;
+
+	QImage big(128, 128, QImage::Format_RGB32);
+	big.fill(Qt::white);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(big.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
+
+	// Same stream id, announced again with a different codec - a misbehaving peer, since the protocol
+	// says this id should have changed, but the grid must not go on treating stale tiles as current.
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
 }
 
 void TestVideoGrid::sendersAppearAndDisappear() {
@@ -296,7 +337,7 @@ void TestVideoGrid::aVp8StreamIsDecoded() {
 	deliverFrame(grid, units, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QCOMPARE(grid.senderCount(), 1);
-	QCOMPARE(grid.surfaceFor(SENDER).size(), QSize(128, 128));
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 }
 
 // Units must never select their own decoder: the payload comes from another client, so trusting it to
@@ -368,7 +409,7 @@ void TestVideoGrid::aSenderKeepsItsNameAcrossANewStream() {
 	grid.setSenderName(SENDER, QStringLiteral("alice"));
 	QCOMPARE(grid.senderName(SENDER), QStringLiteral("alice"));
 
-	// A new stream is the same person: the picture is discarded, the name is not.
+	// A second stream from the same sender - the name belongs to the person, not to any one stream.
 	announce(grid, SENDER, STREAM + 1);
 	QCOMPARE(grid.senderName(SENDER), QStringLiteral("alice"));
 
@@ -441,7 +482,7 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 	grid.onVideoUnitReceived(SENDER, STREAM, 100000, 100000, encoded);
 
 	QCOMPARE(grid.senderCount(), 0);
-	QVERIFY(grid.surfaceFor(SENDER).isNull());
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
 
 	// Exactly at the boundary is still refused, since the tile would extend past it.
 	grid.onVideoUnitReceived(SENDER, STREAM, static_cast< unsigned int >(VideoGrid::MAX_SURFACE_WIDTH), 0, encoded);

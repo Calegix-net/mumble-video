@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	 width="500px" height="500px" viewBox="0 0 500 500" xml:space="preserve">
+<!-- Screen share live: currently sharing. Green, the same colour camera-video-active.svg and the
+     microphone icon use for their live states, with the same red dot so the idle/live distinction
+     survives at toolbar size and in greyscale. -->
+<path opacity="0.9" fill="#34A853" d="M70,110c0-16.569,13.431-30,30-30h300c16.569,0,30,13.431,30,30v210
+	c0,16.569-13.431,30-30,30H100c-16.569,0-30-13.431-30-30V110z M110,120v190h280V120H110z"/>
+<path opacity="0.9" fill="#34A853" d="M190,380h120c11.046,0,20,8.954,20,20l0,0c0,5.523-4.477,10-10,10H180
+	c-5.523,0-10-4.477-10-10l0,0C170,388.954,178.954,380,190,380z"/>
+<circle opacity="0.95" fill="#EA4335" cx="400" cy="90" r="34"/>
+</svg>

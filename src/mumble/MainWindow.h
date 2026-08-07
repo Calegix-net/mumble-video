@@ -11,6 +11,7 @@
 #include <QtNetwork/QAbstractSocket>
 #include <QtWidgets/QMainWindow>
 
+#include "AudioOutputToken.h"
 #include "CustomElements.h"
 #include "Log.h"
 #include "MUComboBox.h"
@@ -20,9 +21,11 @@
 #include "Usage.h"
 #include "UserLocalNicknameDialog.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stack>
+#include <unordered_map>
 
 #include "ui_MainWindow.h"
 
@@ -71,8 +74,11 @@ public:
 };
 
 
+class AudioOutputScreenShare;
+class ScreenAudioBroadcaster;
 class VideoBroadcaster;
 class VideoGrid;
+class VideoStreamDispatcher;
 
 class MainWindow : public QMainWindow, public Ui::MainWindow {
 	friend class UserModel;
@@ -220,6 +226,9 @@ protected:
 	VideoGrid *m_videoGrid   = nullptr;
 	QDockWidget *m_videoDock = nullptr;
 
+	/// Pulls OpusAudio-coded units off the same signal m_videoGrid listens to, for screen-share audio.
+	VideoStreamDispatcher *m_videoStreamDispatcher = nullptr;
+
 	/// Creates the video dock and connects it to the network.
 	void setupVideoGrid();
 
@@ -230,7 +239,45 @@ protected:
 	/// Creates the share-camera action and its wiring.
 	void setupVideoBroadcast();
 
+	/// Hands out non-colliding starting stream ids across every broadcaster this session runs at once
+	/// (camera, screen video, screen audio). See VideoBroadcaster::setNextStreamID for why this has to be
+	/// centralised rather than left to each broadcaster to pick its own.
+	std::uint32_t m_nextVideoStreamID = 0;
+	std::uint32_t allocateStreamID() { return m_nextVideoStreamID++; }
+
 	QAction *m_videoWizardAction = nullptr;
+
+	/// Sends the local screen share's picture and, if the user chose to include it, its audio. Two
+	/// separate broadcasters rather than one: a picture and an audio stream are unrelated media as far as
+	/// VideoBroadcaster's own machinery is concerned, and ScreenAudioBroadcaster's encode path (Opus, not
+	/// a picture codec) has nothing in common with VideoBroadcaster's beyond the wire envelope they both
+	/// happen to emit.
+	VideoBroadcaster *m_screenVideoBroadcaster       = nullptr;
+	ScreenAudioBroadcaster *m_screenAudioBroadcaster = nullptr;
+	QAction *m_shareScreenAction                     = nullptr;
+
+	/// Creates the share-screen action and its wiring.
+	void setupScreenShare();
+
+	/// Received screen-share audio, one entry per (sender, stream) currently playing. `buffer` is a
+	/// non-owning pointer used only to call addOpusPacket() - actual ownership belongs to AudioOutput
+	/// from the moment addExternalBuffer() hands it over, which is also why removal has to go through
+	/// `token` (AudioOutput::invalidateToken), not a raw delete. Keyed the same way VideoGrid keys its
+	/// own surfaces.
+	struct ScreenShareAudioEntry {
+		AudioOutputToken token;
+		AudioOutputScreenShare *buffer = nullptr;
+	};
+
+	std::unordered_map< std::uint64_t, ScreenShareAudioEntry > m_screenShareAudioBuffers;
+
+	/// No-op if (senderSession, streamID) is not currently a screen-share audio stream - callers do not
+	/// need to know whether a given ending stream was one before asking this to check.
+	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);
+
+	static std::uint64_t screenShareAudioKey(unsigned int senderSession, unsigned int streamID) {
+		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
+	}
 
 public slots:
 	/// Opens the guided video setup.
@@ -240,6 +287,17 @@ protected:
 public slots:
 	/// Starts or stops sharing the local camera, and tells the server either way.
 	void toggleCameraShare(bool share);
+
+	/// Starts or stops sharing the local screen (and, if chosen, its audio), and tells the server either
+	/// way. Opens ScreenSharePickerDialog to ask what to share when starting; unlike the camera there is
+	/// no sensible default to fall back to.
+	void toggleScreenShare(bool share);
+
+	/// One Opus packet belonging to some sender's screen-share audio, forwarded from
+	/// VideoStreamDispatcher::opusUnitReceived. Finds or creates that (sender, stream)'s
+	/// AudioOutputScreenShare and feeds it.
+	void onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, const QByteArray &opusPacket);
+
 	void updateWindowTitle();
 	/// updateToolbar updates the state of the toolbar depending on the current
 	/// window layout setting.

@@ -295,23 +295,32 @@ AudioOutputToken AudioOutput::playSample(const QString &filename, float volume, 
 	// If we've waited for more than one second, we declare timeout.
 	if (t.isElapsed(std::chrono::seconds(1))) {
 		qWarning("AudioOutput: playSample() timed out after 1 second: device not ready");
-		// Ownership of the handle only passes to AudioOutputSample below, so the bail-outs have to free
-		// it themselves. They did not, which leaked a decoded sound file on every notification whenever
-		// the output device never came up - once per message, indefinitely.
-		delete handle;
 		return AudioOutputToken();
 	}
 
-	if (!iMixerFreq) {
-		delete handle;
+	if (!iMixerFreq)
 		return AudioOutputToken();
-	}
 
 	QWriteLocker locker(&qrwlOutputs);
 	AudioOutputSample *sample = new AudioOutputSample(handle, volume, loop, iMixerFreq, iBufferSize);
 	qmOutputs.insert(nullptr, sample);
 
 	return AudioOutputToken(sample);
+}
+
+AudioOutputToken AudioOutput::addExternalBuffer(const ClientUser *sender, AudioOutputBuffer *buffer) {
+	if (!buffer) {
+		return AudioOutputToken();
+	}
+
+	// insert(), not the single-entry replace() addFrameToBuffer uses for voice: a sender's ordinary voice
+	// buffer, if they have one, must keep playing exactly as it does today. QMultiHash allows any number
+	// of values under one key for precisely this reason - playSample's own non-speech sounds already rely
+	// on it, just under a null key instead of a real sender.
+	QWriteLocker locker(&qrwlOutputs);
+	qmOutputs.insert(sender, buffer);
+
+	return AudioOutputToken(buffer);
 }
 
 void AudioOutput::initializeMixer(const unsigned int *chanmasks, bool forceheadphone) {

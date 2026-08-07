@@ -51,6 +51,19 @@ public:
 
 	std::uint32_t streamID() const { return m_streamID; }
 
+	/**
+	 * Seeds the stream id this broadcaster will use for its next (first) start(), instead of the default
+	 * of 0.
+	 *
+	 * A session that runs more than one broadcaster at once - a camera and a screen share, or a screen
+	 * share's video alongside its audio - must not let two of them allocate the same id independently:
+	 * VideoRouter and VideoFragmentation both key on (sender, stream), which is the same sender for all
+	 * of them, and there is nothing else in the wire format to tell two same-numbered streams apart. The
+	 * owner (MainWindow) is expected to hand out a distinct base per broadcaster instance before ever
+	 * starting it. Calling this after the first start() has no defined effect and is a caller error.
+	 */
+	void setNextStreamID(std::uint32_t id) { m_streamID = id; }
+
 	/// Description of what is being captured, for the UI.
 	QString describe() const;
 
