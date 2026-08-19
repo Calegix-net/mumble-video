@@ -1492,9 +1492,15 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 	for (unsigned int session : recipients) {
 		ServerUser *recipient = qhUsers.value(session);
 
-		if (!recipient || recipient->sUdpSocket == INVALID_SOCKET || recipient->aiUdpFlag.loadRelaxed() != 1) {
+		if (!recipient || recipient->sUdpSocket == INVALID_SOCKET) {
 			// No UDP path to this user. Video is not tunnelled over TCP: it would head-of-line block the
 			// control channel, and the sender has no way to slow down for one recipient.
+			//
+			// Deliberately not gated on aiUdpFlag: that flag is raised only by valid UDP *audio* from
+			// the user, so it is 0 for anyone who has not spoken since connecting - and a viewer
+			// watching a share in silence is the normal case, not the exception. A UDP-identified
+			// peer (sUdpSocket set) has already proven the path with encrypted pings, which is the
+			// most video can ask for given that it never falls back to TCP anyway.
 			continue;
 		}
 
