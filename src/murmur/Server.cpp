@@ -1507,17 +1507,69 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 			}
 		}
 
-#ifdef Q_OS_WIN
-		using size_type = int;
+#ifdef Q_OS_LINUX
+		// Sent with the same IP_PKTINFO discipline as Server::sendMessage. A bare sendto leaves the
+		// source address to the kernel's route lookup, which on a multihomed host (a VPN tunnel, a
+		// second interface) may pick an address other than the one the client is talking to - and a
+		// flow-tracking middlebox between us and the client then drops the datagram as not belonging
+		// to the client's flow. The client's own datagrams all target the address its TCP connection
+		// terminates on, so that is the one source it is guaranteed to be able to receive from.
+		struct msghdr msg;
+		struct iovec iov[1];
+
+		iov[0].iov_base = outgoing.data();
+		iov[0].iov_len  = outgoing.size();
+
+		uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
+		memset(controldata, 0, sizeof(controldata));
+
+		memset(&msg, 0, sizeof(msg));
+		msg.msg_name    = reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress);
+		msg.msg_namelen = static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6)
+													   ? sizeof(struct sockaddr_in6)
+													   : sizeof(struct sockaddr_in));
+		msg.msg_iov        = iov;
+		msg.msg_iovlen     = 1;
+		msg.msg_control    = controldata;
+		msg.msg_controllen = CMSG_SPACE((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct in6_pktinfo)
+																						 : sizeof(struct in_pktinfo));
+
+		struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+		HostAddress tcpha(recipient->saiTcpLocalAddress);
+		if (recipient->saiUdpAddress.ss_family == AF_INET6) {
+			cmsg->cmsg_level            = IPPROTO_IPV6;
+			cmsg->cmsg_type             = IPV6_PKTINFO;
+			cmsg->cmsg_len              = CMSG_LEN(sizeof(struct in6_pktinfo));
+			struct in6_pktinfo *pktinfo = reinterpret_cast< struct in6_pktinfo * >(CMSG_DATA(cmsg));
+			memset(pktinfo, 0, sizeof(*pktinfo));
+			memcpy(&pktinfo->ipi6_addr.s6_addr[0], tcpha.getByteRepresentation().data(),
+				   sizeof(pktinfo->ipi6_addr.s6_addr));
+		} else {
+			cmsg->cmsg_level           = IPPROTO_IP;
+			cmsg->cmsg_type            = IP_PKTINFO;
+			cmsg->cmsg_len             = CMSG_LEN(sizeof(struct in_pktinfo));
+			struct in_pktinfo *pktinfo = reinterpret_cast< struct in_pktinfo * >(CMSG_DATA(cmsg));
+			memset(pktinfo, 0, sizeof(*pktinfo));
+			if (tcpha.isV6()) {
+				continue;
+			}
+			pktinfo->ipi_spec_dst.s_addr = tcpha.toIPv4();
+		}
+
+		::sendmsg(recipient->sUdpSocket, &msg, 0);
 #else
+#	ifdef Q_OS_WIN
+		using size_type = int;
+#	else
 		using size_type = std::size_t;
-#endif
+#	endif
 		::sendto(recipient->sUdpSocket, reinterpret_cast< const char * >(outgoing.data()),
 				 static_cast< size_type >(outgoing.size()), 0,
 				 reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress),
 				 static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6)
 											  ? sizeof(struct sockaddr_in6)
 											  : sizeof(struct sockaddr_in)));
+#endif
 	}
 }
 
