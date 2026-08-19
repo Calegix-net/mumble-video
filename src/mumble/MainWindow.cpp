@@ -32,7 +32,6 @@
 #include "AudioOutputScreenShare.h"
 #include "CameraVideoSource.h"
 #include "ChannelListenerManager.h"
-#include "DxgiDisplayVideoSource.h"
 #include "FailedConnectionDialog.h"
 #include "ListenerVolumeSlider.h"
 #include "Markdown.h"
@@ -44,7 +43,6 @@
 #include "RichTextEditor.h"
 #include "Screen.h"
 #include "ScreenAudioBroadcaster.h"
-#include "ScreenSharePickerDialog.h"
 #include "SearchDialog.h"
 #include "ServerHandler.h"
 #include "ServerInformation.h"
@@ -68,9 +66,18 @@
 #include "VideoWizard.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
-#include "WasapiLoopbackSource.h"
-#include "WasapiProcessLoopbackSource.h"
-#include "WgcWindowVideoSource.h"
+// Screen capture is implemented against DXGI Desktop Duplication, Windows.Graphics.Capture and WASAPI
+// loopback, so these headers - and everything below that uses them - exist only on Windows. They are
+// added to the build in the WIN32 branch of CMakeLists.txt, and DxgiDisplayVideoSource.h reaches
+// <windows.h> by way of win.h, which is what broke the Linux and flatpak builds.
+#ifdef Q_OS_WIN
+#	include "DxgiDisplayVideoSource.h"
+#	include "ScreenSharePickerDialog.h"
+#	include "WasapiLoopbackSource.h"
+#	include "WasapiProcessLoopbackSource.h"
+#	include "WgcWindowVideoSource.h"
+#endif
+
 #include "Global.h"
 
 #ifdef Q_OS_WIN
@@ -617,6 +624,13 @@ void MainWindow::setupScreenShare() {
 
 	qmSelf->addAction(m_shareScreenAction);
 
+#ifndef Q_OS_WIN
+	// No capture backend on this platform. The action is built either way so every connection below
+	// stays valid, but an offered control that can only ever report its own unavailability is worse
+	// than no control, so it is not shown.
+	m_shareScreenAction->setVisible(false);
+#endif
+
 	// Directly after the camera action, so the two toggles that do the same kind of thing sit together.
 	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
 	const qsizetype afterCamera             = toolbarActions.indexOf(m_shareCameraAction) + 1;
@@ -779,6 +793,14 @@ void MainWindow::toggleScreenShare(bool share) {
 		return;
 	}
 
+#ifndef Q_OS_WIN
+	// Nothing captures a screen on this platform yet. Reported rather than silently ignored, so the
+	// button does not look broken - see setupScreenShare, which hides it here for the same reason.
+	Global::get().l->log(Log::Warning, tr("Screen sharing is currently only available on Windows."));
+	m_shareScreenAction->setChecked(false);
+
+	return;
+#else
 	// Unlike the camera, there is no sensible default to fall back to - Discord always asks too.
 	ScreenSharePickerDialog picker(this);
 
@@ -893,6 +915,7 @@ void MainWindow::toggleScreenShare(bool share) {
 								 tr("Could not capture system audio; sharing the screen without it."));
 		}
 	}
+#endif
 }
 
 void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID,
