@@ -24,7 +24,29 @@
 // toolchain that already gets the ordering right) sidesteps that rather than depending on it.
 #include <windows.graphics.directx.h>
 #include <windows.graphics.capture.h>
+
+// windows.graphics.capture.interop.h includes windows.ui.composition.h and uses nothing from it, while
+// that header does not compile under mingw-w64: inside ABI::Windows::UI::Composition it refers to
+// "enum DirectXAlphaMode" and "enum DirectXPixelFormat" unqualified, and those live in
+// ABI::Windows::Graphics::DirectX, which is not one of its enclosing namespaces. No include order can
+// bring them into scope, so the header is suppressed by pre-defining its guard. Nothing here needs the
+// compositor, and interop.h declares only IGraphicsCaptureItemInterop.
+#ifndef __windows_ui_composition_h__
+#	define __windows_ui_composition_h__
+#	define MUMBLE_SUPPRESSED_WINDOWS_UI_COMPOSITION
+#endif
 #include <windows.graphics.capture.interop.h>
+#ifdef MUMBLE_SUPPRESSED_WINDOWS_UI_COMPOSITION
+#	undef MUMBLE_SUPPRESSED_WINDOWS_UI_COMPOSITION
+#	undef __windows_ui_composition_h__
+#endif
+
+// mingw-w64's windows.graphics.capture.h stops at the IGraphicsCaptureSession family; the item, frame
+// and frame-pool interfaces this file's members are declared in terms of are absent. Included after it
+// so the real header wins wherever a toolchain does ship them.
+#if !defined(__IGraphicsCaptureItem_INTERFACE_DEFINED__)
+#	include "GraphicsCaptureCompat.h"
+#endif
 
 // Not every MinGW-w64 packaging ships this header - see Direct3D11InteropCompat.h for which toolchain
 // that bit and why a fallback exists at all.
