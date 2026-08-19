@@ -64,7 +64,7 @@ void AudioOutputScreenShare::addOpusPacket(const QByteArray &opusPacket) {
 
 	const int decodedFrames =
 		opus_decode_float(m_opusState, reinterpret_cast< const unsigned char * >(opusPacket.constData()),
-						  opusPacket.size(), decoded, MAX_DECODED_FRAMES, 0);
+						  static_cast< opus_int32 >(opusPacket.size()), decoded, MAX_DECODED_FRAMES, 0);
 
 	if (decodedFrames <= 0) {
 		return;

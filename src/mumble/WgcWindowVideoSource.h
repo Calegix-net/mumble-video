@@ -16,6 +16,26 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+
+// windows.graphics.capture.h gates IGraphicsCaptureItem, IDirect3D11CaptureFramePool and several other
+// declarations this file needs behind WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x60000, and
+// only supplies its own "enable everything" default (0xe0000) for that macro if nothing has defined it
+// yet. This project's dev machine hits that default path and gets everything; at least one MinGW-w64
+// packaging (the CI's) apparently has something else earlier in the same translation unit's header chain
+// pinning the macro to a lower value first - enough for some enums, not enough for the interfaces
+// actually used here - which silently drops those declarations instead of failing loudly. Forced
+// unconditionally (not just when undefined) since it is exactly that prior definition, not an absent
+// one, that causes the problem; #undef first for the same reason winver_override.h does - so this is a
+// redefinition GCC was told about, not a -Werror-tripping surprise one.
+#undef WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xe0000
+
+// Included explicitly, ahead of the two headers below, because at least one MinGW-w64 packaging (the
+// CI's) has an internal ordering bug: windows.graphics.capture.interop.h pulls in windows.ui.composition.h
+// transitively, which uses DirectXPixelFormat/DirectXAlphaMode - both declared here - without including
+// this header itself first. Forcing the include here (its own include guard makes this a no-op on a
+// toolchain that already gets the ordering right) sidesteps that rather than depending on it.
+#include <windows.graphics.directx.h>
 #include <windows.graphics.capture.h>
 #include <windows.graphics.capture.interop.h>
 
