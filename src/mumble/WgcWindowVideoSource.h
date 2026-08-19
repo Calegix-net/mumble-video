@@ -18,7 +18,14 @@
 #include <dxgi1_2.h>
 #include <windows.graphics.capture.h>
 #include <windows.graphics.capture.interop.h>
-#include <windows.graphics.directx.direct3d11.interop.h>
+
+// Not every MinGW-w64 packaging ships this header - see Direct3D11InteropCompat.h for which toolchain
+// that bit and why a fallback exists at all.
+#if defined(__has_include) && __has_include(<windows.graphics.directx.direct3d11.interop.h>)
+#	include <windows.graphics.directx.direct3d11.interop.h>
+#else
+#	include "Direct3D11InteropCompat.h"
+#endif
 
 /**
  * Captures a single window via the Windows.Graphics.Capture API.
