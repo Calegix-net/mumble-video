@@ -16,6 +16,13 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+
+// Included explicitly, ahead of the two headers below, because at least one MinGW-w64 packaging (the
+// CI's) has an internal ordering bug: windows.graphics.capture.interop.h pulls in windows.ui.composition.h
+// transitively, which uses DirectXPixelFormat/DirectXAlphaMode - both declared here - without including
+// this header itself first. Forcing the include here (its own include guard makes this a no-op on a
+// toolchain that already gets the ordering right) sidesteps that rather than depending on it.
+#include <windows.graphics.directx.h>
 #include <windows.graphics.capture.h>
 #include <windows.graphics.capture.interop.h>
 

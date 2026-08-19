@@ -96,7 +96,7 @@ public:
 	}
 
 protected:
-	~ProcessLoopbackActivationHandler() {
+	virtual ~ProcessLoopbackActivationHandler() {
 		if (m_event) {
 			CloseHandle(m_event);
 		}
