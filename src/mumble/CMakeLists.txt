@@ -649,6 +649,8 @@ if(WIN32)
 		"DxgiDisplayVideoSource.h"
 		"WgcWindowVideoSource.cpp"
 		"WgcWindowVideoSource.h"
+		"WgcCaptureCompat.h"
+		"Direct3D11InteropCompat.h"
 		"WasapiLoopbackSource.cpp"
 		"WasapiLoopbackSource.h"
 		"WasapiProcessLoopbackSource.cpp"
