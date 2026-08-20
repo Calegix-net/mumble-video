@@ -226,8 +226,13 @@ public:
 	void run() Q_DECL_OVERRIDE;
 signals:
 	/// One fully reassembled video unit, ready to be decoded and drawn at (x, y) of the sender's frame.
-	void videoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
-						   const QByteArray &encodedTile);
+	///
+	/// frameNumber and isKeyframe travel with the payload because a VP8 receiver cannot decode safely
+	/// without them: an inter-frame whose reference was lost decodes "successfully" into garbage (the
+	/// green-frame artifact), so the consumer has to see the gap in frame numbers to know not to feed
+	/// the decoder at all until the next keyframe.
+	void videoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
+						   unsigned int x, unsigned int y, const QByteArray &encodedTile);
 
 	void error(QAbstractSocket::SocketError, QString reason);
 	// This signal is basically the same as disconnected but it will be emitted

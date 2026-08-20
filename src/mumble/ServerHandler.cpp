@@ -459,7 +459,8 @@ void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, 
 										 static_cast< std::uint64_t >(tTimestamp.elapsed().count()), unit)
 		== Mumble::Protocol::VideoReassemblyResult::Complete) {
 		emit videoUnitReceived(
-			unit.header.senderSession, unit.header.streamID, unit.header.x, unit.header.y,
+			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,
+			unit.header.x, unit.header.y,
 			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
 	}
 }

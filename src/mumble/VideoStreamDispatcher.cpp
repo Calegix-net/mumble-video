@@ -31,8 +31,9 @@ void VideoStreamDispatcher::clear() {
 	m_streams.clear();
 }
 
-void VideoStreamDispatcher::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int,
-												unsigned int, const QByteArray &payload) {
+void VideoStreamDispatcher::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID,
+												quint64 /* frameNumber */, bool /* isKeyframe */,
+												unsigned int x, unsigned int y, const QByteArray &payload) {
 	const auto it = m_streams.find(streamKey(senderSession, streamID));
 
 	if (it == m_streams.end() || it->second.codec != MumbleProto::VideoState_Codec_OpusAudio) {

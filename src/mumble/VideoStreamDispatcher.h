@@ -54,8 +54,8 @@ public:
 public slots:
 	/// Connected to the same signal VideoGrid::onVideoUnitReceived is, and filters it the same way: only
 	/// a stream announced with the codec this class cares about produces anything.
-	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
-							 const QByteArray &payload);
+	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
+							 unsigned int x, unsigned int y, const QByteArray &payload);
 
 signals:
 	/// One Opus packet belonging to a sender's screen-share audio stream. x/y/width/height from the

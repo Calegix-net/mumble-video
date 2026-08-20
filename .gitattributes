@@ -1,0 +1,11 @@
+# Source is LF everywhere. A contribution from a Windows checkout converted two dozen files to CRLF,
+# which breaks nothing at compile time and everything that matches against file content - patches,
+# greps, and review diffs that show every line as changed.
+*.cpp text eol=lf
+*.h text eol=lf
+*.mm text eol=lf
+*.proto text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
