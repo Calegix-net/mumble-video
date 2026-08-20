@@ -47,9 +47,9 @@ cameras, or a virtual one.
 REQUIREMENTS
 ------------
 Linux x86_64, glibc 2.41 or newer (built on Fedora 42). The bundle includes Qt 6, its multimedia
-backend, libvpx, protobuf and OpenSSL, so nothing needs to be installed first. A Windows x64 build is
-published alongside this one, but it is older and has none of the fixes listed below. There is no
-macOS build.
+backend, libvpx, protobuf and OpenSSL, so nothing needs to be installed first. Windows builds (wizard
+installer, MSI, portable zip) and a flatpak are published alongside this one, all from the same
+commit. There is no macOS build.
 
 WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
 --------------------------------------
@@ -63,8 +63,9 @@ WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
     rate-limits these to one per sender per second.
   * Two new ACL privileges, ShareVideo and ReceiveVideo, both granted by default.
 
-Screen sharing is NOT implemented. The protocol reserves the source kinds for it and the tiled codec
-was written with it in mind, but nothing captures a screen yet.
+Screen sharing: the button next to the camera one asks your desktop (via the XDG portal) what to
+share - the dialog you see is your compositor's own, and its answer decides what is captured. Needs a
+desktop portal, which every mainstream Wayland desktop ships; the button hides itself if none answers.
 
 This client CANNOT talk to a stock Mumble server, and stock clients cannot use video with this one.
 It is a clean-break fork: the UDP media framing carries an extra channel byte.

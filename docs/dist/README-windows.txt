@@ -63,8 +63,8 @@ WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
     rate-limits these to one per sender per second.
   * Two new ACL privileges, ShareVideo and ReceiveVideo, both granted by default.
 
-Screen sharing is NOT implemented. The protocol reserves the source kinds for it and the tiled codec
-was written with it in mind, but nothing captures a screen yet.
+Screen sharing: the button next to the camera one opens a picker to share a display or a single
+window, optionally with system or per-application audio.
 
 This client CANNOT talk to a stock Mumble server, and stock clients cannot use video with this one.
 It is a clean-break fork: the UDP media framing carries an extra channel byte.

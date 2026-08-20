@@ -11,18 +11,19 @@ because video kept being requested upstream and never fit their scope.
 
 - **Camera sharing** - a toolbar button next to mute/deafen, a first-run video wizard that measures
   what bitrates actually cost on your camera, and a video panel that appears when somebody shares.
+- **Screen sharing** - on Windows, a display (DXGI Desktop Duplication) or a single window
+  (Windows.Graphics.Capture), with system or per-application audio over WASAPI loopback. On Linux,
+  through the XDG desktop portal and PipeWire - the compositor's own consent dialog decides what is
+  shared, which is the only way capture can work on Wayland at all.
 - **A dedicated video transport** - video runs on its own UDP channel with its own encryption state,
   its own sequence space and its own MTU, so video loss cannot degrade voice.
-- **Two codecs** - VP8 for cameras (roughly 0.5 Mbit/s at 480p), and a tiled-JPEG scheme intended
-  for future screen sharing, where unchanged regions cost nothing to send.
+- **Two codecs** - VP8 for cameras (roughly 0.5 Mbit/s at 480p), and tiled JPEG for screen content,
+  where unchanged regions cost nothing to send.
 - **Permissioned routing** - two new ACL privileges, `ShareVideo` and `ReceiveVideo`, enforced by
   the server on every packet delivered, not just at subscribe time. Video is subscribe-on-demand
   rather than broadcast.
 - **Keyframe-on-demand** - new subscribers get a keyframe immediately instead of waiting for the
   next scheduled one; stuck decoders re-request. Rate-limited server-side.
-
-Screen sharing is designed for in the protocol but **not implemented** - nothing captures a screen
-yet.
 
 ## The one caveat that matters
 
@@ -35,9 +36,20 @@ keys derived from the TLS session). The construction is conventional and tested,
 
 ## Downloads
 
-CI builds a Linux bundle and a Windows MSI on every push (see Actions); tagged versions publish
-GitHub releases with checksums. Every Linux bundle contains `BUILD-INFO.txt` naming the exact commit
-it was built from.
+Grab a [release](https://github.com/Calegix-net/mumble-video/releases): each carries a Linux bundle,
+a flatpak, a Windows wizard installer (`mumble-video-setup.exe`), an MSI for deployment tooling, a
+portable Windows zip, and checksums. `dev-latest` is a rolling prerelease rebuilt from every green
+push to main; versioned tags are the stable line. Every Linux bundle contains `BUILD-INFO.txt`
+naming the exact commit it was built from.
+
+## Known issues
+
+- Received VP8 video can show green or garbled frames after packet loss, until the next keyframe.
+  Under investigation - the decoder recovers, but slower than it should.
+- Both screen-sharing capture paths are young: they build and pass CI, but have had little time on
+  real desktops. Portal/PipeWire behavior varies by compositor; reports welcome.
+- No congestion control yet: video is sent at the configured bitrate regardless of what the path can
+  carry. The protocol reserves the feedback fields; the sender-side ramp is not written.
 
 ## Building
 
