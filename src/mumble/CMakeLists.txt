@@ -882,6 +882,39 @@ elseif(APPLE)
 else()
 	target_sources(mumble_client_object_lib PRIVATE "TextToSpeech_unix.cpp")
 
+	# Screen sharing on Linux: permission through the XDG desktop portal, frames from PipeWire. This is
+	# the only way to capture under Wayland, where a client cannot read the screen at all, and it is
+	# used on X11 too rather than adding an XGetImage path that would skip the consent prompt.
+	if(screen-share-pipewire)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+		find_pkg(Qt6 COMPONENTS DBus REQUIRED)
+
+		target_sources(mumble_client_object_lib
+			PRIVATE
+				"PipeWireScreenVideoSource.cpp"
+				"PipeWireScreenVideoSource.h"
+				"PortalScreenCast.cpp"
+				"PortalScreenCast.h"
+		)
+
+		# Kept out of the unity build. PipeWire's headers rely on SPA macros that another translation
+		# unit in the same blob redefines or hides - SPA_ROUND_UP and spa_api_func_r go missing, inside
+		# PipeWire's own headers, even though the same includes compile cleanly on their own. Same
+		# treatment WinGUIDs.cpp gets above, for the same class of reason.
+		set_source_files_properties("PipeWireScreenVideoSource.cpp" "PortalScreenCast.cpp"
+			PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
+
+		# SYSTEM so the project's warning set does not apply to PipeWire's own headers. They are C
+		# headers using GNU statement expressions and implicit conversions, and -Wpedantic
+		# -Wsign-conversion -Werror rejects them - with errors that read as though PipeWire is broken
+		# rather than as warnings.
+		target_include_directories(mumble_client_object_lib SYSTEM PUBLIC ${PIPEWIRE_INCLUDE_DIRS})
+
+		target_compile_definitions(mumble_client_object_lib PUBLIC "USE_SCREEN_SHARE_PIPEWIRE")
+		target_link_libraries(mumble_client_object_lib PUBLIC PkgConfig::PIPEWIRE Qt6::DBus)
+	endif()
+
 	if(speechd)
 		find_pkg("speech-dispatcher" REQUIRED)
 

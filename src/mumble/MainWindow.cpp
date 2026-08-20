@@ -78,6 +78,10 @@
 #	include "WgcWindowVideoSource.h"
 #endif
 
+#ifdef USE_SCREEN_SHARE_PIPEWIRE
+#	include "PipeWireScreenVideoSource.h"
+#endif
+
 #include "Global.h"
 
 #ifdef Q_OS_WIN
@@ -624,12 +628,19 @@ void MainWindow::setupScreenShare() {
 
 	qmSelf->addAction(m_shareScreenAction);
 
-#ifndef Q_OS_WIN
-	// No capture backend on this platform. The action is built either way so every connection below
-	// stays valid, but an offered control that can only ever report its own unavailability is worse
-	// than no control, so it is not shown.
-	m_shareScreenAction->setVisible(false);
+	// Shown only where something can actually capture. On Linux that means a desktop portal is
+	// answering on the session bus - without one there is no way to ask for permission, so the control
+	// could only ever report its own unavailability. The action is built regardless, so every signal
+	// connection below stays unconditional.
+#if defined(Q_OS_WIN)
+	const bool screenCaptureAvailable = true;
+#elif defined(USE_SCREEN_SHARE_PIPEWIRE)
+	const bool screenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
+#else
+	const bool screenCaptureAvailable = false;
 #endif
+
+	m_shareScreenAction->setVisible(screenCaptureAvailable);
 
 	// Directly after the camera action, so the two toggles that do the same kind of thing sit together.
 	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
@@ -794,12 +805,49 @@ void MainWindow::toggleScreenShare(bool share) {
 	}
 
 #ifndef Q_OS_WIN
-	// Nothing captures a screen on this platform yet. Reported rather than silently ignored, so the
-	// button does not look broken - see setupScreenShare, which hides it here for the same reason.
-	Global::get().l->log(Log::Warning, tr("Screen sharing is currently only available on Windows."));
+#	ifdef USE_SCREEN_SHARE_PIPEWIRE
+	// No picker of our own: the desktop portal shows its own, and asking twice would be both redundant
+	// and misleading, since the portal's answer is the one that decides what is captured.
+	const Settings &pwSettings = Global::get().s;
+
+	m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(pwSettings.iVideoBitrate),
+										static_cast< unsigned int >(pwSettings.iVideoFramerate),
+										pwSettings.iVideoTileQuality, pwSettings.iVideoTileSize);
+	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
+
+	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(PortalScreenCast::SourceType::Any, true);
+
+	if (!m_screenVideoBroadcaster->start(std::move(pipeWireSource))) {
+		Global::get().l->log(Log::Warning, tr("Could not start screen capture."));
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
+
+	// Announced immediately even though the portal has not answered yet: the broadcaster is running,
+	// and the stream is announced the same way the Windows path announces its own. Frames begin when
+	// the user accepts; if they refuse, the source fails and the broadcaster stops, which ends the
+	// stream through the ordinary failure path.
+	MumbleProto::VideoState pwState;
+	pwState.set_stream_id(m_screenVideoBroadcaster->streamID());
+	pwState.set_active(true);
+	pwState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+	pwState.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
+	pwState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+
+	Global::get().sh->sendMessage(pwState);
+
+	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
+
+	return;
+#	else
+	// Nothing captures a screen in this build. Reported rather than silently ignored, so the button
+	// does not look broken - though setupScreenShare hides it in this case anyway.
+	Global::get().l->log(Log::Warning, tr("This build cannot share the screen."));
 	m_shareScreenAction->setChecked(false);
 
 	return;
+#	endif
 #else
 	// Unlike the camera, there is no sensible default to fall back to - Discord always asks too.
 	ScreenSharePickerDialog picker(this);
