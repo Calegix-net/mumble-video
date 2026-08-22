@@ -589,6 +589,16 @@ void MainWindow::setupVideoBroadcast() {
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Camera sharing stopped: %1").arg(reason));
+
+		// The announcement went out when sharing started; a failure has to take it back, or the server
+		// keeps routing a dead stream and every viewer stares at a frozen last frame. The explicit
+		// unshare path does this in toggleCameraShare - failures must not be the one path that skips it.
+		if (Global::get().sh && Global::get().sh->isRunning()) {
+			MumbleProto::VideoState end;
+			end.set_stream_id(m_videoBroadcaster->streamID());
+			end.set_active(false);
+			Global::get().sh->sendMessage(end);
+		}
 	});
 
 	// Your own camera, shown alongside everyone else's. Without it, sharing looks like nothing happened.
@@ -656,6 +666,16 @@ void MainWindow::setupScreenShare() {
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Screen sharing stopped: %1").arg(reason));
+
+		// On Linux the stream is announced before the portal has answered, so a refused portal - the
+		// most ordinary failure there is - would otherwise leave a permanently dead stream announced
+		// to everyone in the channel.
+		if (Global::get().sh && Global::get().sh->isRunning()) {
+			MumbleProto::VideoState end;
+			end.set_stream_id(m_screenVideoBroadcaster->streamID());
+			end.set_active(false);
+			Global::get().sh->sendMessage(end);
+		}
 	});
 
 	// Without this the video dock never appears at all when screen-sharing alone: VideoGrid::setSelfFrame
@@ -679,6 +699,13 @@ void MainWindow::setupScreenShare() {
 
 	connect(m_screenAudioBroadcaster, &ScreenAudioBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Screen-share audio stopped: %1").arg(reason));
+
+		if (Global::get().sh && Global::get().sh->isRunning()) {
+			MumbleProto::VideoState end;
+			end.set_stream_id(m_screenAudioBroadcaster->streamID());
+			end.set_active(false);
+			Global::get().sh->sendMessage(end);
+		}
 	});
 
 	connect(m_screenAudioBroadcaster, &ScreenAudioBroadcaster::unitReady, this,
@@ -837,6 +864,23 @@ void MainWindow::toggleScreenShare(bool share) {
 
 	Global::get().sh->sendMessage(pwState);
 
+	// The dock only appears when the grid has something to show, and the first real frame is gated on
+	// the user answering the portal's dialog - which can sit open for as long as they like. Until then
+	// this placeholder is the something: the panel opens immediately, reads as "starting", and the
+	// first preview frame simply paints over it. On refusal the failure path clears it.
+	if (m_videoGrid) {
+		QImage pending(640, 360, QImage::Format_RGB32);
+		pending.fill(QColor(24, 24, 24));
+
+		QPainter pendingPainter(&pending);
+		pendingPainter.setPen(Qt::white);
+		pendingPainter.drawText(pending.rect(), Qt::AlignCenter,
+								tr("Waiting for the screen picker…"));
+		pendingPainter.end();
+
+		m_videoGrid->setSelfFrame(pending);
+	}
+
 	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
 
 	return;
@@ -920,17 +964,11 @@ void MainWindow::toggleScreenShare(bool share) {
 		return;
 	}
 
-	MumbleProto::VideoState videoState;
-	videoState.set_stream_id(m_screenVideoBroadcaster->streamID());
-	videoState.set_active(true);
-	videoState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
-	videoState.set_source_kind(sourceKind);
-	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
-
-	Global::get().sh->sendMessage(videoState);
-
-	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
-
+	// Audio is started and announced BEFORE the video stream, deliberately. A v1.7.1 client keeps one
+	// surface per sender and lets a later announcement replace an earlier one; it does not understand
+	// OpusAudio (codec 5 resolves to CODEC_UNKNOWN there). Announced audio-first, the old client's
+	// surface ends up holding the video stream and the share stays watchable; the other order leaves
+	// it holding an undecodable stream and the picture goes dark for every un-upgraded viewer.
 	if (picker.includeAudio() && m_screenAudioBroadcaster) {
 		m_screenAudioBroadcaster->configure(96);
 
@@ -963,6 +1001,17 @@ void MainWindow::toggleScreenShare(bool share) {
 								 tr("Could not capture system audio; sharing the screen without it."));
 		}
 	}
+
+	MumbleProto::VideoState videoState;
+	videoState.set_stream_id(m_screenVideoBroadcaster->streamID());
+	videoState.set_active(true);
+	videoState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+	videoState.set_source_kind(sourceKind);
+	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+
+	Global::get().sh->sendMessage(videoState);
+
+	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
 #endif
 }
 

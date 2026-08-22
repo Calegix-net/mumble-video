@@ -62,7 +62,19 @@ public:
 	 * owner (MainWindow) is expected to hand out a distinct base per broadcaster instance before ever
 	 * starting it. Calling this after the first start() has no defined effect and is a caller error.
 	 */
-	void setNextStreamID(std::uint32_t id) { m_streamID = id; }
+	/// Largest frame the encoder is fed, matching VideoGrid's surface bounds on the receiving side.
+	/// One constant on each side rather than a shared header, but they must agree: the receiver
+	/// refuses what exceeds its bound rather than scaling it.
+	static constexpr int MAX_ENCODED_WIDTH  = 3840;
+	static constexpr int MAX_ENCODED_HEIGHT = 2160;
+
+	void setNextStreamID(std::uint32_t id) {
+		m_streamID = id;
+		// Remembered so start() does not ALSO auto-increment: callers that allocate ids from a shared
+		// counter seed before every start, and auto-incrementing on top of that made the second share's
+		// id collide with the next allocation.
+		m_streamIDSeeded = true;
+	}
 
 	/// Description of what is being captured, for the UI.
 	QString describe() const;
@@ -117,6 +129,7 @@ protected:
 	// 0 is a valid stream id, so the first stream uses it and each subsequent start increments.
 	std::uint32_t m_streamID = 0;
 	bool m_everStarted       = false;
+	bool m_streamIDSeeded    = false;
 
 	bool m_forceKeyframe = true;
 };

@@ -84,6 +84,10 @@ protected:
 	/// Drains the pending frame on the owning thread and emits frameReady.
 	void deliverPendingFrame();
 
+	/// Counts an unreadable buffer and reports through failed() once the run is long enough to mean
+	/// the user is looking at nothing. PipeWire thread.
+	void reportPersistentDrop(const QString &reason);
+
 	void teardown();
 
 	std::unique_ptr< PortalScreenCast > m_portal;
@@ -99,6 +103,16 @@ protected:
 	/// Negotiated format. Written on the PipeWire thread during param negotiation, read there too.
 	QSize m_size;
 	std::uint32_t m_spaFormat = 0;
+
+	/// Unreadable buffers in a row (PipeWire thread only). A solid second of them is reported through
+	/// failed() instead of being dropped in silence - the shipped bug was precisely a healthy-looking
+	/// stream whose every frame was quietly unusable.
+	int m_consecutiveDrops = 0;
+	static constexpr int CONSECUTIVE_DROPS_BEFORE_FAILURE = 30;
+
+	/// Whether any frame has ever been handed to the Qt side, for the first-frame watchdog.
+	std::atomic< bool > m_everPublished{ false };
+	static constexpr int FIRST_FRAME_TIMEOUT_MSEC = 8000;
 
 	std::atomic< bool > m_running{ false };
 

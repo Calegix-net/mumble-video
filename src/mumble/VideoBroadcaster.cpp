@@ -30,10 +30,16 @@ bool VideoBroadcaster::start(std::unique_ptr< VideoSource > source) {
 	m_source = std::move(source);
 
 	connect(m_source.get(), &VideoSource::frameReady, this, &VideoBroadcaster::onFrameReady);
-	connect(m_source.get(), &VideoSource::failed, this, [this](const QString &reason) {
-		stop();
-		emit failed(reason);
-	});
+	// Queued: the handler destroys the source, and every capture backend emits failed() from inside
+	// its own call stack - portal callbacks, PipeWire trampolines, camera backends. Tearing the sender
+	// down mid-emit is the use-after-free the camera error path once shipped.
+	connect(
+		m_source.get(), &VideoSource::failed, this,
+		[this](const QString &reason) {
+			stop();
+			emit failed(reason);
+		},
+		Qt::QueuedConnection);
 
 	if (!m_source->start()) {
 		m_source.reset();
@@ -43,9 +49,11 @@ bool VideoBroadcaster::start(std::unique_ptr< VideoSource > source) {
 
 	// A new stream each time, because the dimensions or the source itself may have changed and a
 	// receiver must not keep painting into the previous picture.
-	if (m_everStarted) {
+	if (m_everStarted && !m_streamIDSeeded) {
 		m_streamID++;
 	}
+
+	m_streamIDSeeded = false;
 
 	m_everStarted = true;
 
@@ -91,9 +99,20 @@ void VideoBroadcaster::configure(int codec, unsigned int bitrateKbps, unsigned i
 	m_encoder.setTileSize(tileSize);
 }
 
-void VideoBroadcaster::onFrameReady(const QImage &frame, std::uint64_t captureTimestampUsec) {
+void VideoBroadcaster::onFrameReady(const QImage &sourceFrame, std::uint64_t captureTimestampUsec) {
 	if (!m_source) {
 		return;
+	}
+
+	// Receivers refuse tiles beyond their surface bound (VideoGrid::MAX_SURFACE_WIDTH/HEIGHT), so a
+	// frame larger than that must never reach the encoder - a dual-monitor screen share at 5120x1440
+	// would otherwise encode and transmit tiles the far side is contractually going to discard,
+	// showing the viewer a silently cropped picture. Scaled here, once, on the sending side.
+	QImage frame = sourceFrame;
+
+	if (frame.width() > MAX_ENCODED_WIDTH || frame.height() > MAX_ENCODED_HEIGHT) {
+		frame = frame.scaled(MAX_ENCODED_WIDTH, MAX_ENCODED_HEIGHT, Qt::KeepAspectRatio,
+							 Qt::SmoothTransformation);
 	}
 
 	emit previewFrame(frame);

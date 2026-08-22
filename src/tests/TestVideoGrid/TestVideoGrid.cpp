@@ -44,7 +44,7 @@ void deliverFrame(VideoGrid &grid, const std::vector< EncodedVideoUnit > &units,
 
 	for (const EncodedVideoUnit &unit : units) {
 		grid.onVideoUnitReceived(
-			sender, stream, unit.header.x, unit.header.y,
+			sender, stream, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
 			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
 	}
 }
@@ -90,6 +90,9 @@ private slots:
 	void anUnknownCodecIsDropped();
 	void aSenderKeepsItsNameAcrossANewStream();
 	void aStuckDecoderAsksForAKeyframe();
+	void aGapInVp8FramesFreezesInsteadOfCorrupting();
+	void decodeResumesAtTheNextKeyframe();
+	void aStaleVp8FrameArrivingLateIsDropped();
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
@@ -172,11 +175,11 @@ void TestVideoGrid::surfaceGrowthKeepsWhatWasAlreadyDrawn() {
 	buffer.close();
 
 	announce(grid, SENDER, STREAM);
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(64, 64));
 
 	// A tile further right and down forces the surface to grow.
-	grid.onVideoUnitReceived(SENDER, STREAM, 64, 64, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 64, 64, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 
 	// And the first tile is still there. Reallocating blank would make a resolution change flash black.
@@ -202,7 +205,7 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 	buffer.close();
 
 	announce(grid, SENDER, 1);
-	grid.onVideoUnitReceived(SENDER, 1, 0, 0, encoded);
+	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
 
 	QImage small(32, 32, QImage::Format_RGB32);
@@ -216,7 +219,7 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 
 	// A second stream id from the same sender - camera plus screen, in practice.
 	announce(grid, SENDER, 2);
-	grid.onVideoUnitReceived(SENDER, 2, 0, 0, smallEncoded);
+	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, smallEncoded);
 	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(32, 32));
 
 	// The first stream's picture is untouched by the second one arriving.
@@ -247,7 +250,7 @@ void TestVideoGrid::reannouncingAStreamDiscardsItsOldPicture() {
 	buffer.close();
 
 	announce(grid, SENDER, STREAM);
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 
 	// Same stream id, announced again with a different codec - a misbehaving peer, since the protocol
@@ -271,13 +274,13 @@ void TestVideoGrid::sendersAppearAndDisappear() {
 
 	announce(grid, 1, STREAM);
 	announce(grid, 2, STREAM);
-	grid.onVideoUnitReceived(1, STREAM, 0, 0, encoded);
-	grid.onVideoUnitReceived(2, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(1, STREAM, 0, true, 0, 0, encoded);
+	grid.onVideoUnitReceived(2, STREAM, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.senderCount(), 2);
 	QCOMPARE(spy.count(), 2);
 
 	// Further tiles from a known sender are not a new arrival.
-	grid.onVideoUnitReceived(1, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(1, STREAM, 0, true, 0, 0, encoded);
 	QCOMPARE(spy.count(), 2);
 
 	grid.removeSender(1);
@@ -307,7 +310,7 @@ void TestVideoGrid::theSenderCountIsCapped() {
 
 	for (unsigned int session = 1; session <= VideoGrid::MAX_SENDERS + 10; ++session) {
 		announce(grid, session, STREAM);
-		grid.onVideoUnitReceived(session, STREAM, 0, 0, encoded);
+		grid.onVideoUnitReceived(session, STREAM, 0, true, 0, 0, encoded);
 	}
 
 	QCOMPARE(grid.senderCount(), VideoGrid::MAX_SENDERS);
@@ -354,12 +357,12 @@ void TestVideoGrid::unitsForAnUnannouncedStreamAreDropped() {
 	QVERIFY(tile.save(&buffer, "JPEG"));
 
 	// Perfectly valid JPEG, but no announcement arrived for this stream.
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, jpeg);
 	QCOMPARE(grid.senderCount(), 0);
 
 	// And it starts working the moment the announcement does arrive.
 	announce(grid, SENDER, STREAM);
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, jpeg);
 	QCOMPARE(grid.senderCount(), 1);
 }
 
@@ -377,13 +380,122 @@ void TestVideoGrid::anUnknownCodecIsDropped() {
 	// CODEC_UNKNOWN is what a codec added after this build resolves to. Dropped, not guessed at, even
 	// though these particular bytes would decode.
 	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_CODEC_UNKNOWN);
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, jpeg);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, jpeg);
 	QCOMPARE(grid.senderCount(), 0);
 }
 
 // A receiver holds a surface from the announcement onward, before anything has decoded into it. If it
 // is not sharing its own camera either, there is a window where a surface exists but nothing is drawable
 // - and the grid still has to survive being painted in it.
+// The green-frame bug: VP8 decodes an inter-frame whose reference was lost into a plausible corrupted
+// image rather than failing, so the failure-counting recovery path never noticed anything was wrong.
+// The grid now enforces frame continuity itself: a gap freezes the picture on the last good frame and
+// asks for a keyframe immediately - once, not per dropped unit.
+void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
+	VP8Encoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	// Frames 0 (keyframe), 1, 2 encoded against each other; the wire loses frame 1.
+	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	const auto f1 = encoder.encode(source.render(1), STREAM, 1, 1, false);
+	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
+	QVERIFY(!f0.empty() && !f1.empty() && !f2.empty());
+
+	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const QImage afterKeyframe = grid.surfaceFor(SENDER, STREAM);
+	QVERIFY(!afterKeyframe.isNull());
+
+	// Frame 1 never arrives; frame 2 does. Feeding it to the decoder would "succeed" with garbage, so
+	// the grid must not: the canvas stays exactly the frame-0 picture and one keyframe request goes out.
+	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
+	QCOMPARE(needed.count(), 1);
+
+	// Further inter-frames while frozen change nothing and do not spam requests.
+	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, false);
+	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
+	QCOMPARE(needed.count(), 1);
+}
+
+void TestVideoGrid::decodeResumesAtTheNextKeyframe() {
+	VP8Encoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	encoder.encode(source.render(1), STREAM, 1, 1, false); // lost on the wire
+	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
+	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, true); // the answer to the request
+
+	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const QImage frozen = grid.surfaceFor(SENDER, STREAM);
+	QCOMPARE(needed.count(), 1);
+
+	// The keyframe unfreezes the stream: the canvas moves off the frozen picture, and no further
+	// request is emitted.
+	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QVERIFY(meanDifference(grid.surfaceFor(SENDER, STREAM), frozen) > 1.0);
+	QCOMPARE(needed.count(), 1);
+}
+
+// The reassembler delivers units in completion order, not frame order: a fragment of frame N can finish
+// reassembling long after frame N+1 played. Decoding the latecomer would rewind the decoder's reference
+// state and corrupt everything after it, so stale frames are dropped before the decoder sees them.
+void TestVideoGrid::aStaleVp8FrameArrivingLateIsDropped() {
+	VP8Encoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	const auto f1 = encoder.encode(source.render(1), STREAM, 1, 1, false);
+	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
+
+	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	deliverFrame(grid, f1, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const QImage current = grid.surfaceFor(SENDER, STREAM);
+
+	// Frame 1 shows up again, late. The canvas must not move and the decoder must not be poisoned:
+	// no freeze, no keyframe request, nothing.
+	deliverFrame(grid, f1, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), current), 0.0);
+	QCOMPARE(needed.count(), 0);
+}
+
 void TestVideoGrid::anAnnouncedButBlankStreamPaintsWithoutCrashing() {
 	VideoGrid grid;
 	grid.resize(320, 240);
@@ -432,12 +544,12 @@ void TestVideoGrid::aStuckDecoderAsksForAKeyframe() {
 	const QByteArray garbage("no decoder will make sense of this");
 
 	for (int i = 0; i < VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES - 1; ++i) {
-		grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+		grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, garbage);
 	}
 
 	QCOMPARE(needed.count(), 0);
 
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, garbage);
 	QCOMPARE(needed.count(), 1);
 	QCOMPARE(needed.at(0).at(0).toUInt(), SENDER);
 	QCOMPARE(needed.at(0).at(1).toUInt(), STREAM);
@@ -445,7 +557,7 @@ void TestVideoGrid::aStuckDecoderAsksForAKeyframe() {
 	// The counter restarts after each report, so a sender that never answers is asked again only after
 	// another full run - not on every subsequent unit.
 	for (int i = 0; i < VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES - 1; ++i) {
-		grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+		grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, garbage);
 	}
 
 	QCOMPARE(needed.count(), 1);
@@ -458,7 +570,7 @@ void TestVideoGrid::aStuckDecoderAsksForAKeyframe() {
 	announce(unknowing, SENDER, STREAM, MumbleProto::VideoState_Codec_CODEC_UNKNOWN);
 
 	for (int i = 0; i < 3 * VideoGrid::KEYFRAME_REQUEST_AFTER_FAILURES; ++i) {
-		unknowing.onVideoUnitReceived(SENDER, STREAM, 0, 0, garbage);
+		unknowing.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, garbage);
 	}
 
 	QCOMPARE(futile.count(), 0);
@@ -479,13 +591,14 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 	// The offset comes off the network. A tile claiming to belong far outside any real frame must not
 	// make the client allocate a surface to match.
 	announce(grid, SENDER, STREAM);
-	grid.onVideoUnitReceived(SENDER, STREAM, 100000, 100000, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 100000, 100000, encoded);
 
 	QCOMPARE(grid.senderCount(), 0);
 	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
 
 	// Exactly at the boundary is still refused, since the tile would extend past it.
-	grid.onVideoUnitReceived(SENDER, STREAM, static_cast< unsigned int >(VideoGrid::MAX_SURFACE_WIDTH), 0, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, static_cast< unsigned int >(VideoGrid::MAX_SURFACE_WIDTH), 0,
+							 encoded);
 	QCOMPARE(grid.senderCount(), 0);
 }
 
@@ -493,10 +606,10 @@ void TestVideoGrid::nonJpegDataIsRefused() {
 	VideoGrid grid;
 
 	announce(grid, SENDER, STREAM);
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, QByteArray("not an image at all"));
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, QByteArray("not an image at all"));
 	QCOMPARE(grid.senderCount(), 0);
 
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, QByteArray());
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, QByteArray());
 	QCOMPARE(grid.senderCount(), 0);
 
 	// A PNG is a valid image but not what the codec says it is. Decoding is pinned to JPEG so that a
@@ -510,7 +623,7 @@ void TestVideoGrid::nonJpegDataIsRefused() {
 	QVERIFY(png.save(&buffer, "PNG"));
 	buffer.close();
 
-	grid.onVideoUnitReceived(SENDER, STREAM, 0, 0, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.senderCount(), 0);
 }
 

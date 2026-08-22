@@ -177,6 +177,10 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.canvas = QImage();
 		surface.vp8.reset();
+		surface.lastFrameNumber    = 0;
+		surface.hasDecodedFrame    = false;
+		surface.awaitingKeyframe   = false;
+		surface.unitsWhileAwaiting = 0;
 	}
 
 	surface.senderSession = senderSession;
@@ -185,7 +189,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	surface.sourceKind    = sourceKind;
 }
 
-void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
+void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+									bool isKeyframe, unsigned int x, unsigned int y,
 									const QByteArray &encodedTile) {
 	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
 	// no codec, and are dropped rather than assumed to be anything.
@@ -196,6 +201,43 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	Surface &surface = existing->second;
+
+	// VP8 inter-frames reference their predecessor, and decoding one whose reference is missing does
+	// not fail - it returns a plausible-looking corrupted image, classically green. The failure counter
+	// below never sees that, so frame continuity is enforced here, before the decoder is fed at all.
+	// TiledImage is exempt: its units are independently decodable by design, so late or missing tiles
+	// cost nothing beyond the pixels they carried.
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8 && surface.hasDecodedFrame) {
+		if (!isKeyframe && frameNumber <= surface.lastFrameNumber) {
+			// A stale unit that reassembled after its successors. Decoding it now would rewind the
+			// decoder's reference state and corrupt everything that follows.
+			return;
+		}
+
+		if (surface.awaitingKeyframe && !isKeyframe) {
+			// Frozen: the last good picture stays up, which reads as a brief pause instead of a burst
+			// of green. Re-ask occasionally in case the first request was lost in the same loss burst
+			// that caused the gap.
+			if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
+				surface.unitsWhileAwaiting = 0;
+
+				emit keyframeNeeded(senderSession, streamID);
+			}
+
+			return;
+		}
+
+		if (!isKeyframe && frameNumber != surface.lastFrameNumber + 1) {
+			// The reference for this frame never arrived. Freeze and ask once; the counter above
+			// repeats the request if the stream keeps flowing without a keyframe.
+			surface.awaitingKeyframe   = true;
+			surface.unitsWhileAwaiting = 0;
+
+			emit keyframeNeeded(senderSession, streamID);
+
+			return;
+		}
+	}
 
 	const QImage tile = decodeUnit(surface, encodedTile);
 
@@ -217,6 +259,13 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	surface.consecutiveFailures = 0;
+
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8) {
+		surface.lastFrameNumber    = frameNumber;
+		surface.hasDecodedFrame    = true;
+		surface.awaitingKeyframe   = false;
+		surface.unitsWhileAwaiting = 0;
+	}
 
 	// A surface exists from the announcement onwards but holds no picture until now, so this is what
 	// makes the sender count - and with it the video panel - appear.

@@ -351,5 +351,15 @@ QImage VP8Decoder::decode(const std::vector< Mumble::Protocol::byte > &payload) 
 		return QImage();
 	}
 
+	// Decoding an inter-frame whose reference is missing does not fail - libvpx returns a plausible
+	// corrupted image. The frame-continuity tracking upstream is the real defence; this catches what
+	// it cannot: a keyframe that itself arrived damaged, or any bookkeeping slip. Costs one control
+	// call per frame.
+	int corrupted = 0;
+
+	if (vpx_codec_control(m_context, VP8D_GET_FRAME_CORRUPTED, &corrupted) == VPX_CODEC_OK && corrupted) {
+		return QImage();
+	}
+
 	return i420ToRgb(img);
 }

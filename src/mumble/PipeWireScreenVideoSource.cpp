@@ -112,10 +112,16 @@ bool PipeWireScreenVideoSource::start() {
 
 	m_portal = std::make_unique< PortalScreenCast >(this);
 
-	connect(m_portal.get(), &PortalScreenCast::failed, this, [this](const QString &reason) {
-		teardown();
-		emit failed(reason);
-	});
+	// Queued on purpose: the handler tears the portal down, and PortalScreenCast emits failed() from
+	// inside its own methods - destroying the sender mid-emit is the same use-after-free the camera
+	// error path once had.
+	connect(
+		m_portal.get(), &PortalScreenCast::failed, this,
+		[this](const QString &reason) {
+			teardown();
+			emit failed(reason);
+		},
+		Qt::QueuedConnection);
 
 	// The PipeWire side cannot be built until the portal has produced a node, and the portal is
 	// asynchronous because it is showing the user a dialog. start() therefore returns true meaning
@@ -202,6 +208,11 @@ bool PipeWireScreenVideoSource::start() {
 							  static_cast< pw_stream_flags >(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
 							  params, 1);
 
+		// Written while the loop is still locked, so no process callback can observe them mid-write:
+		// the callbacks read both, and the loop starts the moment it is unlocked and started.
+		m_clock.restart();
+		m_running = true;
+
 		pw_thread_loop_unlock(m_loop);
 
 		if (connected < 0) {
@@ -218,8 +229,15 @@ bool PipeWireScreenVideoSource::start() {
 			return;
 		}
 
-		m_clock.restart();
-		m_running = true;
+		// If the stream connects but no frame ever arrives - a compositor stuck in PAUSED, a portal
+		// bug - nothing else in this file would ever notice, because every other failure report is
+		// driven by a callback that needs the stream to be doing *something*. The watchdog turns
+		// "silently nothing" into a message.
+		QTimer::singleShot(FIRST_FRAME_TIMEOUT_MSEC, this, [this]() {
+			if (m_running && !m_everPublished) {
+				emit failed(tr("The screen share started but no frames arrived from the compositor."));
+			}
+		});
 	});
 
 	if (!m_portal->requestAccess(m_sourceType, m_captureCursor)) {
@@ -286,7 +304,16 @@ void PipeWireScreenVideoSource::onStreamStateChanged(int state, const char *erro
 }
 
 void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa_pod *param) {
-	if (!param || id != SPA_PARAM_Format) {
+	if (id != SPA_PARAM_Format) {
+		return;
+	}
+
+	// A null param is PipeWire clearing the format for renegotiation. Stale geometry must not survive
+	// it: frames after a renegotiation to another size or layout would be converted with the old one.
+	if (!param) {
+		m_size      = QSize();
+		m_spaFormat = 0;
+
 		return;
 	}
 
@@ -308,13 +335,35 @@ void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa
 	const int height = static_cast< int >(info.size.height);
 
 	// The negotiated size comes from outside this process. A compositor will not offer something
-	// absurd, but nothing here should depend on that.
+	// absurd, but nothing here should depend on that - and rejecting it silently would leave the
+	// stream "running" with every frame dropped, so the user is told.
 	if (width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
+		QMetaObject::invokeMethod(
+			this, [this]() { emit failed(tr("The shared screen is too large to capture.")); },
+			Qt::QueuedConnection);
+
 		return;
 	}
 
 	m_size      = QSize(width, height);
 	m_spaFormat = info.format;
+
+	// Answer the negotiation by restricting buffer types to memory this process can actually map.
+	// Without this the compositor is free to hand over DMA-BUF (GPU) buffers - Mutter and KWin both
+	// prefer them - and PW_STREAM_FLAG_MAP_BUFFERS deliberately does not map those, so every frame
+	// arrives with a null data pointer and is dropped while the stream looks perfectly healthy.
+	// That was the shipped bug: portal accepted, no error anywhere, and the video panel never
+	// appeared because not one frame ever made it through. This is the same answer OBS and
+	// Chromium's capturer give.
+	std::uint8_t buffer[512];
+	spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+
+	const spa_pod *params[1];
+	params[0] = static_cast< const spa_pod * >(spa_pod_builder_add_object(
+		&builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
+		SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr))));
+
+	pw_stream_update_params(m_stream, params, 1);
 }
 
 void PipeWireScreenVideoSource::onStreamProcess() {
@@ -330,11 +379,13 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 
 	spa_buffer *spaBuffer = buffer->buffer;
 
-	// DMA-BUF frames arrive with no mapped pointer. Importing them would need EGL and a GPU context;
-	// PW_STREAM_FLAG_MAP_BUFFERS asks for mappable memory instead, so a null pointer here means a
-	// buffer this build cannot read rather than one it should try to.
+	// The buffers param sent during negotiation restricts the compositor to mappable memory, so a
+	// null pointer here should no longer happen - but a compositor that ignores the restriction would
+	// otherwise reproduce the original silent-black-panel bug, so persistent unreadable buffers are
+	// reported rather than dropped forever.
 	if (spaBuffer->n_datas < 1 || !spaBuffer->datas[0].data) {
 		pw_stream_queue_buffer(m_stream, buffer);
+		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
 
 		return;
 	}
@@ -343,19 +394,30 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 	const int width      = m_size.width();
 	const int height     = m_size.height();
 
-	// stride is what the producer actually used; it is not necessarily width * 4.
-	const std::int32_t stride = data.chunk ? data.chunk->stride : static_cast< std::int32_t >(width) * 4;
-
-	if (stride < static_cast< std::int32_t >(width) * 4
-		|| data.maxsize < static_cast< std::uint32_t >(stride) * static_cast< std::uint32_t >(height)) {
+	// A producer marking the chunk corrupted is telling us not to show it.
+	if (data.chunk && (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED)) {
 		pw_stream_queue_buffer(m_stream, buffer);
+
+		return;
+	}
+
+	// stride and offset are what the producer actually used; neither is necessarily width * 4 / zero.
+	const std::int32_t stride        = data.chunk ? data.chunk->stride : static_cast< std::int32_t >(width) * 4;
+	const std::uint32_t chunkOffset  = data.chunk ? data.chunk->offset : 0;
+	const std::uint32_t chunkSize    = data.chunk ? data.chunk->size : data.maxsize;
+	const std::uint32_t bytesNeeded  = static_cast< std::uint32_t >(stride) * static_cast< std::uint32_t >(height);
+
+	if (stride < static_cast< std::int32_t >(width) * 4 || chunkSize < bytesNeeded
+		|| data.maxsize < chunkOffset + bytesNeeded) {
+		pw_stream_queue_buffer(m_stream, buffer);
+		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
 
 		return;
 	}
 
 	QImage frame(width, height, QImage::Format_ARGB32);
 
-	const auto *base = static_cast< const std::uint8_t * >(data.data);
+	const auto *base = static_cast< const std::uint8_t * >(data.data) + chunkOffset;
 
 	for (int y = 0; y < height; ++y) {
 		convertRow(m_spaFormat, base + static_cast< std::size_t >(y) * static_cast< std::size_t >(stride),
@@ -364,10 +426,25 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 
 	pw_stream_queue_buffer(m_stream, buffer);
 
+	m_consecutiveDrops = 0;
+
 	publishFrame(frame, static_cast< std::uint64_t >(m_clock.elapsed().count()));
 }
 
+void PipeWireScreenVideoSource::reportPersistentDrop(const QString &reason) {
+	// Transient drops are normal (negotiation, an occasional bad chunk); a solid second of them means
+	// the user is staring at nothing and deserves to know why. Reported once - the failed() handlers
+	// tear this source down, so a second report would race destruction.
+	if (++m_consecutiveDrops != CONSECUTIVE_DROPS_BEFORE_FAILURE) {
+		return;
+	}
+
+	QMetaObject::invokeMethod(this, [this, reason]() { emit failed(reason); }, Qt::QueuedConnection);
+}
+
 void PipeWireScreenVideoSource::publishFrame(const QImage &frame, std::uint64_t captureTimestampUsec) {
+	m_everPublished = true;
+
 	{
 		QMutexLocker lock(&m_frameMutex);
 
