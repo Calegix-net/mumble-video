@@ -32,6 +32,8 @@ flatpak-builder --user --force-clean --disable-rofiles-fuse --delete-build-dirs 
     --repo="${STATE_DIR}/repo" \
     "${STATE_DIR}/build" "${MANIFEST}"
 
-flatpak build-bundle "${STATE_DIR}/repo" "${OUT}" com.calegix.MumbleVideo
+# --runtime-repo lets `flatpak install <bundle>` fetch org.kde.Platform from Flathub itself instead of
+# failing with "requires the runtime ... which was not found" on a machine that has never had it.
+flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo "${STATE_DIR}/repo" "${OUT}" com.calegix.MumbleVideo
 
 echo "built $(du -h "${OUT}" | cut -f1) flatpak: ${OUT}"
