@@ -1,0 +1,205 @@
+[  3%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/spdlog.cpp.o
+[  3%] Building CXX object src/tracy/CMakeFiles/TracyClient.dir/public/TracyClient.cpp.o
+[  3%] Generating licenses.h
+[  3%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/stdout_sinks.cpp.o
+[  3%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/blob.cpp.o
+[  4%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/common.cpp.o
+[  7%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/once-temp-type.cpp.o
+[  4%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/ref-counted-statement.cpp.o
+[  4%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/connection-pool.cpp.o
+[  4%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/cfg.cpp.o
+[  4%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/procedure.cpp.o
+[  4%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/file_sinks.cpp.o
+[  4%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/backend-loader.cpp.o
+[  8%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/ref-counted-prepare-info.cpp.o
+[  9%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/connection-parameters.cpp.o
+[ 11%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/logger.cpp.o
+[  9%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/prepare-temp-type.cpp.o
+[ 11%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/bundled_fmtlib_format.cpp.o
+[  9%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/color_sinks.cpp.o
+[  9%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/into-type.cpp.o
+[  9%] Building CXX object src/spdlog/CMakeFiles/spdlog.dir/src/async.cpp.o
+[ 11%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/error.cpp.o
+[ 12%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/row.cpp.o
+[ 12%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/rowid.cpp.o
+[ 14%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/soci-simple.cpp.o
+[ 14%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/session.cpp.o
+[ 15%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/transaction.cpp.o
+[ 15%] Built target CLI11
+[ 15%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/statement.cpp.o
+[ 15%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/unicode.cpp.o
+[ 16%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/use-type.cpp.o
+[ 16%] Building CXX object src/database/soci/src/core/CMakeFiles/soci_core.dir/values.cpp.o
+[ 16%] Built target generate_license_header
+[ 17%] Linking CXX static library libTracyClient.a
+[ 17%] Built target TracyClient
+[ 18%] Linking CXX static library ../../../../../lib/libsoci_core.a
+[ 18%] Built target soci_core
+[ 18%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/error.cpp.o
+[ 19%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/standard-into-type.cpp.o
+[ 21%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/blob.cpp.o
+[ 21%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/common.cpp.o
+[ 21%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/error.cpp.o
+[ 22%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/row-id.cpp.o
+[ 22%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/factory.cpp.o
+[ 23%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/session.cpp.o
+[ 23%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/standard-into-type.cpp.o
+[ 26%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/session.cpp.o
+[ 28%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/error.cpp.o
+[ 28%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/row-id.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/vector-use-type.cpp.o
+[ 28%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/factory.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/factory.cpp.o
+[ 28%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/session.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/vector-use-type.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/blob.cpp.o
+[ 28%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/standard-use-type.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/vector-into-type.cpp.o
+[ 31%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/row-id.cpp.o
+[ 32%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/statement.cpp.o
+[ 33%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/standard-into-type.cpp.o
+[ 32%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/vector-into-type.cpp.o
+[ 34%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/statement.cpp.o
+[ 34%] Building CXX object src/database/soci/src/backends/sqlite3/CMakeFiles/soci_sqlite3.dir/blob.cpp.o
+[ 32%] Building CXX object src/database/soci/src/backends/postgresql/CMakeFiles/soci_postgresql.dir/standard-use-type.cpp.o
+[ 35%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/vector-into-type.cpp.o
+[ 35%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/statement.cpp.o
+[ 35%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/standard-use-type.cpp.o
+[ 36%] Building CXX object src/database/soci/src/backends/mysql/CMakeFiles/soci_mysql.dir/vector-use-type.cpp.o
+[ 37%] Linking CXX static library libspdlog.a
+[ 37%] Built target spdlog
+[ 37%] Generating FFDHETable.h
+[ 38%] Running cpp protocol buffer compiler on /src/src/Mumble.proto
+[ 38%] Running cpp protocol buffer compiler on /src/src/MumbleUDP.proto
+[ 38%] Built target shared_autogen_timestamp_deps
+[ 39%] Automatic MOC for target shared
+[ 39%] Linking CXX static library ../../../../../../lib/libsoci_postgresql.a
+[ 39%] Built target shared_autogen
+[ 40%] Building CXX object src/CMakeFiles/shared.dir/License.cpp.o
+[ 40%] Building CXX object src/CMakeFiles/shared.dir/HTMLFilter.cpp.o
+[ 41%] Building CXX object src/CMakeFiles/shared.dir/MumbleUDP.pb.cc.o
+[ 40%] Building CXX object src/CMakeFiles/shared.dir/Ban.cpp.o
+[ 42%] Building CXX object src/CMakeFiles/shared.dir/FFDHE.cpp.o
+[ 43%] Building CXX object src/CMakeFiles/shared.dir/OSInfo.cpp.o
+[ 44%] Building CXX object src/CMakeFiles/shared.dir/HostAddress.cpp.o
+[ 45%] Building CXX object src/CMakeFiles/shared.dir/Logger.cpp.o
+[ 45%] Building CXX object src/CMakeFiles/shared.dir/MumbleProtocol.cpp.o
+[ 41%] Building CXX object src/CMakeFiles/shared.dir/ExceptionUtils.cpp.o
+[ 46%] Building CXX object src/CMakeFiles/shared.dir/EnvUtils.cpp.o
+[ 46%] Building CXX object src/CMakeFiles/shared.dir/Mumble.pb.cc.o
+[ 41%] Building CXX object src/CMakeFiles/shared.dir/LogEmitter.cpp.o
+[ 47%] Building CXX object src/CMakeFiles/shared.dir/shared_autogen/mocs_compilation.cpp.o
+[ 48%] Building CXX object src/CMakeFiles/shared.dir/ProcessResolver.cpp.o
+[ 49%] Building CXX object src/CMakeFiles/shared.dir/PlatformCheck.cpp.o
+[ 49%] Building CXX object src/CMakeFiles/shared.dir/PasswordGenerator.cpp.o
+[ 49%] Built target soci_postgresql
+[ 49%] Building CXX object src/CMakeFiles/shared.dir/QtUtils.cpp.o
+[ 49%] Building CXX object src/CMakeFiles/shared.dir/ProtoUtils.cpp.o
+[ 50%] Building CXX object src/CMakeFiles/shared.dir/ServerAddress.cpp.o
+[ 50%] Building CXX object src/CMakeFiles/shared.dir/ServerResolver.cpp.o
+[ 51%] Building CXX object src/CMakeFiles/shared.dir/SelfSignedCertificate.cpp.o
+[ 52%] Building CXX object src/CMakeFiles/shared.dir/ServerResolverRecord.cpp.o
+[ 52%] Building CXX object src/CMakeFiles/shared.dir/SSL.cpp.o
+[ 53%] Building CXX object src/CMakeFiles/shared.dir/SSLLocks.cpp.o
+[ 53%] Building CXX object src/CMakeFiles/shared.dir/Timer.cpp.o
+[ 54%] Building CXX object src/CMakeFiles/shared.dir/UnresolvedServerAddress.cpp.o
+[ 54%] Building CXX object src/CMakeFiles/shared.dir/Version.cpp.o
+[ 55%] Building CXX object src/CMakeFiles/shared.dir/VideoFragmentation.cpp.o
+[ 55%] Building CXX object src/CMakeFiles/shared.dir/VideoTransport.cpp.o
+[ 55%] Linking CXX static library ../../../../../../lib/libsoci_mysql.a
+[ 55%] Linking CXX static library ../../../../../../lib/libsoci_sqlite3.a
+[ 55%] Built target soci_mysql
+[ 56%] Building CXX object src/CMakeFiles/shared.dir/VolumeAdjustment.cpp.o
+[ 56%] Built target soci_sqlite3
+[ 57%] Building CXX object src/CMakeFiles/shared.dir/crypto/CryptographicHash.cpp.o
+[ 57%] Building CXX object src/CMakeFiles/shared.dir/crypto/CryptographicRandom.cpp.o
+[ 58%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Backend.cpp.o
+[ 59%] Building CXX object src/CMakeFiles/shared.dir/crypto/CryptState.cpp.o
+[ 59%] Building CXX object src/CMakeFiles/shared.dir/crypto/CryptStateOCB2.cpp.o
+[ 60%] Building CXX object src/CMakeFiles/shared.dir/__/3rdparty/arc4random/arc4random_uniform.cpp.o
+[ 60%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Column.cpp.o
+[ 61%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Constraint.cpp.o
+[ 62%] Building CXX object src/database/CMakeFiles/mumble_database.dir/ConversionUtils.cpp.o
+[ 63%] Building CXX object src/database/CMakeFiles/mumble_database.dir/ForeignKey.cpp.o
+[ 63%] Building CXX object src/database/CMakeFiles/mumble_database.dir/DataType.cpp.o
+[ 63%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Database.cpp.o
+[ 64%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Index.cpp.o
+[ 64%] Building CXX object src/database/CMakeFiles/mumble_database.dir/MetaTable.cpp.o
+[ 65%] Building CXX object src/database/CMakeFiles/mumble_database.dir/MySQLConnectionParameter.cpp.o
+[ 65%] Building CXX object src/database/CMakeFiles/mumble_database.dir/PostgreSQLConnectionParameter.cpp.o
+[ 66%] Building CXX object src/database/CMakeFiles/mumble_database.dir/PrimaryKey.cpp.o
+[ 66%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Savepoint.cpp.o
+[ 67%] Building CXX object src/database/CMakeFiles/mumble_database.dir/SQLiteConnectionParameter.cpp.o
+[ 67%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Table.cpp.o
+[ 68%] Building CXX object src/database/CMakeFiles/mumble_database.dir/TransactionHolder.cpp.o
+[ 69%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Trigger.cpp.o
+[ 69%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Utils.cpp.o
+[ 70%] Building CXX object src/database/CMakeFiles/mumble_database.dir/Version.cpp.o
+[ 70%] Linking CXX static library libshared.a
+[ 70%] Built target shared
+[ 70%] Linking CXX static library libmumble_database.a
+[ 70%] Built target mumble_database
+[ 71%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ServerDatabase.cpp.o
+[ 72%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBUserData.cpp.o
+[ 73%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBUser.cpp.o
+[ 72%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBChannel.cpp.o
+[ 73%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBGroup.cpp.o
+[ 73%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBGroupMember.cpp.o
+[ 73%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBBan.cpp.o
+[ 74%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBChannelListener.cpp.o
+[ 75%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBChannelLink.cpp.o
+[ 76%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/DBAcl.cpp.o
+[ 76%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ACLCompat.cpp.o
+[ 77%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ServerTable.cpp.o
+[ 77%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/LogTable.cpp.o
+[ 77%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/UserTable.cpp.o
+[ 77%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ChannelTable.cpp.o
+[ 78%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ConfigTable.cpp.o
+[ 79%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ChannelPropertyTable.cpp.o
+[ 80%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/UserPropertyTable.cpp.o
+[ 80%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/GroupTable.cpp.o
+[ 81%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/BanTable.cpp.o
+[ 81%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ChannelListenerTable.cpp.o
+[ 82%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/GroupMemberTable.cpp.o
+[ 82%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ChannelLinkTable.cpp.o
+[ 83%] Building CXX object src/murmur/database/CMakeFiles/mumble_server_database.dir/ACLTable.cpp.o
+[ 84%] Linking CXX static library libmumble_server_database.a
+[ 84%] Built target mumble_server_database
+[ 84%] Built target mumble_server_object_lib_autogen_timestamp_deps
+[ 84%] Automatic MOC for target mumble_server_object_lib
+[ 84%] Built target mumble_server_object_lib_autogen
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/AudioReceiverBuffer.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Cert.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Messages.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/LegacyPasswordHash.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/mumble_server_object_lib_autogen/mocs_compilation.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/PBKDF2.cpp.o
+[ 87%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Meta.cpp.o
+[ 88%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Register.cpp.o
+[ 89%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/Channel.cpp.o
+[ 90%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/VideoRouter.cpp.o
+[ 90%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/RPC.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/Group.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Server.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/ServerUser.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/ServerApplication.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/User.cpp.o
+[ 92%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Zeroconf.cpp.o
+[ 93%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/DBWrapper.cpp.o
+[ 94%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/Globals.cpp.o
+[ 94%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/ACL.cpp.o
+[ 94%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/ChannelListenerManager.cpp.o
+[ 95%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/Connection.cpp.o
+[ 96%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/UnixMurmur.cpp.o
+[ 97%] Building CXX object src/murmur/CMakeFiles/mumble_server_object_lib.dir/__/__/3rdparty/qqbonjour/BonjourServiceRegister.cpp.o
+[ 97%] Built target mumble_server_object_lib
+[ 97%] Built target mumble-server_autogen_timestamp_deps
+[ 97%] Automatic MOC for target mumble-server
+[ 97%] Built target mumble-server_autogen
+[ 98%] Building CXX object src/murmur/CMakeFiles/mumble-server.dir/mumble-server_autogen/mocs_compilation.cpp.o
+[ 98%] Building CXX object src/murmur/CMakeFiles/mumble-server.dir/main.cpp.o
+[ 99%] Linking CXX executable ../../mumble-server
+[ 99%] Built target mumble-server
+[100%] Generating delayed configure script configure_files_1.cmake
+[100%] Executing delayed configure script configure_files_1.cmake
+[100%] Built target delayed_configure_files_target_1

@@ -123,8 +123,10 @@ void WasapiProcessLoopbackSource::Worker::run() {
 }
 
 WasapiProcessLoopbackSource::WasapiProcessLoopbackSource(unsigned long targetProcessId,
-														  const QString &processDescription, QObject *parent)
-	: AudioLoopbackSource(parent), m_targetProcessId(targetProcessId), m_processDescription(processDescription) {
+														  const QString &processDescription, bool excludeTargetTree,
+														  QObject *parent)
+	: AudioLoopbackSource(parent), m_targetProcessId(targetProcessId), m_excludeTargetTree(excludeTargetTree),
+	  m_processDescription(processDescription) {
 }
 
 WasapiProcessLoopbackSource::~WasapiProcessLoopbackSource() {
@@ -171,7 +173,11 @@ bool WasapiProcessLoopbackSource::isRunning() const {
 }
 
 QString WasapiProcessLoopbackSource::describe() const {
-	return m_processDescription.isEmpty() ? tr("One application's audio") : m_processDescription;
+	if (!m_processDescription.isEmpty()) {
+		return m_processDescription;
+	}
+
+	return m_excludeTargetTree ? tr("System audio (excluding Mumble)") : tr("One application's audio");
 }
 
 unsigned int WasapiProcessLoopbackSource::sampleRate() const {
@@ -238,7 +244,8 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 	activationParams.ActivationType                 = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
 	activationParams.ProcessLoopbackParams.TargetProcessId = static_cast< DWORD >(m_targetProcessId);
 	activationParams.ProcessLoopbackParams.ProcessLoopbackMode =
-		PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+		m_excludeTargetTree ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
+							: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
 
 	PROPVARIANT activationPropVariant;
 	PropVariantInit(&activationPropVariant);

@@ -1010,7 +1010,13 @@ void MainWindow::toggleScreenShare(bool share) {
 			audioSource = std::make_unique< WasapiProcessLoopbackSource >(windowOwnerProcessId,
 																		   m_screenVideoBroadcaster->describe());
 		} else {
-			audioSource = std::make_unique< WasapiLoopbackSource >();
+			// Whole-system audio, but with our own process tree excluded: a plain default-device loopback
+			// would also capture the other Mumble users' voices coming out of the same speakers and send
+			// them straight back into the share - an echo of everyone to everyone. Excluding this process
+			// captures what the user is actually playing (game, video, music) and nothing Mumble itself
+			// is outputting.
+			audioSource = std::make_unique< WasapiProcessLoopbackSource >(
+				static_cast< unsigned long >(GetCurrentProcessId()), QString(), /* excludeTargetTree */ true);
 		}
 
 		if (m_screenAudioBroadcaster->start(std::move(audioSource), audioStreamID)) {

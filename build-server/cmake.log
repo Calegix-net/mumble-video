@@ -1,0 +1,84 @@
+-- The C compiler identification is GNU 15.2.1
+-- The CXX compiler identification is GNU 15.2.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found Python: /usr/bin/python3.13 (found suitable version "3.13.13", minimum required is "3") found components: Interpreter
+-- Performing Test COMPILER_HAS_MBIG_OBJ
+-- Performing Test COMPILER_HAS_MBIG_OBJ - Failed
+-- Using (among others) the following compiler flags: -Werror;-Wall;-Wpedantic;-Wextra;-Wconversion;-Wsign-conversion;-fsigned-char;-O3
+-- ##################################################
+-- Mumble version:              1.7.0
+-- Architecture:                x64
+-- Build type:                  Release
+-- Using LTO in release builds: ON
+-- ##################################################
+-- Performing Test HAVE_STDATOMIC
+-- Performing Test HAVE_STDATOMIC - Success
+-- Qt6 component found: Core | Version: 6.10.2
+-- Qt6 component found: Network | Version: 6.10.2
+-- Qt6 component found: Xml | Version: 6.10.2
+-- OpenSSL component found: Crypto | Version: 3.2.6
+-- OpenSSL component found: SSL | Version: 3.2.6
+-- Protobuf found | Version: 3.19.6
+-- Found Threads: TRUE
+-- TRACY_ENABLE: OFF
+-- TRACY_ON_DEMAND: ON
+-- TRACY_CALLSTACK: OFF
+-- TRACY_NO_CALLSTACK: OFF
+-- TRACY_NO_CALLSTACK_INLINES: OFF
+-- TRACY_ONLY_LOCALHOST: OFF
+-- TRACY_NO_BROADCAST: OFF
+-- TRACY_ONLY_IPV4: OFF
+-- TRACY_NO_CODE_TRANSFER: OFF
+-- TRACY_NO_CONTEXT_SWITCH: OFF
+-- TRACY_NO_EXIT: OFF
+-- TRACY_NO_SAMPLING: OFF
+-- TRACY_NO_VERIFY: OFF
+-- TRACY_NO_VSYNC_CAPTURE: OFF
+-- TRACY_NO_FRAME_IMAGE: OFF
+-- TRACY_NO_SYSTEM_TRACING: OFF
+-- TRACY_DELAYED_INIT: OFF
+-- TRACY_MANUAL_LIFETIME: OFF
+-- TRACY_FIBERS: OFF
+-- TRACY_NO_CRASH_HANDLER: OFF
+-- TRACY_TIMER_FALLBACK: OFF
+-- Disabling warnings for targets: TracyClient
+-- Tracy: OFF
+-- Build spdlog: 1.15.1
+-- Build type: Release
+-- Looking for fwrite_unlocked
+-- Looking for fwrite_unlocked - found
+CMake Warning at 3rdparty/soci/CMakeLists.txt:76 (message):
+  Setting CMAKE_{LIBRARY, ARCHIVE, RUNTIME}_DIRECTORY variables which should
+  have done by the embedding cmake project
+
+
+-- Found Boost: v1.83.0 in /usr/include (with date_time component)
+-- Found MySQL: mariadb (found version "3.4.8")
+-- Found PostgreSQL: /usr/lib64/libpq.so (found version "16.4")
+-- Found SQLite3: /usr/include (found version "3.47.2")
+-- SOCI 4.2.0 will be built as STATIC library in Release configuration.
+-- Enabled SOCI backends are: MySQL;PostgreSQL;SQLite3
+-- Disabling warnings for targets: soci_mysql;soci_postgresql;soci_sqlite3;soci_core
+-- Using the multi-header code from /src/3rdparty/nlohmann_json/include/
+-- Implicit conversions are disabled
+-- Qt6 component found: Sql | Version: 6.10.2
+-- File: /build/src/murmur/murmur_autogen
+-- Boost found | Version: 1.83.0
+-- Configuring done (2.3s)
+-- Generating done (0.1s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    translations
+
+
+-- Build files have been written to: /build

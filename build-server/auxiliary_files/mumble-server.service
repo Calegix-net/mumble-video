@@ -1,0 +1,38 @@
+[Unit]
+Description=Mumble server
+Documentation=man:mumble-server(1)
+After=network.target
+Wants=network-online.target
+
+[Service]
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/mumble-server --ini /usr/local/etc/mumble/mumble-server.ini --foreground
+ExecReload=kill -s SIGUSR1 $MAINPID
+Group=_mumble-server
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=true
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=full
+RestrictAddressFamilies=~AF_PACKET
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+Restart=always
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+Type=simple
+User=_mumble-server
+
+[Install]
+WantedBy=multi-user.target
+

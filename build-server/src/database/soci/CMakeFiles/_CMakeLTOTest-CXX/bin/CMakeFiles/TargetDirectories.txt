@@ -1,0 +1,4 @@
+/build/src/database/soci/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir
+/build/src/database/soci/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir
+/build/src/database/soci/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/edit_cache.dir
+/build/src/database/soci/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/rebuild_cache.dir

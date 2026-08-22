@@ -48,9 +48,13 @@ public:
 	 *   captured.
 	 * @param processDescription Human-readable label for describe(), typically the shared window's title
 	 *   or its owning process's executable name.
+	 * @param excludeTargetTree When true, captures every process's audio EXCEPT the target tree, instead
+	 *   of only the target tree. Passing this process's own id excludes it, which is how whole-system
+	 *   sharing captures what the user hears without also capturing - and echoing back - the other
+	 *   Mumble users' voices playing on the same device.
 	 */
 	WasapiProcessLoopbackSource(unsigned long targetProcessId, const QString &processDescription,
-								QObject *parent = nullptr);
+								bool excludeTargetTree = false, QObject *parent = nullptr);
 	~WasapiProcessLoopbackSource() override;
 
 	bool start() override;
@@ -79,6 +83,8 @@ protected:
 	void runCaptureLoop();
 
 	unsigned long m_targetProcessId;
+
+	bool m_excludeTargetTree = false;
 	QString m_processDescription;
 
 	Worker *m_worker = nullptr;
