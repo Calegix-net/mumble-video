@@ -10,6 +10,7 @@
 #include <QtCore/QtGlobal>
 #include <QtNetwork/QAbstractSocket>
 #include <QtWidgets/QMainWindow>
+#include <QtWidgets/QSizeGrip>
 
 #include "AudioOutputToken.h"
 #include "CustomElements.h"
@@ -283,6 +284,12 @@ protected:
 	/// once per interval rather than on every failing unit. Keyed like m_screenShareAudioBuffers.
 	std::unordered_map< std::uint64_t, qint64 > m_lastKeyframeRequestMsec;
 	qint64 m_lastAnyKeyframeRequestMsec                    = 0;
+	/// A resize handle in the bottom-right corner. Wayland compositors draw no server-side frame for
+	/// Qt windows (GNOME never does), leaving only Qt's own thin client-side border to grab, which in
+	/// practice means the window cannot be resized by dragging at all. QSizeGrip asks the compositor
+	/// for an interactive resize, which works everywhere.
+	QSizeGrip *m_sizeGrip = nullptr;
+
 	static constexpr qint64 KEYFRAME_REQUEST_INTERVAL_MSEC = 1000;
 
 public slots:
@@ -316,6 +323,8 @@ public slots:
 	void findDesiredChannel();
 	void setupView(bool toggle_minimize = true);
 	void closeEvent(QCloseEvent *e) Q_DECL_OVERRIDE;
+	void resizeEvent(QResizeEvent *e) Q_DECL_OVERRIDE;
+
 	void hideEvent(QHideEvent *e) Q_DECL_OVERRIDE;
 	void showEvent(QShowEvent *e) Q_DECL_OVERRIDE;
 	void changeEvent(QEvent *e) Q_DECL_OVERRIDE;

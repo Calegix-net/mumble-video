@@ -1101,6 +1101,11 @@ void MainWindow::setupGui() {
 	setAcceptDrops(true);
 
 	setupVideoGrid();
+
+	m_sizeGrip = new QSizeGrip(this);
+	m_sizeGrip->setFixedSize(18, 18);
+	m_sizeGrip->setToolTip(tr("Drag to resize the window"));
+	m_sizeGrip->raise();
 	setupVideoBroadcast();
 	setupScreenShare();
 
@@ -1300,6 +1305,15 @@ bool MainWindow::nativeEvent(const QByteArray &, void *message, qintptr *) {
 	return false;
 }
 #endif
+
+void MainWindow::resizeEvent(QResizeEvent *e) {
+	QMainWindow::resizeEvent(e);
+
+	if (m_sizeGrip) {
+		m_sizeGrip->move(width() - m_sizeGrip->width(), height() - m_sizeGrip->height());
+		m_sizeGrip->raise();
+	}
+}
 
 void MainWindow::closeEvent(QCloseEvent *e) {
 	ServerHandlerPtr sh               = Global::get().sh;

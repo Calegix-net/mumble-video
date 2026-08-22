@@ -193,6 +193,11 @@ protected:
 
 	void paintEvent(QPaintEvent *event) override;
 
+public:
+	QSize sizeHint() const override;
+
+protected:
+
 	/// Grows a surface so the given rectangle fits, within the bounds above. Returns false if the
 	/// rectangle cannot be accommodated.
 	static bool growToFit(QImage &canvas, int x, int y, int width, int height);

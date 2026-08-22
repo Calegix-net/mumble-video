@@ -15,6 +15,15 @@
 
 VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setAutoFillBackground(true);
+
+	// Small floor, greedy ceiling: the panel must never be what stops the main window from being made
+	// smaller, and given room it should take it. Tiles scale to whatever they get (see paintEvent).
+	setMinimumSize(160, 90);
+	setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+}
+
+QSize VideoGrid::sizeHint() const {
+	return QSize(640, 360);
 }
 
 int VideoGrid::senderCount() const {
