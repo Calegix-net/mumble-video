@@ -1385,6 +1385,8 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	// next scheduled keyframe, up to several seconds away". The server rate-limits these per sender, so
 	// obeying unconditionally cannot be amplified into re-encoding every frame.
 	if (msg.request_keyframe() && msg.has_session() && msg.session() == Global::get().uiSession) {
+		qWarning("Video: a viewer asked for a keyframe on stream %u", msg.stream_id());
+
 		if (m_videoBroadcaster && m_videoBroadcaster->isActive() && m_videoBroadcaster->streamID() == msg.stream_id()) {
 			m_videoBroadcaster->requestKeyframe();
 		}

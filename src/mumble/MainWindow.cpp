@@ -535,7 +535,17 @@ void MainWindow::setupVideoGrid() {
 			return;
 		}
 
+		// And across all streams together, so that watching several stuck streams at once cannot add
+		// up to more control traffic than a server's default rate limit refills (one message a second).
+		// Servers running this build exempt keyframe requests from that limit; older servers do not.
+		if (now - m_lastAnyKeyframeRequestMsec < KEYFRAME_REQUEST_INTERVAL_MSEC) {
+			return;
+		}
+
 		m_lastKeyframeRequestMsec[key] = now;
+		m_lastAnyKeyframeRequestMsec   = now;
+
+		qWarning("Video: requesting a keyframe for stream %u/%u", senderSession, streamID);
 
 		MumbleProto::VideoSubscribe mpvs;
 		mpvs.set_session(senderSession);

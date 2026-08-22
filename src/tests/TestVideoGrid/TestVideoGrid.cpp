@@ -81,6 +81,7 @@ private slots:
 	void aPartialFrameShowsWhatArrived();
 	void surfaceGrowthKeepsWhatWasAlreadyDrawn();
 	void twoStreamsFromTheSameSenderCoexist();
+	void aRestartedStreamOfTheSameKindReplacesTheOld();
 	void reannouncingAStreamDiscardsItsOldPicture();
 	void sendersAppearAndDisappear();
 	void theSenderCountIsCapped();
@@ -204,7 +205,7 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 	QVERIFY(big.save(&buffer, "JPEG", 90));
 	buffer.close();
 
-	announce(grid, SENDER, 1);
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
 	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, encoded);
 	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
 
@@ -217,8 +218,9 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 	QVERIFY(small.save(&smallBuffer, "JPEG", 90));
 	smallBuffer.close();
 
-	// A second stream id from the same sender - camera plus screen, in practice.
-	announce(grid, SENDER, 2);
+	// A second stream id from the same sender - camera plus screen, in practice. Of a different kind:
+	// a second stream of the SAME kind is a restart and replaces the first (see the next test).
+	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
 	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, smallEncoded);
 	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(32, 32));
 
@@ -662,3 +664,33 @@ void TestVideoGrid::itPaintsWithoutCrashing() {
 
 QTEST_MAIN(TestVideoGrid)
 #include "TestVideoGrid.moc"
+
+// A sender that stops and restarts a camera announces a fresh stream id. If the end of the old stream was
+// lost on the way - a dropped control message - the viewer would otherwise keep the old surface as a
+// stuck last frame beside the new picture. The newer announcement of the same kind wins.
+void TestVideoGrid::aRestartedStreamOfTheSameKindReplacesTheOld() {
+	VideoGrid grid;
+
+	QImage frame(64, 64, QImage::Format_RGB32);
+	frame.fill(Qt::red);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(frame.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(64, 64));
+
+	// No removeSender(SENDER, 1) in between: the end-of-stream never arrived.
+	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+
+	QVERIFY2(grid.surfaceFor(SENDER, 1).isNull(), "the stale camera surface survived a camera restart");
+	QCOMPARE(grid.senderCount(), 0);
+
+	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(64, 64));
+	QCOMPARE(grid.senderCount(), 1);
+}

@@ -154,11 +154,22 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	if (m_surfaces.find(key) == m_surfaces.end()) {
 		bool senderAlreadyPresent = false;
 
-		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend();) {
+			if (it->second.senderSession == senderSession && it->second.sourceKind == sourceKind) {
+				// One camera (or screen) per person. A sender restarts a share under a fresh stream id,
+				// and if the end of the old one never reached us - the control message was dropped, or
+				// the sender's client died - the old surface would sit there as a stuck last frame next
+				// to the live one, forever. The newer announcement wins.
+				it = m_surfaces.erase(it);
+				senderAlreadyPresent = true;
+				continue;
+			}
+
 			if (it->second.senderSession == senderSession) {
 				senderAlreadyPresent = true;
-				break;
 			}
+
+			++it;
 		}
 
 		// Bounded on distinct senders, not on surfaces held: the cap exists so the grid does not draw
@@ -232,6 +243,10 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 			// repeats the request if the stream keeps flowing without a keyframe.
 			surface.awaitingKeyframe   = true;
 			surface.unitsWhileAwaiting = 0;
+
+			qWarning("VideoGrid: stream %u/%u lost frame continuity (%llu -> %llu), frozen until a keyframe arrives",
+					 senderSession, streamID, static_cast< unsigned long long >(surface.lastFrameNumber),
+					 static_cast< unsigned long long >(frameNumber));
 
 			emit keyframeNeeded(senderSession, streamID);
 

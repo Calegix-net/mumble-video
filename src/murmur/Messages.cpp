@@ -2634,7 +2634,15 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 	ZoneScoped;
 
 	MSG_SETUP(ServerUser::Authenticated);
-	RATELIMIT(uSource);
+
+	// Deliberately NOT put through RATELIMIT. The leaky bucket drops messages silently, and a viewer
+	// whose decoder is stuck sends a keyframe request per frozen stream per second - more than the
+	// bucket refills. Every request then drained the bucket and was itself dropped, so the keyframe
+	// never came, the stream stayed frozen, and the next request was dropped too: a freeze that fed
+	// itself. Worse, the same empty bucket swallowed that client's own VideoState messages, which is
+	// how toggling a camera left a stuck last frame on everyone else's screen. The expensive part of
+	// this message - relaying a keyframe request to the sender - has its own 1/s limit below, and the
+	// rest is a map lookup, so it needs no bucket.
 
 	const unsigned int sender = msg.session();
 
