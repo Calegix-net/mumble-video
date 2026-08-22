@@ -303,16 +303,16 @@ void WasapiLoopbackSource::runCaptureLoop() {
 	m_clock.restart();
 
 	while (!m_stopRequested) {
-		// Bounded rather than infinite specifically so the stop flag gets checked periodically even if
-		// the device never signals - a disconnected or hung device must not make stop() block forever.
-		const DWORD waitResult = WaitForSingleObject(hEvent, 200);
+		// Polled, not event-driven. An event-callback *loopback* stream is documented by Microsoft
+		// never to signal its event (only a render stream on the same device would pump it), so a loop
+		// that waits for WAIT_OBJECT_0 before reading captures nothing, forever, with no error anywhere -
+		// which is exactly how screen-share audio shipped: healthy-looking and silent. The event is kept
+		// because the per-process variant does fire it; either way the packet queue is drained every
+		// pass. 10ms keeps latency well under one Opus frame and makes stop() a bounded wait.
+		WaitForSingleObject(hEvent, 10);
 
 		if (m_stopRequested) {
 			break;
-		}
-
-		if (waitResult != WAIT_OBJECT_0) {
-			continue;
 		}
 
 		UINT32 packetLength   = 0;

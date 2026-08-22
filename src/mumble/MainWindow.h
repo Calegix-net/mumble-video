@@ -279,6 +279,11 @@ protected:
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
 	}
 
+	/// When a keyframe was last requested from each (sender, stream), so a stuck decoder asks at most
+	/// once per interval rather than on every failing unit. Keyed like m_screenShareAudioBuffers.
+	std::unordered_map< std::uint64_t, qint64 > m_lastKeyframeRequestMsec;
+	static constexpr qint64 KEYFRAME_REQUEST_INTERVAL_MSEC = 1000;
+
 public slots:
 	/// Opens the guided video setup.
 	void openVideoWizardDialog();

@@ -516,10 +516,26 @@ void MainWindow::setupVideoGrid() {
 	// reference frames are gone - but it deliberately knows nothing about the server. The request goes
 	// out from here, as a re-subscribe carrying request_keyframe: re-subscribing is idempotent, and the
 	// server rate-limits what it relays, so a stuck decoder cannot flood the sender.
-	connect(m_videoGrid, &VideoGrid::keyframeNeeded, this, [](unsigned int senderSession, unsigned int streamID) {
+	connect(m_videoGrid, &VideoGrid::keyframeNeeded, this, [this](unsigned int senderSession, unsigned int streamID) {
 		if (!Global::get().sh) {
 			return;
 		}
+
+		// Throttled per stream to the same interval the server relays at. Every request is a control
+		// message that counts against this client's server-side rate limit, and the server drops what
+		// exceeds it *silently* - so an undecodable stream (a sender whose audio and picture collided on
+		// one stream id produced ~50 failing units a second) would otherwise drain the bucket and take
+		// this client's own announcements, subscriptions and end-of-stream messages with it. That is
+		// what "nothing recovers until everyone reconnects" looked like.
+		const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+		const qint64 now        = QDateTime::currentMSecsSinceEpoch();
+		const auto last         = m_lastKeyframeRequestMsec.find(key);
+
+		if (last != m_lastKeyframeRequestMsec.end() && now - last->second < KEYFRAME_REQUEST_INTERVAL_MSEC) {
+			return;
+		}
+
+		m_lastKeyframeRequestMsec[key] = now;
 
 		MumbleProto::VideoSubscribe mpvs;
 		mpvs.set_session(senderSession);
@@ -685,7 +701,9 @@ void MainWindow::setupScreenShare() {
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfFrame);
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
-		if (!active) {
+		// The preview slot is shared with the camera; if that is still running its next frame repaints
+		// the slot anyway, and clearing it here just blinks the user's own picture off for a frame.
+		if (!active && !(m_videoBroadcaster && m_videoBroadcaster->isActive())) {
 			m_videoGrid->clearSelfFrame();
 		}
 	});

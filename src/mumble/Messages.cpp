@@ -1346,6 +1346,13 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 	// An OpusAudio stream never gets a surface here - it has no picture, and letting VideoGrid track it
 	// as an undecodable codec would only earn it endless, pointless keyframe requests. The dispatcher
 	// tracks every codec, OpusAudio included - it is the one that actually acts on it.
+	if (m_videoGrid && msg.codec() == MumbleProto::VideoState_Codec_OpusAudio) {
+		// A sender from before the stream-id fix could announce its audio on the id its picture already
+		// holds. Keeping the picture surface would feed Opus packets to a tile decoder - every one fails,
+		// every failure asks for a keyframe. The later announcement wins, as it does on the server.
+		m_videoGrid->removeSender(msg.session(), msg.stream_id());
+	}
+
 	if (m_videoGrid && msg.codec() != MumbleProto::VideoState_Codec_OpusAudio) {
 		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.source_kind()),
 									static_cast< int >(msg.codec()));
@@ -1380,6 +1387,14 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	if (msg.request_keyframe() && msg.has_session() && msg.session() == Global::get().uiSession) {
 		if (m_videoBroadcaster && m_videoBroadcaster->isActive() && m_videoBroadcaster->streamID() == msg.stream_id()) {
 			m_videoBroadcaster->requestKeyframe();
+		}
+
+		// The screen share too: for TiledImage a "keyframe" is a full repaint, and without it a viewer who
+		// subscribes after the share began only ever receives the tiles that change - a mostly-static
+		// screen stays mostly blank for them.
+		if (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive()
+			&& m_screenVideoBroadcaster->streamID() == msg.stream_id()) {
+			m_screenVideoBroadcaster->requestKeyframe();
 		}
 
 		return;
