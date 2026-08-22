@@ -92,6 +92,14 @@ protected:
 	 */
 	bool connectRequest(const QDBusObjectPath &path, const char *slot);
 
+	/// Calls a ScreenCast method that answers through a Request object, with the Response signal
+	/// subscribed at the predicted request path before the call is made. `options` gets its own
+	/// handle_token. Returns false if the call itself failed.
+	bool callWithRequest(const QString &method, QList< QVariant > arguments, QVariantMap options, const char *slot);
+
+	static QString newToken();
+	static QString senderPathElement();
+
 	/// Token unique to this session, so concurrent requests from the same client do not collide.
 	QString m_token;
 

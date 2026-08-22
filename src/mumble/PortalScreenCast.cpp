@@ -38,7 +38,7 @@ constexpr std::uint32_t PORTAL_RESPONSE_CANCELLED = 1;
 PortalScreenCast::PortalScreenCast(QObject *parent) : QObject(parent) {
 	// Tokens must be unique per client and valid as a D-Bus path element, so no dashes or digits at
 	// the start.
-	m_token = QStringLiteral("mumble%1").arg(QRandomGenerator::global()->generate(), 0, 16);
+	m_token = newToken();
 }
 
 PortalScreenCast::~PortalScreenCast() {
@@ -64,10 +64,74 @@ void PortalScreenCast::fail(const QString &reason) {
 	emit failed(reason);
 }
 
+QString PortalScreenCast::newToken() {
+	// Unique per request, as the portal documentation asks: a Request object lives at a path derived
+	// from the token, and reusing one across CreateSession/SelectSources/Start would have every
+	// request's Response arrive at the same object path.
+	return QStringLiteral("mumble%1").arg(QRandomGenerator::global()->generate(), 0, 16);
+}
+
+QString PortalScreenCast::senderPathElement() {
+	// The portal builds Request/Session paths from the caller's unique bus name with the leading ':'
+	// dropped and every '.' turned into '_' - the documented transformation.
+	QString sender = QDBusConnection::sessionBus().baseService();
+
+	if (sender.startsWith(QLatin1Char(':'))) {
+		sender.remove(0, 1);
+	}
+
+	return sender.replace(QLatin1Char('.'), QLatin1Char('_'));
+}
+
 bool PortalScreenCast::connectRequest(const QDBusObjectPath &path, const char *slot) {
 	return QDBusConnection::sessionBus().connect(QLatin1String(PORTAL_SERVICE), path.path(),
 												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
 												 slot);
+}
+
+bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > arguments, QVariantMap options,
+									   const char *slot) {
+	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
+						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
+
+	if (!iface.isValid()) {
+		return false;
+	}
+
+	const QString token = newToken();
+	options.insert(QStringLiteral("handle_token"), token);
+	arguments.append(options);
+
+	// Subscribed BEFORE the call, at the path the portal is documented to use. The Response signal can
+	// be emitted as soon as the portal has the request - for CreateSession, before the method reply is
+	// even on its way back - and a subscription made after the reply arrives has already missed it.
+	// Missing it looks like the portal never answering, or (with the old single shared token) like a
+	// stale response from the previous request landing on the next.
+	const QDBusObjectPath expected(QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2")
+									   .arg(senderPathElement(), token));
+
+	connectRequest(expected, slot);
+
+	const QDBusReply< QDBusObjectPath > reply = iface.callWithArgumentList(QDBus::Block, method, arguments);
+
+	if (!reply.isValid()) {
+		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), expected.path(),
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
+												 slot);
+
+		return false;
+	}
+
+	// An older portal may hand back a path other than the predicted one; the reply is authoritative.
+	if (reply.value().path() != expected.path()) {
+		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), expected.path(),
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
+												 slot);
+
+		return connectRequest(reply.value(), slot);
+	}
+
+	return true;
 }
 
 bool PortalScreenCast::requestAccess(SourceType sourceType, bool allowCursor) {
@@ -78,24 +142,11 @@ bool PortalScreenCast::requestAccess(SourceType sourceType, bool allowCursor) {
 		return false;
 	}
 
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
-
-	if (!iface.isValid()) {
-		return false;
-	}
-
 	QVariantMap options;
-	options.insert(QStringLiteral("handle_token"), m_token);
 	options.insert(QStringLiteral("session_handle_token"), m_token);
 
-	const QDBusReply< QDBusObjectPath > reply = iface.call(QStringLiteral("CreateSession"), options);
-
-	if (!reply.isValid()) {
-		return false;
-	}
-
-	return connectRequest(reply.value(), SLOT(onCreateSessionResponse(uint, QVariantMap)));
+	return callWithRequest(QStringLiteral("CreateSession"), {}, options,
+						   SLOT(onCreateSessionResponse(uint, QVariantMap)));
 }
 
 void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVariantMap &results) {
@@ -105,17 +156,28 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 		return;
 	}
 
-	m_sessionHandle = QDBusObjectPath(results.value(QStringLiteral("session_handle")).toString());
-	m_sessionOpen   = true;
+	// The portal documentation types session_handle as an object path, and that is what current
+	// xdg-desktop-portal sends; older releases sent a plain string. QVariant::toString() on a
+	// QDBusObjectPath is empty, which is why this used to fail on every up-to-date desktop with "did
+	// not return a session" in the very same second the share was started.
+	const QVariant handle = results.value(QStringLiteral("session_handle"));
+	QString path;
 
-	if (m_sessionHandle.path().isEmpty()) {
-		fail(tr("The desktop portal did not return a screen sharing session."));
-
-		return;
+	if (handle.canConvert< QDBusObjectPath >()) {
+		path = handle.value< QDBusObjectPath >().path();
 	}
 
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
+	if (path.isEmpty()) {
+		path = handle.toString();
+	}
+
+	if (path.isEmpty()) {
+		// Documented to be derivable from the token, so a portal that omits it is still usable.
+		path = QStringLiteral("/org/freedesktop/portal/desktop/session/%1/%2").arg(senderPathElement(), m_token);
+	}
+
+	m_sessionHandle = QDBusObjectPath(path);
+	m_sessionOpen   = true;
 
 	std::uint32_t types = PORTAL_SOURCE_MONITOR | PORTAL_SOURCE_WINDOW;
 
@@ -131,7 +193,6 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 	}
 
 	QVariantMap options;
-	options.insert(QStringLiteral("handle_token"), m_token);
 	options.insert(QStringLiteral("types"), types);
 	// One source at a time: the encoder produces a single stream, and a second PipeWire node would have
 	// nowhere to go.
@@ -140,10 +201,8 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 	// needs no separate metadata handling, which suits a source that just hands out QImages.
 	options.insert(QStringLiteral("cursor_mode"), m_allowCursor ? 2u : 1u);
 
-	const QDBusReply< QDBusObjectPath > reply =
-		iface.call(QStringLiteral("SelectSources"), QVariant::fromValue(m_sessionHandle), options);
-
-	if (!reply.isValid() || !connectRequest(reply.value(), SLOT(onSelectSourcesResponse(uint, QVariantMap)))) {
+	if (!callWithRequest(QStringLiteral("SelectSources"), { QVariant::fromValue(m_sessionHandle) }, options,
+						 SLOT(onSelectSourcesResponse(uint, QVariantMap)))) {
 		fail(tr("Could not ask the desktop portal what to share."));
 	}
 }
@@ -158,18 +217,10 @@ void PortalScreenCast::onSelectSourcesResponse(std::uint32_t response, const QVa
 		return;
 	}
 
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
-
-	QVariantMap options;
-	options.insert(QStringLiteral("handle_token"), m_token);
-
 	// Empty parent window: the portal dialog is not parented to ours. Passing a real handle needs the
 	// xdg-foreign protocol on Wayland, which is more machinery than an unparented prompt is worth.
-	const QDBusReply< QDBusObjectPath > reply =
-		iface.call(QStringLiteral("Start"), QVariant::fromValue(m_sessionHandle), QString(), options);
-
-	if (!reply.isValid() || !connectRequest(reply.value(), SLOT(onStartResponse(uint, QVariantMap)))) {
+	if (!callWithRequest(QStringLiteral("Start"), { QVariant::fromValue(m_sessionHandle), QString() }, QVariantMap(),
+						 SLOT(onStartResponse(uint, QVariantMap)))) {
 		fail(tr("Could not start the screen sharing session."));
 	}
 }
