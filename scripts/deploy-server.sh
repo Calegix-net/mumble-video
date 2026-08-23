@@ -21,7 +21,15 @@ if [ ! -f "${DATA_DIR}/mumble-server.ini" ]; then
 fi
 
 echo "deploy-server: pulling ${IMAGE}"
-podman pull "${IMAGE}"
+if ! podman pull "${IMAGE}"; then
+    # A locally-built image (e.g. localhost/...) has no registry to pull from; use it if present.
+    if podman image exists "${IMAGE}"; then
+        echo "deploy-server: pull failed but ${IMAGE} exists locally; using the local image."
+    else
+        echo "deploy-server: could not pull ${IMAGE} and it is not present locally." >&2
+        exit 1
+    fi
+fi
 
 echo "deploy-server: replacing container ${NAME}"
 podman rm -f "${NAME}" 2>/dev/null || true
