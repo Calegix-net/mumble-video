@@ -2633,16 +2633,15 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe &msg) {
 	ZoneScoped;
 
+	// Rate-limited like every other control message. It is NOT free: subscribe runs two ACL walks
+	// (Enter + ReceiveVideo) per call, and an authenticated client without ReceiveVideo can never
+	// satisfy them, so it is never inserted and the idempotent early-out never fires - every repeat
+	// re-runs both walks and earns a reflected reply. Leaving it unmetered was an unbounded-work DoS.
+	// The freeze that first motivated removing the limit is handled at the source instead: the client
+	// asks for a keyframe at most once per second per stream, and both encoders emit a keyframe on
+	// their own schedule regardless, so a conforming client stays well under the bucket.
 	MSG_SETUP(ServerUser::Authenticated);
-
-	// Deliberately NOT put through RATELIMIT. The leaky bucket drops messages silently, and a viewer
-	// whose decoder is stuck sends a keyframe request per frozen stream per second - more than the
-	// bucket refills. Every request then drained the bucket and was itself dropped, so the keyframe
-	// never came, the stream stayed frozen, and the next request was dropped too: a freeze that fed
-	// itself. Worse, the same empty bucket swallowed that client's own VideoState messages, which is
-	// how toggling a camera left a stuck last frame on everyone else's screen. The expensive part of
-	// this message - relaying a keyframe request to the sender - has its own 1/s limit below, and the
-	// rest is a map lookup, so it needs no bucket.
+	RATELIMIT(uSource);
 
 	const unsigned int sender = msg.session();
 

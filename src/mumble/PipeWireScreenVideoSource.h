@@ -27,6 +27,7 @@ struct pw_thread_loop;
 struct pw_context;
 struct pw_core;
 struct pw_stream;
+struct spa_hook;
 
 /**
  * Captures the screen on Linux: permission from the XDG desktop portal, frames from PipeWire.
@@ -99,6 +100,10 @@ protected:
 	pw_context *m_context  = nullptr;
 	pw_core *m_core        = nullptr;
 	pw_stream *m_stream    = nullptr;
+	/// Listener storage for m_stream. pw_stream_add_listener does not own or free this, so it is kept
+	/// for the stream's lifetime and deleted in teardown() - previously it was allocated and leaked on
+	/// every start(). A pointer (not a by-value member) so the header needs no spa headers.
+	spa_hook *m_streamListener = nullptr;
 
 	/// Negotiated format. Written on the PipeWire thread during param negotiation, read there too.
 	QSize m_size;

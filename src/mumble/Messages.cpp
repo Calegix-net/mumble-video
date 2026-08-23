@@ -1348,6 +1348,7 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		}
 
 		removeScreenShareAudioBuffer(msg.session(), msg.stream_id());
+		m_lastKeyframeRequestMsec.erase(screenShareAudioKey(msg.session(), msg.stream_id()));
 
 		return;
 	}

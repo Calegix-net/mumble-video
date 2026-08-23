@@ -228,9 +228,10 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	// TiledImage is exempt: its units are independently decodable by design, so late or missing tiles
 	// cost nothing beyond the pixels they carried.
 	if (surface.codec == MumbleProto::VideoState_Codec_VP8 && surface.hasDecodedFrame) {
-		if (!isKeyframe && frameNumber <= surface.lastFrameNumber) {
-			// A stale unit that reassembled after its successors. Decoding it now would rewind the
-			// decoder's reference state and corrupt everything that follows.
+		if (frameNumber <= surface.lastFrameNumber) {
+			// A stale unit that reassembled after its successors - a keyframe included. Decoding it
+			// rewinds the decoder's reference state (and, for a keyframe, would rewind lastFrameNumber
+			// itself, making the next live frame look like a gap and triggering a needless freeze).
 			return;
 		}
 

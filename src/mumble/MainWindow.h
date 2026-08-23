@@ -291,7 +291,6 @@ protected:
 	/// When a keyframe was last requested from each (sender, stream), so a stuck decoder asks at most
 	/// once per interval rather than on every failing unit. Keyed like m_screenShareAudioBuffers.
 	std::unordered_map< std::uint64_t, qint64 > m_lastKeyframeRequestMsec;
-	qint64 m_lastAnyKeyframeRequestMsec                    = 0;
 	/// A resize handle in the bottom-right corner. Wayland compositors draw no server-side frame for
 	/// Qt windows (GNOME never does), leaving only Qt's own thin client-side border to grab, which in
 	/// practice means the window cannot be resized by dragging at all. QSizeGrip asks the compositor

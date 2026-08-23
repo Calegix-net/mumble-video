@@ -66,6 +66,16 @@ public:
 	/// File descriptor for the PipeWire remote, valid only after ready(). Owned by this object.
 	int pipeWireFd() const { return m_pipeWireFd; }
 
+	/// Hands the PipeWire descriptor to the caller and forgets it here, so close() will not close a
+	/// descriptor that pw_context_connect_fd has taken ownership of. pw_context_connect_fd closes the
+	/// fd itself - on disconnect and on failure alike - so once it has been called this object must
+	/// never touch the fd again, or it double-closes a number the kernel may have already reissued.
+	int takePipeWireFd() {
+		const int fd = m_pipeWireFd;
+		m_pipeWireFd = -1;
+		return fd;
+	}
+
 	/// What the portal reported the user chose, for the UI. Empty until ready().
 	QString describe() const { return m_description; }
 

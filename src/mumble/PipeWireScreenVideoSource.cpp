@@ -142,9 +142,10 @@ bool PipeWireScreenVideoSource::start() {
 
 		m_context = pw_context_new(pw_thread_loop_get_loop(m_loop), nullptr, 0);
 
-		// The descriptor is handed to PipeWire, which takes ownership of it - the portal object must
-		// not close it afterwards, so it is released from there by connecting to this fd directly.
-		m_core = m_context ? pw_context_connect_fd(m_context, m_portal->pipeWireFd(), nullptr, 0) : nullptr;
+		// The descriptor is handed to PipeWire, which takes ownership of it (and closes it on both
+		// disconnect and failure) - so the portal object must relinquish it first, or its own close()
+		// would close the same fd a second time.
+		m_core = m_context ? pw_context_connect_fd(m_context, m_portal->takePipeWireFd(), nullptr, 0) : nullptr;
 
 		if (!m_core) {
 			pw_thread_loop_unlock(m_loop);
@@ -175,7 +176,13 @@ bool PipeWireScreenVideoSource::start() {
 			return;
 		}
 
-		pw_stream_add_listener(m_stream, new spa_hook{}, &streamEvents, this);
+	if (!m_streamListener) {
+		m_streamListener = new spa_hook{};
+	} else {
+		spa_hook_remove(m_streamListener);
+	}
+
+	pw_stream_add_listener(m_stream, m_streamListener, &streamEvents, this);
 
 		std::uint8_t paramBuffer[1024];
 		spa_pod_builder builder = SPA_POD_BUILDER_INIT(paramBuffer, sizeof(paramBuffer));
@@ -266,6 +273,12 @@ void PipeWireScreenVideoSource::teardown() {
 	if (m_stream) {
 		pw_stream_destroy(m_stream);
 		m_stream = nullptr;
+	}
+
+	if (m_streamListener) {
+		spa_hook_remove(m_streamListener);
+		delete m_streamListener;
+		m_streamListener = nullptr;
 	}
 
 	if (m_core) {

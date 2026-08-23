@@ -42,10 +42,17 @@ bool ScreenAudioBroadcaster::start(std::unique_ptr< AudioLoopbackSource > source
 	m_streamID = streamID;
 
 	connect(m_source.get(), &AudioLoopbackSource::samplesReady, this, &ScreenAudioBroadcaster::onSamplesReady);
-	connect(m_source.get(), &AudioLoopbackSource::failed, this, [this](const QString &reason) {
-		stop();
-		emit failed(reason);
-	});
+	// Queued for the same reason the video path is (see VideoBroadcaster): a backend may emit failed()
+	// from inside its own call stack, and stop() here destroys the source - tearing it down mid-emit is
+	// a use-after-free. The WASAPI sources already marshal failed() to this thread, but the queue keeps
+	// this correct for any source that emits synchronously.
+	connect(
+		m_source.get(), &AudioLoopbackSource::failed, this,
+		[this](const QString &reason) {
+			stop();
+			emit failed(reason);
+		},
+		Qt::QueuedConnection);
 
 	int opusError = 0;
 	m_opusState = opus_encoder_create(static_cast< opus_int32 >(TARGET_SAMPLE_RATE),

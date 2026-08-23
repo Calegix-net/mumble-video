@@ -535,15 +535,11 @@ void MainWindow::setupVideoGrid() {
 			return;
 		}
 
-		// And across all streams together, so that watching several stuck streams at once cannot add
-		// up to more control traffic than a server's default rate limit refills (one message a second).
-		// Servers running this build exempt keyframe requests from that limit; older servers do not.
-		if (now - m_lastAnyKeyframeRequestMsec < KEYFRAME_REQUEST_INTERVAL_MSEC) {
-			return;
-		}
-
+		// Throttled per stream only. An earlier global "one request per second across all streams" cap
+		// meant that with two streams stuck at once, a consistently-earlier one could keep starving the
+		// other's re-requests; per-stream, each stuck stream re-asks on its own cadence. The server rate-
+		// limits the subscribe path, so this cannot be turned into a flood.
 		m_lastKeyframeRequestMsec[key] = now;
-		m_lastAnyKeyframeRequestMsec   = now;
 
 		qWarning("Video: requesting a keyframe for stream %u/%u", senderSession, streamID);
 
@@ -1111,6 +1107,10 @@ void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsign
 
 void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSession) {
 	const std::uint64_t hi = static_cast< std::uint64_t >(senderSession) << 32;
+
+	for (auto it = m_lastKeyframeRequestMsec.begin(); it != m_lastKeyframeRequestMsec.end();) {
+		it = ((it->first >> 32) == senderSession) ? m_lastKeyframeRequestMsec.erase(it) : std::next(it);
+	}
 
 	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
 		if ((it->first >> 32) == (hi >> 32)) {
