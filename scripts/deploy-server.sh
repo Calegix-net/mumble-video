@@ -34,4 +34,14 @@ podman run -d \
 
 sleep 2
 podman ps --filter "name=${NAME}" --format '{{.Names}} {{.Status}} {{.Image}}'
+
+# The old container is already gone by here, so a container that starts and immediately crashes (bad
+# ini, a runtime library the image is missing) is a hard outage that --restart would only busy-loop.
+# Fail loudly with the logs rather than exiting 0 on a dead server.
+if [ "$(podman inspect -f '{{.State.Running}}' "${NAME}" 2>/dev/null)" != "true" ]; then
+    echo "deploy-server: ${NAME} is not running after start - recent logs:" >&2
+    podman logs --tail 40 "${NAME}" >&2 2>/dev/null || true
+    exit 1
+fi
+
 echo "deploy-server: done"

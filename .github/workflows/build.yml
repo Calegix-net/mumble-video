@@ -91,7 +91,7 @@ jobs:
       # push and no business publishing an image. Tagged dev-latest for main and the version for a tag,
       # plus the commit sha so any image can be traced back to what produced it.
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -99,7 +99,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Server image tags
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         id: server_tags
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}-server"
@@ -113,13 +113,15 @@ jobs:
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push the server image
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: out/server
           file: docker/Dockerfile.server
           push: true
           tags: ${{ steps.server_tags.outputs.tags }}
+          cache-from: type=gha,scope=server-image
+          cache-to: type=gha,scope=server-image,mode=max
 
   windows:
     runs-on: ubuntu-latest
@@ -228,7 +230,7 @@ jobs:
   # dev-latest prerelease forward, so the Releases page always carries current artifacts without
   # anyone having to tag - CI artifacts expire and are buried behind a login; releases are neither.
   release:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     needs: [linux, windows, flatpak]
     runs-on: ubuntu-latest
     permissions:
@@ -277,15 +279,25 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-        # Deleted and recreated rather than updated in place, so the dev-latest tag actually moves to
-        # the commit that produced these artifacts instead of pointing forever at the first one.
+        # The release is never deleted - only its tag is moved and its assets replaced. The old
+        # delete+recreate left a window with no dev-latest release at all, and if a second push
+        # cancelled this run inside that window (the workflow cancels superseded runs) the release and
+        # its tag stayed gone until the next green build - a 404 for anyone downloading meanwhile.
         run: |
-          gh release delete dev-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
-          gh release create dev-latest \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --prerelease \
-            --title "Development build" \
-            --notes "Rolling build of main at $GITHUB_SHA. Prefer a versioned release unless you want the newest changes." \
-            mumble-video-linux-x86_64.zip mumble-video-server-linux-x86_64.tar.gz mumble-video.flatpak \
-            mumble-video-setup.exe mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS
+          notes="Rolling build of main at $GITHUB_SHA. Prefer a versioned release unless you want the newest changes."
+          assets="mumble-video-linux-x86_64.zip mumble-video-server-linux-x86_64.tar.gz mumble-video.flatpak mumble-video-setup.exe mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS"
+
+          # Move the dev-latest tag to this commit (create it the first time).
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/dev-latest" -f sha="$GITHUB_SHA" -F force=true \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/dev-latest" -f sha="$GITHUB_SHA"
+
+          # Create the release the first time; afterwards just retarget it and replace its assets in
+          # place, so it is never absent.
+          if gh release view dev-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit dev-latest --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+              --title "Development build" --notes "$notes"
+            gh release upload dev-latest --repo "$GITHUB_REPOSITORY" --clobber $assets
+          else
+            gh release create dev-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Development build" --notes "$notes" $assets
+          fi
