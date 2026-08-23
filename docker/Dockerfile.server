@@ -1,0 +1,22 @@
+# Copyright The Mumble Developers. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file at the root of the
+# Mumble source tree or at <https://www.mumble.info/LICENSE>.
+
+# Runtime image for the video-enabled server. Build the project first (see README.md), install it into
+# a staging directory, and pass that directory as the build context.
+FROM fedora:42
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        qt6-qtbase qt6-qtbase-mysql qt6-qtbase-postgresql \
+        openssl protobuf boost-date-time libcap \
+        avahi-compat-libdns_sd libvpx \
+        mariadb-connector-c libpq sqlite \
+    && dnf clean all
+
+COPY bin/mumble-server /usr/local/bin/mumble-server
+
+EXPOSE 64738/tcp 64738/udp
+
+# --foreground keeps the process as PID 1; daemonising would fork and exit, stopping the container.
+ENTRYPOINT ["/usr/local/bin/mumble-server", "--foreground", "-i", "/data/mumble-server.ini"]

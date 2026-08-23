@@ -30,6 +30,10 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Pushing the server container image to this repo's GHCR namespace.
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,6 +75,51 @@ jobs:
         with:
           name: mumble-video-linux-x86_64
           path: out/mumble-video-linux-x86_64.zip
+
+      - name: Stage the server binary
+        run: |
+          docker run --rm -v "$PWD":/src -v "$PWD/build":/build -v "$PWD/out":/out mumble-build \
+            bash /src/scripts/bundle-server.sh /build /out/server
+          tar -C out/server -czf out/mumble-video-server-linux-x86_64.tar.gz bin/mumble-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble-video-server-linux-x86_64
+          path: out/mumble-video-server-linux-x86_64.tar.gz
+
+      # The deployable server. Built only on pushes to main or a tag - a pull request has nowhere to
+      # push and no business publishing an image. Tagged dev-latest for main and the version for a tag,
+      # plus the commit sha so any image can be traced back to what produced it.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Server image tags
+        if: github.event_name == 'push'
+        id: server_tags
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-server"
+          tags="${image}:sha-${GITHUB_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags="${tags},${image}:dev-latest"
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tags="${tags},${image}:${GITHUB_REF_NAME},${image}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the server image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: out/server
+          file: docker/Dockerfile.server
+          push: true
+          tags: ${{ steps.server_tags.outputs.tags }}
 
   windows:
     runs-on: ubuntu-latest
@@ -217,6 +266,7 @@ jobs:
         with:
           files: |
             mumble-video-linux-x86_64.zip
+            mumble-video-server-linux-x86_64.tar.gz
             mumble-video.flatpak
             mumble-video-setup.exe
             mumble-video-x64.msi
@@ -237,5 +287,5 @@ jobs:
             --prerelease \
             --title "Development build" \
             --notes "Rolling build of main at $GITHUB_SHA. Prefer a versioned release unless you want the newest changes." \
-            mumble-video-linux-x86_64.zip mumble-video.flatpak mumble-video-setup.exe \
-            mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS
+            mumble-video-linux-x86_64.zip mumble-video-server-linux-x86_64.tar.gz mumble-video.flatpak \
+            mumble-video-setup.exe mumble-video-x64.msi mumble-video-windows-x86_64.zip SHA256SUMS
