@@ -559,11 +559,19 @@ void MainWindow::setupVideoGrid() {
 	connect(m_videoGrid, &VideoGrid::senderCountChanged, this, [this](int count) {
 		const bool show = count > 0;
 
+		// Only act on the transition into or out of "something to show". Firing on every count change is
+		// what made a fourth person joining - or anyone leaving - snap the dock back to half height for
+		// everyone still in the call, throwing away whatever size they had dragged it to.
+		if (show == m_videoDockShown) {
+			return;
+		}
+
+		m_videoDockShown = show;
 		m_videoDock->setVisible(show);
 
 		if (show) {
-			// Half the window, so video and the conversation below it get equal room. Reapplied on each
-			// appearance, since a hidden dock has no meaningful size to divide.
+			// Half the window the first time video appears, so video and the conversation below it get
+			// equal room. A hidden dock has no meaningful size to divide, so this cannot be done up front.
 			resizeDocks({ m_videoDock }, { height() / 2 }, Qt::Vertical);
 		}
 	});
@@ -1099,6 +1107,22 @@ void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsign
 	}
 
 	m_screenShareAudioBuffers.erase(it);
+}
+
+void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSession) {
+	const std::uint64_t hi = static_cast< std::uint64_t >(senderSession) << 32;
+
+	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
+		if ((it->first >> 32) == (hi >> 32)) {
+			if (Global::get().ao) {
+				Global::get().ao->invalidateToken(it->second.token);
+			}
+
+			it = m_screenShareAudioBuffers.erase(it);
+		} else {
+			++it;
+		}
+	}
 }
 
 void MainWindow::setupGui() {

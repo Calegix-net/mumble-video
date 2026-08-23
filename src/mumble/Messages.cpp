@@ -877,8 +877,23 @@ void MainWindow::msgUserRemove(const MumbleProto::UserRemove &msg) {
 								  Q_ARG(unsigned int, pDst->uiSession));
 	}
 
-	if (pDst != pSelf)
+	if (pDst != pSelf) {
+		// The server drops a departing user's streams from its router, but does not send a per-stream
+		// VideoState(active=false) for each on their behalf - so without this the user's camera or
+		// screen sits frozen on every remaining client, and their tile never goes away. Their
+		// screen-share audio buffers have to go too, or they keep occupying a mixer slot forever.
+		if (m_videoGrid) {
+			m_videoGrid->removeSender(pDst->uiSession);
+		}
+
+		if (m_videoStreamDispatcher) {
+			m_videoStreamDispatcher->removeSender(pDst->uiSession);
+		}
+
+		removeScreenShareAudioBuffersForSender(pDst->uiSession);
+
 		pmModel->removeUser(pDst);
+	}
 }
 
 /// This message is being received when the server informs the local client about channel properties (either during

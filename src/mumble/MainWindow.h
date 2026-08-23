@@ -227,6 +227,10 @@ protected:
 	VideoGrid *m_videoGrid   = nullptr;
 	QDockWidget *m_videoDock = nullptr;
 
+	/// Whether the video dock is currently shown, so its auto-sizing fires only on the hidden<->shown
+	/// transition and not on every join, leave or toggle within an ongoing call.
+	bool m_videoDockShown = false;
+
 	/// Pulls OpusAudio-coded units off the same signal m_videoGrid listens to, for screen-share audio.
 	VideoStreamDispatcher *m_videoStreamDispatcher = nullptr;
 
@@ -275,6 +279,10 @@ protected:
 	/// No-op if (senderSession, streamID) is not currently a screen-share audio stream - callers do not
 	/// need to know whether a given ending stream was one before asking this to check.
 	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);
+
+	/// Removes every screen-share audio buffer belonging to a sender, whatever its stream id - used when
+	/// the sender disconnects and no per-stream end message will arrive.
+	void removeScreenShareAudioBuffersForSender(unsigned int senderSession);
 
 	static std::uint64_t screenShareAudioKey(unsigned int senderSession, unsigned int streamID) {
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
