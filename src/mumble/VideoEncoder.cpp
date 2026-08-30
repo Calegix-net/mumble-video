@@ -186,6 +186,18 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 		forceKeyframe = true;
 	}
 
+	// A periodic full repaint, so that a viewer whose keyframe request was lost - or who joined while
+	// the sender was running a build that ignored it - still ends up with the whole picture rather
+	// than only the tiles that have changed since they subscribed. Cheap: a screen share runs at a
+	// handful of frames a second, and between refreshes unchanged tiles still cost nothing.
+	if (++m_framesSinceFullRefresh >= FULL_REFRESH_INTERVAL_FRAMES) {
+		forceKeyframe = true;
+	}
+
+	if (forceKeyframe) {
+		m_framesSinceFullRefresh = 0;
+	}
+
 	units.reserve(tileCount);
 
 	// Unique across every unit this call emits, whole tiles and split quadrants alike - encodeRegionSplitting()

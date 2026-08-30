@@ -18,10 +18,19 @@
 VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setAutoFillBackground(true);
 
+	// Small floor, greedy ceiling: the panel must never be what stops the main window from being made
+	// smaller, and given room it should take it. Tiles scale to whatever they get (see paintEvent).
+	setMinimumSize(160, 90);
+	setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
 	// Strong rather than the default NoFocus: Esc only reaches keyPressEvent() below if this widget
 	// actually holds keyboard focus, and a click is the only way a user has told it they mean to interact
 	// with a particular tile rather than whatever else is on screen.
 	setFocusPolicy(Qt::StrongFocus);
+}
+
+QSize VideoGrid::sizeHint() const {
+	return QSize(640, 360);
 }
 
 int VideoGrid::senderCount() const {
@@ -161,11 +170,22 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	if (m_surfaces.find(key) == m_surfaces.end()) {
 		bool senderAlreadyPresent = false;
 
-		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend();) {
+			if (it->second.senderSession == senderSession && it->second.sourceKind == sourceKind) {
+				// One camera (or screen) per person. A sender restarts a share under a fresh stream id,
+				// and if the end of the old one never reached us - the control message was dropped, or
+				// the sender's client died - the old surface would sit there as a stuck last frame next
+				// to the live one, forever. The newer announcement wins.
+				it = m_surfaces.erase(it);
+				senderAlreadyPresent = true;
+				continue;
+			}
+
 			if (it->second.senderSession == senderSession) {
 				senderAlreadyPresent = true;
-				break;
 			}
+
+			++it;
 		}
 
 		// Bounded on distinct senders, not on surfaces held: the cap exists so the grid does not draw
@@ -184,6 +204,10 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.canvas = QImage();
 		surface.vp8.reset();
+		surface.lastFrameNumber    = 0;
+		surface.hasDecodedFrame    = false;
+		surface.awaitingKeyframe   = false;
+		surface.unitsWhileAwaiting = 0;
 	}
 
 	surface.senderSession = senderSession;
@@ -192,7 +216,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	surface.sourceKind    = sourceKind;
 }
 
-void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
+void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+									bool isKeyframe, unsigned int x, unsigned int y,
 									const QByteArray &encodedTile) {
 	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
 	// no codec, and are dropped rather than assumed to be anything.
@@ -203,6 +228,48 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	Surface &surface = existing->second;
+
+	// VP8 inter-frames reference their predecessor, and decoding one whose reference is missing does
+	// not fail - it returns a plausible-looking corrupted image, classically green. The failure counter
+	// below never sees that, so frame continuity is enforced here, before the decoder is fed at all.
+	// TiledImage is exempt: its units are independently decodable by design, so late or missing tiles
+	// cost nothing beyond the pixels they carried.
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8 && surface.hasDecodedFrame) {
+		if (frameNumber <= surface.lastFrameNumber) {
+			// A stale unit that reassembled after its successors - a keyframe included. Decoding it
+			// rewinds the decoder's reference state (and, for a keyframe, would rewind lastFrameNumber
+			// itself, making the next live frame look like a gap and triggering a needless freeze).
+			return;
+		}
+
+		if (surface.awaitingKeyframe && !isKeyframe) {
+			// Frozen: the last good picture stays up, which reads as a brief pause instead of a burst
+			// of green. Re-ask occasionally in case the first request was lost in the same loss burst
+			// that caused the gap.
+			if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
+				surface.unitsWhileAwaiting = 0;
+
+				emit keyframeNeeded(senderSession, streamID);
+			}
+
+			return;
+		}
+
+		if (!isKeyframe && frameNumber != surface.lastFrameNumber + 1) {
+			// The reference for this frame never arrived. Freeze and ask once; the counter above
+			// repeats the request if the stream keeps flowing without a keyframe.
+			surface.awaitingKeyframe   = true;
+			surface.unitsWhileAwaiting = 0;
+
+			qWarning("VideoGrid: stream %u/%u lost frame continuity (%llu -> %llu), frozen until a keyframe arrives",
+					 senderSession, streamID, static_cast< unsigned long long >(surface.lastFrameNumber),
+					 static_cast< unsigned long long >(frameNumber));
+
+			emit keyframeNeeded(senderSession, streamID);
+
+			return;
+		}
+	}
 
 	const QImage tile = decodeUnit(surface, encodedTile);
 
@@ -224,6 +291,13 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	surface.consecutiveFailures = 0;
+
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8) {
+		surface.lastFrameNumber    = frameNumber;
+		surface.hasDecodedFrame    = true;
+		surface.awaitingKeyframe   = false;
+		surface.unitsWhileAwaiting = 0;
+	}
 
 	// A surface exists from the announcement onwards but holds no picture until now, so this is what
 	// makes the sender count - and with it the video panel - appear.
@@ -296,7 +370,7 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 }
 
 void VideoGrid::clear() {
-	m_focus            = FocusTarget::None;
+	m_focus             = FocusTarget::None;
 	m_focusedSurfaceKey = 0;
 
 	if (m_surfaces.empty()) {
@@ -512,7 +586,7 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 		}
 
 		if (index == slot) {
-			m_focus            = FocusTarget::Surface;
+			m_focus             = FocusTarget::Surface;
 			m_focusedSurfaceKey = it->first;
 			setFocus(Qt::MouseFocusReason);
 			update();

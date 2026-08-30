@@ -104,6 +104,10 @@ protected:
 	// Hash per tile of the previous frame, in row-major tile order, used to skip unchanged tiles.
 	std::vector< std::uint64_t > m_tileHashes;
 
+	/// Frames since every tile was last sent; see encode().
+	unsigned int m_framesSinceFullRefresh                     = 0;
+	static constexpr unsigned int FULL_REFRESH_INTERVAL_FRAMES = 150;
+
 	Stats m_lastStats;
 
 	/**

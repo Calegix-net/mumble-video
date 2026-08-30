@@ -61,6 +61,10 @@ public:
 	/// waiting will not help. High enough that a single corrupt unit stays a non-event.
 	static constexpr int KEYFRAME_REQUEST_AFTER_FAILURES = 10;
 
+	/// While frozen waiting for a keyframe, re-ask after this many dropped inter-frames (about a second
+	/// at 30 fps) in case the first request was lost. The server rate-limits relays regardless.
+	static constexpr int KEYFRAME_REREQUEST_AFTER_UNITS = 30;
+
 	explicit VideoGrid(QWidget *parent = nullptr);
 
 	/// Number of other participants' tiles currently drawable - one per stream with a picture, not one
@@ -88,8 +92,8 @@ public slots:
 	 *
 	 * @param encodedTile A complete JPEG, as produced by TiledImageEncoder.
 	 */
-	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
-							 const QByteArray &encodedTile);
+	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
+							 unsigned int x, unsigned int y, const QByteArray &encodedTile);
 
 	/// Shows the local camera. Drawn first so your own picture does not move about as other people come
 	/// and go.
@@ -162,6 +166,18 @@ protected:
 		/// Undecodable units in a row, for the keyframeNeeded() threshold. Reset by any success.
 		int consecutiveFailures = 0;
 
+		/// Highest frame number successfully decoded, once anything has been. VP8 only: inter-frames
+		/// reference their predecessor, so a number that skips ahead means the reference was lost and
+		/// the next decode would *succeed* with garbage output - the green-frame artifact - rather
+		/// than fail. Gaps therefore freeze the picture until the next keyframe instead of decoding.
+		quint64 lastFrameNumber = 0;
+		bool hasDecodedFrame    = false;
+
+		/// Frozen: a gap was seen and only a keyframe may resume decoding. Suppresses repeated
+		/// keyframeNeeded spam; dropped units are counted so the request can be repeated if lost.
+		bool awaitingKeyframe   = false;
+		int unitsWhileAwaiting  = 0;
+
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
 		std::unique_ptr< VP8Decoder > vp8;
@@ -220,6 +236,11 @@ protected:
 	/// still reaches whatever else might want it when the grid is not the reason it was pressed.
 	void keyPressEvent(QKeyEvent *event) override;
 
+public:
+	QSize sizeHint() const override;
+
+protected:
+
 	/// Grows a surface so the given rectangle fits, within the bounds above. Returns false if the
 	/// rectangle cannot be accommodated.
 	static bool growToFit(QImage &canvas, int x, int y, int width, int height);
@@ -232,9 +253,9 @@ protected:
 	/// which columns/rows they form a roughly-square arrangement out of. Shared so a click can never land
 	/// on a different cell than the same point was last painted into.
 	struct Layout {
-		int count   = 0;
-		int columns = 0;
-		int rows    = 0;
+		int count      = 0;
+		int columns    = 0;
+		int rows       = 0;
 		int cellWidth  = 0;
 		int cellHeight = 0;
 	};
