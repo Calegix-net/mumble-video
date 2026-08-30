@@ -82,6 +82,77 @@ std::vector< Mumble::Protocol::byte > TiledImageEncoder::encodeTile(const QImage
 	return {};
 }
 
+bool TiledImageEncoder::encodeRegionSplitting(const QImage &source, int x, int y, int width, int height,
+											  std::uint32_t streamID, std::uint64_t frameNumber,
+											  std::uint64_t captureTimestampUsec, std::uint32_t &nextUnitID,
+											  std::vector< EncodedVideoUnit > &units) {
+	const QImage region = source.copy(x, y, width, height);
+
+	bool fitted      = false;
+	bool requantised = false;
+
+	std::vector< Mumble::Protocol::byte > payload = encodeTile(region, fitted, requantised);
+
+	if (fitted) {
+		if (requantised) {
+			m_lastStats.tilesRequantised++;
+		}
+
+		EncodedVideoUnit unit;
+		unit.header.streamID             = streamID;
+		unit.header.frameNumber          = frameNumber;
+		unit.header.unitID               = nextUnitID++;
+		unit.header.captureTimestampUsec = captureTimestampUsec;
+		unit.header.isKeyframe           = true;
+		unit.header.x                    = static_cast< std::uint32_t >(x);
+		unit.header.y                    = static_cast< std::uint32_t >(y);
+		unit.header.width                = static_cast< std::uint32_t >(width);
+		unit.header.height               = static_cast< std::uint32_t >(height);
+		unit.payload                     = std::move(payload);
+
+		m_lastStats.bytesEncoded += unit.payload.size();
+		m_lastStats.tilesEncoded++;
+
+		units.push_back(std::move(unit));
+
+		return true;
+	}
+
+	// Did not fit even at the quality floor. Split into quadrants and retry each independently, unless
+	// this region is already too small for splitting to be worth attempting - in which case give up on
+	// it exactly as before splitting existed, rather than recursing towards a one-pixel region forever.
+	if (width < 2 * MIN_SPLIT_DIMENSION && height < 2 * MIN_SPLIT_DIMENSION) {
+		m_lastStats.tilesDroppedOversize++;
+
+		return false;
+	}
+
+	const int leftWidth  = (width + 1) / 2;
+	const int topHeight  = (height + 1) / 2;
+	const int rightWidth = width - leftWidth;
+	const int botHeight  = height - topHeight;
+
+	bool fullyCovered = true;
+
+	// clang-format off
+	fullyCovered = encodeRegionSplitting(source, x,             y,            leftWidth,  topHeight, streamID, frameNumber, captureTimestampUsec, nextUnitID, units) && fullyCovered;
+
+	if (rightWidth > 0) {
+		fullyCovered = encodeRegionSplitting(source, x + leftWidth, y,            rightWidth, topHeight, streamID, frameNumber, captureTimestampUsec, nextUnitID, units) && fullyCovered;
+	}
+
+	if (botHeight > 0) {
+		fullyCovered = encodeRegionSplitting(source, x,             y + topHeight, leftWidth,  botHeight, streamID, frameNumber, captureTimestampUsec, nextUnitID, units) && fullyCovered;
+
+		if (rightWidth > 0) {
+			fullyCovered = encodeRegionSplitting(source, x + leftWidth, y + topHeight, rightWidth, botHeight, streamID, frameNumber, captureTimestampUsec, nextUnitID, units) && fullyCovered;
+		}
+	}
+	// clang-format on
+
+	return fullyCovered;
+}
+
 std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, std::uint32_t streamID,
 														  std::uint64_t frameNumber, std::uint64_t captureTimestampUsec,
 														  bool forceKeyframe) {
@@ -115,19 +186,13 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 		forceKeyframe = true;
 	}
 
-	// A periodic full repaint, so that a viewer whose keyframe request was lost - or who joined while
-	// the sender was running a build that ignored it - still ends up with the whole picture rather
-	// than only the tiles that have changed since they subscribed. Cheap: a screen share runs at a
-	// handful of frames a second, and between refreshes unchanged tiles still cost nothing.
-	if (++m_framesSinceFullRefresh >= FULL_REFRESH_INTERVAL_FRAMES) {
-		forceKeyframe = true;
-	}
-
-	if (forceKeyframe) {
-		m_framesSinceFullRefresh = 0;
-	}
-
 	units.reserve(tileCount);
+
+	// Unique across every unit this call emits, whole tiles and split quadrants alike - encodeRegionSplitting()
+	// increments this once per piece. Unit ids only ever need to be distinct within one (stream, frame),
+	// never tied to grid position, so a plain counter is simpler than deriving one from where a piece
+	// came from.
+	std::uint32_t nextUnitID = 0;
 
 	for (int row = 0; row < rows; ++row) {
 		for (int column = 0; column < columns; ++column) {
@@ -150,41 +215,17 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 				continue;
 			}
 
-			bool fitted      = false;
-			bool requantised = false;
+			// Encodes the tile whole if it fits, or splits it into independently-encoded quadrants if it
+			// does not - see the class comment for why dropping outright is a last resort now, not the
+			// first response to a tile being too large. The hash is recorded only when every quadrant
+			// made it out, so a partially-covered tile keeps being retried rather than being mistaken for
+			// done.
+			const bool fullyCovered = encodeRegionSplitting(source, x, y, w, h, streamID, frameNumber,
+															captureTimestampUsec, nextUnitID, units);
 
-			std::vector< Mumble::Protocol::byte > payload = encodeTile(tile, fitted, requantised);
-
-			if (!fitted) {
-				// Deliberately does not update the stored hash, so this tile is retried on the next
-				// frame instead of being treated as successfully sent.
-				m_lastStats.tilesDroppedOversize++;
-				continue;
+			if (fullyCovered) {
+				m_tileHashes[index] = hash;
 			}
-
-			if (requantised) {
-				m_lastStats.tilesRequantised++;
-			}
-
-			m_tileHashes[index] = hash;
-
-			EncodedVideoUnit unit;
-			unit.header.streamID             = streamID;
-			unit.header.frameNumber          = frameNumber;
-			unit.header.unitID               = static_cast< std::uint32_t >(index);
-			unit.header.captureTimestampUsec = captureTimestampUsec;
-			// Every tile is a complete JPEG, so every unit is independently decodable by construction.
-			unit.header.isKeyframe = true;
-			unit.header.x          = static_cast< std::uint32_t >(x);
-			unit.header.y          = static_cast< std::uint32_t >(y);
-			unit.header.width      = static_cast< std::uint32_t >(w);
-			unit.header.height     = static_cast< std::uint32_t >(h);
-			unit.payload           = std::move(payload);
-
-			m_lastStats.bytesEncoded += unit.payload.size();
-			m_lastStats.tilesEncoded++;
-
-			units.push_back(std::move(unit));
 		}
 	}
 

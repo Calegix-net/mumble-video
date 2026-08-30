@@ -280,11 +280,10 @@ void TestVideoPipeline::frameEndMarksTheLastUnit() {
 
 void TestVideoPipeline::oversizeTilesAreRequantisedNotDropped() {
 	// Swept rather than pinned to one tile size, because the size at which incompressible content stops
-	// fitting is a property of the transport budget and the JPEG encoder, not something a test should
-	// hardcode. What must hold at every size is that nothing is ever emitted too large and nothing ever
-	// disappears unaccounted for.
+	// fitting at full quality is a property of the transport budget and the JPEG encoder, not something a
+	// test should hardcode. What must hold at every size is that nothing is ever emitted too large and
+	// nothing ever disappears unaccounted for.
 	bool sawRequantise = false;
-	bool sawDrop       = false;
 
 	for (int size : { 128, 192, 256, 384, 512, 768, 1024 }) {
 		SyntheticVideoSource source(size, size);
@@ -298,10 +297,9 @@ void TestVideoPipeline::oversizeTilesAreRequantisedNotDropped() {
 		const TiledImageEncoder::Stats stats        = encoder.lastStats();
 
 		QCOMPARE(stats.tilesConsidered, 1u);
-
-		// Every tile ends up in exactly one bucket, and the units returned match the encoded count. This
-		// is what makes "dropped" auditable instead of a silent hole.
-		QCOMPARE(stats.tilesEncoded + stats.tilesUnchanged + stats.tilesDroppedOversize, 1u);
+		// One top-level tile can now become several units if it had to be split, so the old "exactly one
+		// bucket per tile" bookkeeping no longer applies - what still has to hold is that every emitted
+		// unit is accounted for in tilesEncoded, and every unit returned is one of them.
 		QCOMPARE(units.size(), static_cast< std::size_t >(stats.tilesEncoded));
 
 		for (const EncodedVideoUnit &unit : units) {
@@ -310,24 +308,22 @@ void TestVideoPipeline::oversizeTilesAreRequantisedNotDropped() {
 
 		QCOMPARE(roundTrip(units, SESSION).size(), units.size());
 
+		// A tile too noisy to fit whole even at the quality floor is split into independently-encoded
+		// quadrants, recursively, down to a 16px floor - and pure noise at 16px compresses to a few dozen
+		// bytes at worst, nowhere near the >50KB budget maxUnitSize() actually allows. So across this
+		// entire size sweep, splitting should always finish the job: the fallback this test exists to
+		// exercise never has to fall back all the way to dropping content on the floor.
+		QCOMPARE(stats.tilesDroppedOversize, 0u);
+		QVERIFY(!units.empty());
+
 		if (stats.tilesRequantised > 0) {
 			sawRequantise = true;
-			// Lowering quality is what avoids the drop, so the two must never co-occur for one tile.
-			QCOMPARE(stats.tilesDroppedOversize, 0u);
-		}
-
-		if (stats.tilesDroppedOversize > 0) {
-			sawDrop = true;
 		}
 	}
 
 	// Graceful degradation has to actually happen somewhere in that range, or the retry loop is dead
 	// code that a future change could break unnoticed.
 	QVERIFY(sawRequantise);
-
-	// And past the point where even the lowest quality will not fit, the tile is counted rather than
-	// vanishing. Pure noise is incompressible, so a large enough tile cannot be made to fit at all.
-	QVERIFY(sawDrop);
 }
 
 void TestVideoPipeline::every128PxTileFitsOneTransportUnit() {

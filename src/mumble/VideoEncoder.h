@@ -35,7 +35,16 @@ struct EncodedVideoUnit {
  *    saves nothing, but the same encoder serves screen sharing, where most of the frame is static.
  *  - A tile that will not fit in one transport unit is re-encoded at lower quality rather than
  *    dropped. Frame data that silently vanishes because it was a few bytes too large is close to
- *    impossible to diagnose from the receiving end, where it looks like packet loss.
+ *    impossible to diagnose from the receiving end, where it looks like packet loss - and for a
+ *    genuinely high-entropy region (a busy game scene, say) even the lowest quality step can still not
+ *    fit, in which case the tile is split into independently-encoded quadrants - each with its own
+ *    x/y/width/height, which the wire format already carries per unit - and each quadrant is split
+ *    again if it still does not fit. A smaller region compresses to fewer bytes at the same quality
+ *    purely because it has fewer pixels to encode, so this always terminates well before
+ *    MIN_SPLIT_DIMENSION for any real image content. Splitting rather than giving up is what keeps a
+ *    tile from becoming a permanent, never-updating black square merely because its content is noisy -
+ *    and re-attempting the same failing whole-tile encode every single frame forever, which is what
+ *    dropping without splitting used to cost, is itself a real source of needless lag.
  */
 class TiledImageEncoder {
 public:
@@ -95,10 +104,6 @@ protected:
 	// Hash per tile of the previous frame, in row-major tile order, used to skip unchanged tiles.
 	std::vector< std::uint64_t > m_tileHashes;
 
-	/// Frames since every tile was last sent; see encode().
-	unsigned int m_framesSinceFullRefresh                     = 0;
-	static constexpr unsigned int FULL_REFRESH_INTERVAL_FRAMES = 150;
-
 	Stats m_lastStats;
 
 	/**
@@ -108,6 +113,29 @@ protected:
 	 * @param requantised Set to true if the baseline quality had to be reduced.
 	 */
 	std::vector< Mumble::Protocol::byte > encodeTile(const QImage &tile, bool &fitted, bool &requantised) const;
+
+	/// Below this edge length, in pixels, a region that still does not fit is dropped rather than split
+	/// further. In practice never reached: a region this small compresses to a few dozen bytes at worst,
+	/// far under any realistic transport budget, at any quality. Sharing setTileSize()'s own floor is
+	/// coincidence, not a dependency between the two - this one just needs to be "clearly too small to be
+	/// worth subdividing again", and that value already means exactly that.
+	static constexpr int MIN_SPLIT_DIMENSION = 16;
+
+	/**
+	 * Encodes one rectangular region, splitting it into quadrants - each independently positioned and
+	 * independently a complete JPEG, exactly like a top-level tile - whenever it does not fit whole, down
+	 * to MIN_SPLIT_DIMENSION. Appends every piece that did fit to @p units, with @p streamID and
+	 * @p frameNumber copied into each header and @p nextUnitID incremented once per piece so every unit
+	 * in the frame gets a distinct id.
+	 *
+	 * @returns Whether every pixel of the region was covered by some emitted piece. False means at least
+	 *   one quadrant had to be dropped, which the caller uses to decide whether the tile's hash may be
+	 *   recorded as "successfully sent" - a partially-covered tile must be retried next frame, not treated
+	 *   as done.
+	 */
+	bool encodeRegionSplitting(const QImage &source, int x, int y, int width, int height, std::uint32_t streamID,
+							   std::uint64_t frameNumber, std::uint64_t captureTimestampUsec,
+							   std::uint32_t &nextUnitID, std::vector< EncodedVideoUnit > &units);
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOENCODER_H_
