@@ -571,6 +571,30 @@ void MainWindow::setupVideoGrid() {
 			resizeDocks({ m_videoDock }, { height() / 2 }, Qt::Vertical);
 		}
 	});
+
+	// The grid has already updated its own rendering (a placeholder tile, or the picture again) by the
+	// time this fires; what is left is telling the server, which is the only thing that can actually stop
+	// - or resume - relaying the stream. subscribe=false on a stream this client is not the sender of is
+	// simply "stop sending me this", the same message a permission change withdrawal already used.
+	connect(m_videoGrid, &VideoGrid::watchToggled, this,
+			[this](unsigned int senderSession, unsigned int streamID, bool wantToWatch) {
+				if (!Global::get().sh) {
+					return;
+				}
+
+				MumbleProto::VideoSubscribe mpvs;
+				mpvs.set_session(senderSession);
+				mpvs.set_stream_id(streamID);
+				mpvs.set_subscribe(wantToWatch);
+				mpvs.set_request_keyframe(wantToWatch);
+
+				Global::get().sh->sendMessage(mpvs);
+			});
+
+	connect(m_videoGrid, &VideoGrid::volumeChanged, this,
+			[this](unsigned int senderSession, float multiplier) {
+				setScreenShareVolumeForSender(senderSession, multiplier);
+			});
 }
 
 void MainWindow::setupVideoBroadcast() {
@@ -631,12 +655,14 @@ void MainWindow::setupVideoBroadcast() {
 		}
 	});
 
-	// Your own camera, shown alongside everyone else's. Without it, sharing looks like nothing happened.
-	connect(m_videoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfFrame);
+	// Your own camera, shown alongside everyone else's, in its own permanently reserved cell - separate
+	// from the screen share's below, so sharing both at once shows both rather than one overwriting the
+	// other's preview.
+	connect(m_videoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfCameraFrame);
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
 		if (!active) {
-			m_videoGrid->clearSelfFrame();
+			m_videoGrid->clearSelfCameraFrame();
 		}
 	});
 
@@ -708,17 +734,14 @@ void MainWindow::setupScreenShare() {
 		}
 	});
 
-	// Without this the video dock never appears at all when screen-sharing alone: VideoGrid::setSelfFrame
-	// is what fires senderCountChanged and makes the dock visible, and nothing else does. Shares the same
-	// self-preview slot the camera uses - if both are active at once the preview shows whichever posted a
-	// frame most recently, which is a real limitation worth revisiting, not a deliberate design choice.
-	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfFrame);
+	// Without this the video dock never appears at all when screen-sharing alone: VideoGrid's own preview
+	// slots are what fire senderCountChanged and make the dock visible, and nothing else does. Its own
+	// reserved cell, separate from the camera's - see the connect() for m_videoBroadcaster above.
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfScreenFrame);
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
-		// The preview slot is shared with the camera; if that is still running its next frame repaints
-		// the slot anyway, and clearing it here just blinks the user's own picture off for a frame.
-		if (!active && !(m_videoBroadcaster && m_videoBroadcaster->isActive())) {
-			m_videoGrid->clearSelfFrame();
+		if (!active) {
+			m_videoGrid->clearSelfScreenFrame();
 		}
 	});
 
@@ -910,7 +933,7 @@ void MainWindow::toggleScreenShare(bool share) {
 								tr("Waiting for the screen picker…"));
 		pendingPainter.end();
 
-		m_videoGrid->setSelfFrame(pending);
+		m_videoGrid->setSelfScreenFrame(pending);
 	}
 
 	Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(m_screenVideoBroadcaster->describe()));
@@ -1121,6 +1144,18 @@ void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSessi
 			it = m_screenShareAudioBuffers.erase(it);
 		} else {
 			++it;
+		}
+	}
+}
+
+void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float multiplier) {
+	// A sender only ever holds one screen-share audio stream at a time - screen sharing is one share at
+	// a time per the picker's own design - so matching on the sender half of the key alone, rather than
+	// needing the exact stream id VideoGrid's slider does not itself know, is correct here, not just
+	// convenient.
+	for (auto &entry : m_screenShareAudioBuffers) {
+		if ((entry.first >> 32) == senderSession && entry.second.buffer) {
+			entry.second.buffer->setVolume(multiplier);
 		}
 	}
 }

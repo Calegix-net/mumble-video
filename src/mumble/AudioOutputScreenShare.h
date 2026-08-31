@@ -11,6 +11,7 @@
 #include <QtCore/QByteArray>
 #include <QtCore/QMutex>
 
+#include <atomic>
 #include <vector>
 
 struct OpusDecoder;
@@ -55,6 +56,14 @@ public:
 	/// is handled by removing this buffer from AudioOutput directly rather than through this return value.
 	bool prepareSampleBuffer(unsigned int frameCount) override;
 
+	float volumeMultiplier() const override { return m_volume.load(std::memory_order_relaxed); }
+
+	/// Set from the UI thread - a per-tile volume slider in the video grid - and read from the audio
+	/// mixing thread via volumeMultiplier() above. An atomic is enough: this is a knob a listener is
+	/// dragging, not something that needs to be exactly synchronized with any particular sample, so the
+	/// relaxed ordering a plain load/store gives is all that is worth paying for here.
+	void setVolume(float multiplier) { m_volume.store(multiplier, std::memory_order_relaxed); }
+
 protected:
 	OpusDecoder *m_opusState         = nullptr;
 	SpeexResamplerState *m_resampler = nullptr;
@@ -65,6 +74,10 @@ protected:
 	/// Interleaved stereo float samples at m_mixerFreq, awaiting playback. A FIFO: consumed from the
 	/// front by prepareSampleBuffer(), appended to at the back by addOpusPacket().
 	std::vector< float > m_ring;
+
+	/// 0.0 (silent) to whatever the UI allows above unity. Defaults to unity so a share that never gets
+	/// its slider touched plays at the same volume it always did.
+	std::atomic< float > m_volume{ 1.0f };
 };
 
 #endif // MUMBLE_MUMBLE_AUDIOOUTPUTSCREENSHARE_H_

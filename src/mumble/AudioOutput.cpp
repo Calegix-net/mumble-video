@@ -686,6 +686,12 @@ bool AudioOutput::mix(void *outbuff, unsigned int frameCount) {
 					volumeAdjustment *= sample->getVolume();
 				}
 
+				// Applies to every buffer type uniformly, on top of whatever the branches above already
+				// computed - unity for everything except a screen share's audio, whose volume a listener
+				// can adjust from its own tile in the video grid, independent of the sender's own mic
+				// volume or any positional attenuation.
+				volumeAdjustment *= buffer->volumeMultiplier();
+
 				// As the events may cause the output PCM to change, the connection has to be direct in any case
 				const int channels = (speech && speech->bStereo) ? 2 : 1;
 				// If user != nullptr, then the current audio is considered speech

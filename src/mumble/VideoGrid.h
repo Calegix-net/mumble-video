@@ -21,6 +21,9 @@
 
 class QKeyEvent;
 class QMouseEvent;
+class QResizeEvent;
+class QSlider;
+class QToolButton;
 
 /**
  * Displays the video other participants are sharing.
@@ -42,6 +45,16 @@ class QMouseEvent;
  * The payload is attacker-controlled, so letting it select the decoder would turn every format the
  * client can parse into attack surface. A stream whose codec was never announced, or was announced as
  * one this build does not know, is dropped rather than guessed at.
+ *
+ * Your own camera and your own screen share each get a permanently reserved cell of their own - see
+ * m_selfCameraFrame/m_selfScreenFrame - so that another participant's stream starting, stopping or being
+ * re-announced can never so much as move your own tile, let alone hide it. Every other tile carries a
+ * small always-on control strip: a fullscreen toggle on every tile, and, on a remote sender's tile, a
+ * watch/unwatch toggle and - for a screen share specifically, which is the only kind of stream with audio
+ * of its own - a volume slider. Unwatching a stream unsubscribes from it over the network (the sender
+ * keeps broadcasting to everyone else) and leaves a compact placeholder in its cell with a way back in,
+ * rather than removing the tile and its cell outright, which would just be this class's own reshuffling
+ * bug by another name.
  */
 class VideoGrid : public QWidget {
 	Q_OBJECT
@@ -67,15 +80,19 @@ public:
 
 	explicit VideoGrid(QWidget *parent = nullptr);
 
-	/// Number of other participants' tiles currently drawable - one per stream with a picture, not one
-	/// per person, since a sender may hold more than one stream (a camera and a screen, say). A surface
-	/// exists from its stream's announcement onward, but one with nothing decoded into it yet occupies no
-	/// cell and must not reserve one, or the grid lays out around an empty square.
+	/// Number of other participants' tiles currently drawable - one per stream that has decoded at least
+	/// one picture, not one per person, since a sender may hold more than one stream (a camera and a
+	/// screen, say). A surface exists from its stream's announcement onward, but one with nothing decoded
+	/// into it yet occupies no cell and must not reserve one, or the grid lays out around an empty
+	/// square. Unwatching a stream afterwards does not give its cell back - see the class comment - so
+	/// this does not change when a tile is unwatched, only when it is removed outright.
 	int senderCount() const;
 
-	/// Everything drawn, including your own picture. This is what decides whether the panel is worth
-	/// showing at all.
-	int tileCount() const { return senderCount() + (m_selfFrame.isNull() ? 0 : 1); }
+	/// Everything drawn, including your own camera and your own screen share. This is what decides
+	/// whether the panel is worth showing at all.
+	int tileCount() const {
+		return senderCount() + (m_selfCameraFrame.isNull() ? 0 : 1) + (m_selfScreenFrame.isNull() ? 0 : 1);
+	}
 
 	/// The surface accumulated for one of a sender's streams, or a null image if there is none. Exposed
 	/// so that the composition can be tested without going through a paint event.
@@ -95,12 +112,18 @@ public slots:
 	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
 							 unsigned int x, unsigned int y, const QByteArray &encodedTile);
 
-	/// Shows the local camera. Drawn first so your own picture does not move about as other people come
-	/// and go.
-	void setSelfFrame(const QImage &frame);
+	/// Shows your own camera in its own permanently reserved cell.
+	void setSelfCameraFrame(const QImage &frame);
 
-	/// Stops showing the local camera.
-	void clearSelfFrame();
+	/// Stops showing your own camera.
+	void clearSelfCameraFrame();
+
+	/// Shows your own screen share in its own permanently reserved cell - a separate one from your
+	/// camera's, so sharing both at once shows both, rather than the two fighting over one slot.
+	void setSelfScreenFrame(const QImage &frame);
+
+	/// Stops showing your own screen share.
+	void clearSelfScreenFrame();
 
 	/**
 	 * Records the codec and source kind a sender's stream carries, from its VideoState announcement.
@@ -149,6 +172,17 @@ signals:
 	/// The grid has no connection of its own, so acting on this is the owner's job.
 	void keyframeNeeded(unsigned int senderSession, unsigned int streamID);
 
+	/// The watch/unwatch button on a remote sender's tile was clicked. The grid has already updated its
+	/// own local rendering (blanking the tile to a placeholder, or restoring it); this is what the owner
+	/// uses to actually send the VideoSubscribe that makes the server start or stop relaying the stream -
+	/// unwatching is a subscription a listener can drop, not something that touches the sender at all.
+	void watchToggled(unsigned int senderSession, unsigned int streamID, bool wantToWatch);
+
+	/// The volume slider on a remote sender's screen-share tile moved. 0.0 is silent, 1.0 is unity gain -
+	/// the grid has no audio of its own to apply this to, so the owner is what forwards it to whichever
+	/// buffer is actually playing that sender's screen-share audio.
+	void volumeChanged(unsigned int senderSession, float multiplier);
+
 protected:
 	struct Surface {
 		QImage canvas;
@@ -178,6 +212,13 @@ protected:
 		bool awaitingKeyframe   = false;
 		int unitsWhileAwaiting  = 0;
 
+		/// True until the tile's own "unwatch" button is clicked. A unit arriving for a stream that is
+		/// not being watched is dropped unread - see onVideoUnitReceived() - both because there is
+		/// nothing to paint it into right now and because the server is expected to stop sending them
+		/// shortly after watchToggled(false) goes out; this is the defensive side of that, not the
+		/// mechanism itself.
+		bool watching = true;
+
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
 		std::unique_ptr< VP8Decoder > vp8;
@@ -189,6 +230,31 @@ protected:
 	static std::uint64_t surfaceKey(unsigned int senderSession, unsigned int streamID) {
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
 	}
+
+	/// The layout paintEvent() and hit-testing both need: how many drawable tiles there are right now and
+	/// which columns/rows they form a roughly-square arrangement out of. Shared so a click can never land
+	/// on a different cell than the same point was last painted into. Declared up here, ahead of its
+	/// first use below, rather than down with the rest of the layout helpers - a member function
+	/// declaration (unlike one defined inline) needs a nested type to already be visible at that point in
+	/// the class body, not merely somewhere else in it.
+	struct Layout {
+		int count      = 0;
+		int columns    = 0;
+		int rows       = 0;
+		int cellWidth  = 0;
+		int cellHeight = 0;
+	};
+
+	Layout currentLayout() const;
+
+	/// Which slot index (see Layout) a point falls in, or -1 if it is outside every cell - the margins
+	/// around a letterboxed picture, or simply past the last occupied cell in an incomplete row.
+	int slotAt(const QPoint &point, const Layout &layout) const;
+
+	/// The pixel rect of one slot in the given layout - shared by paintEvent()'s drawing and
+	/// relayoutControls()'s widget placement so a tile's picture and its own control bar can never
+	/// disagree about where the tile actually is.
+	static QRect cellRect(const Layout &layout, int slot);
 
 	// std::map, not QHash or std::unordered_map. QHash requires its values to be copyable, and a Surface
 	// owns its decoder through a unique_ptr, which makes it move-only. std::map over std::unordered_map
@@ -209,12 +275,14 @@ protected:
 	/// one of their streams.
 	std::unordered_map< unsigned int, QString > m_senderNames;
 
-	/// The local camera, kept apart from m_surfaces because it has no session and is always drawn first.
-	QImage m_selfFrame;
+	/// Your own camera and your own screen share, kept apart both from m_surfaces (they have no session)
+	/// and from each other (see the class comment for why they used to share one slot, and why that was
+	/// a bug worth fixing rather than a limitation worth documenting).
+	QImage m_selfCameraFrame;
+	QImage m_selfScreenFrame;
 
-	/// What, if anything, is expanded to fill the whole grid instead of taking its usual cell. Self is
-	/// tracked separately from Surface because it is not one - see m_selfFrame above.
-	enum class FocusTarget { None, Self, Surface };
+	/// What, if anything, is expanded to fill the whole grid instead of taking its usual cell.
+	enum class FocusTarget { None, SelfCamera, SelfScreen, Surface };
 
 	FocusTarget m_focus = FocusTarget::None;
 
@@ -223,12 +291,62 @@ protected:
 	/// it means anything right now.
 	std::uint64_t m_focusedSurfaceKey = 0;
 
+	/// The always-on control strip drawn across the bottom of a tile. One real QWidget (not hand-painted)
+	/// so its buttons and slider get ordinary click/drag handling for free; positioned by relayoutControls()
+	/// to sit at the bottom of whatever cell rect the tile currently occupies, which changes every time the
+	/// layout does. fullscreenButton exists on every tile, own or remote; watchButton and volumeSlider are
+	/// only ever non-null on a remote sender's tile, and volumeSlider only on one carrying a screen share.
+	struct TileControlBar {
+		QWidget *bar               = nullptr;
+		QToolButton *fullscreenButton = nullptr;
+		QToolButton *watchButton      = nullptr;
+		QSlider *volumeSlider          = nullptr;
+	};
+
+	/// Resets m_focus to None if whatever it currently points at no longer has anything to show - a
+	/// stream that ended, or one just unwatched from its own control bar. Called from both relayout() and
+	/// paintEvent(), so a bar's geometry and the picture actually painted can never disagree about
+	/// whether something is still focused.
+	void validateFocus();
+
+	std::unique_ptr< TileControlBar > m_ownCameraControls;
+	std::unique_ptr< TileControlBar > m_ownScreenControls;
+	std::map< std::uint64_t, std::unique_ptr< TileControlBar > > m_remoteControls;
+
+	/// Builds a bar with just a fullscreen button - what every own tile gets.
+	std::unique_ptr< TileControlBar > makeOwnControlBar(FocusTarget target);
+
+	/// Builds a bar with a fullscreen button, a watch/unwatch button, and - only when hasAudio - a volume
+	/// slider, wired to emit watchToggled()/volumeChanged() for the given (senderSession, streamID).
+	std::unique_ptr< TileControlBar > makeRemoteControlBar(unsigned int senderSession, unsigned int streamID,
+														   bool hasAudio);
+
+	/// Positions and shows or hides every control bar to match the tile currently occupying each cell -
+	/// creating bars for tiles that just gained one, destroying them for tiles that are gone, and moving
+	/// the rest to wherever the current layout puts their cell.
+	///
+	/// Deliberately never called from paintEvent(): creating or showing a QWidget can, in general, pump
+	/// enough of the event queue to re-enter painting on its parent - and doing that while this widget's
+	/// own QPainter is still alive is exactly the kind of reentrancy Qt's docs warn painting must never
+	/// risk. relayout() below is the single call site every state change goes through instead, precisely
+	/// so control-bar bookkeeping and repainting can never interleave.
+	void relayoutControls(const Layout &layout);
+
+	/// Recomputes the layout, brings every control bar in line with it, and schedules a repaint - the one
+	/// place "something changed, the grid may need to look different" goes through, called from every
+	/// slot and click handler that used to call update() directly, and from resizeEvent() below for a
+	/// plain window resize that does not otherwise change what update() would have repainted anyway.
+	void relayout();
+
 	void paintEvent(QPaintEvent *event) override;
+
+	void resizeEvent(QResizeEvent *event) override;
 
 	/// Toggles fullscreen on whichever tile is under the cursor: focuses it if nothing is focused, returns
 	/// to the grid if that same tile already is, or moves focus straight to the newly clicked one if a
 	/// different tile was focused. Matches the "double-click a tile to expand it, double-click again to
-	/// shrink it back" convention every other video call uses.
+	/// shrink it back" convention every other video call uses. The fullscreen button on each tile's control
+	/// bar does the same thing by the more discoverable route of an actual click target.
 	void mouseDoubleClickEvent(QMouseEvent *event) override;
 
 	/// Esc leaves fullscreen, the same key every other view in this application already uses to back out
@@ -248,23 +366,6 @@ protected:
 	/// Turns one unit's payload into an image using the codec the stream announced. Returns a null
 	/// image if the codec is unknown, unsupported, or the payload did not decode.
 	static QImage decodeUnit(Surface &surface, const QByteArray &payload);
-
-	/// The layout paintEvent() and hit-testing both need: how many drawable tiles there are right now and
-	/// which columns/rows they form a roughly-square arrangement out of. Shared so a click can never land
-	/// on a different cell than the same point was last painted into.
-	struct Layout {
-		int count      = 0;
-		int columns    = 0;
-		int rows       = 0;
-		int cellWidth  = 0;
-		int cellHeight = 0;
-	};
-
-	Layout currentLayout() const;
-
-	/// Which slot index (see Layout) a point falls in, or -1 if it is outside every cell - the margins
-	/// around a letterboxed picture, or simply past the last occupied cell in an incomplete row.
-	int slotAt(const QPoint &point, const Layout &layout) const;
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOGRID_H_

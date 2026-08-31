@@ -284,6 +284,10 @@ protected:
 	/// the sender disconnects and no per-stream end message will arrive.
 	void removeScreenShareAudioBuffersForSender(unsigned int senderSession);
 
+	/// Applies a per-tile volume slider's value to whichever screen-share audio buffer(s) belong to this
+	/// sender. Sender-keyed rather than stream-keyed, same reasoning as removeScreenShareAudioBuffersForSender.
+	void setScreenShareVolumeForSender(unsigned int senderSession, float multiplier);
+
 	static std::uint64_t screenShareAudioKey(unsigned int senderSession, unsigned int streamID) {
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;
 	}

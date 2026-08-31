@@ -35,6 +35,12 @@ public:
 	std::array< float, 3 > fPos = { 0.0, 0.0, 0.0 };
 	bool bStereo;
 	virtual bool prepareSampleBuffer(unsigned int snum) = 0;
+
+	/// Extra linear gain applied on top of everything else the mixer computes for this buffer - 1.0 is
+	/// unity, 0.0 is silent. Defaults to unity so every existing buffer type (voice, sample playback) is
+	/// unaffected without having to override this; AudioOutputScreenShare is the one type a listener can
+	/// actually adjust, through its own per-tile volume slider in the video grid.
+	virtual float volumeMultiplier() const { return 1.0f; }
 };
 
 #endif // AUDIOOUTPUTBUFFER_H_
