@@ -321,6 +321,23 @@ protected:
 		QToolButton *fullscreenButton = nullptr;
 		QToolButton *watchButton      = nullptr;
 		QSlider *volumeSlider          = nullptr;
+
+		/// bar owns fullscreenButton/watchButton/volumeSlider through Qt's own parent-child ownership - they
+		/// are all constructed with bar as their parent - but bar itself is a plain QWidget*, not something
+		/// Qt destroys on its own just because this struct goes away. Without this, every place a
+		/// TileControlBar is destroyed (relayoutControls() dropping a bar for a stream that ended,
+		/// m_ownCameraControls/m_ownScreenControls.reset(), clear() on disconnect) orphaned the widget
+		/// instead: still alive, still parented to VideoGrid, still fully wired to its signal/slot
+		/// connections, just no longer tracked or positioned by anything - a real, unbounded leak across a
+		/// session with any amount of stream churn. deleteLater() rather than a direct delete: this runs
+		/// from inside relayoutControls(), reachable from a bar's own button's clicked() handler by way of
+		/// setWatching(), and a widget must never be deleted out from under an event still being delivered
+		/// to it.
+		~TileControlBar() {
+			if (bar) {
+				bar->deleteLater();
+			}
+		}
 	};
 
 	/// Resets m_focus to None if whatever it currently points at no longer has anything to show - a
@@ -340,6 +357,22 @@ protected:
 	bool m_mouseInside = false;
 	QPoint m_lastMousePos;
 	QWidget *m_fullscreenWindow = nullptr;
+
+	/// The slot index (see Layout) updateHoveredBar() last actually showed a bar for, or -1 if none.
+	/// mouseMoveEvent() checks this before calling updateHoveredBar() at all: Qt delivers a move event for
+	/// every pixel the cursor crosses while gliding across the grid, far more often than the hovered tile
+	/// actually changes, and redoing every bar's show/hide on each one is a real, measurable amount of
+	/// wasted widget churn for something that produces no visible difference most of the time it runs.
+	int m_hoveredSlot = -1;
+
+	/// Set for the duration of a relayout() call, and checked at its own start: several paths reach here
+	/// synchronously from inside another relayout() already in progress - most notably, the video dock
+	/// becoming visible for the first time can synchronously fire this widget's own resizeEvent() before
+	/// the relayout() that triggered it has returned. relayoutControls() creates and destroys real
+	/// QWidgets; letting two passes of it interleave is exactly the kind of Qt reentrancy that already
+	/// caused two access violations earlier in this class's history. The in-progress pass already reflects
+	/// whatever state change asked for the nested one, so skipping the nested call loses nothing.
+	bool m_relayoutInProgress = false;
 
 	/// Builds a bar with just a fullscreen button - what every own tile gets.
 	std::unique_ptr< TileControlBar > makeOwnControlBar(FocusTarget target);

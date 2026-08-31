@@ -785,11 +785,14 @@ void VideoGrid::updateHoveredBar() {
 	}
 
 	if (!m_mouseInside) {
+		m_hoveredSlot = -1;
 		return;
 	}
 
 	const Layout layout = currentLayout();
 	const int slot       = slotAt(m_lastMousePos, layout);
+
+	m_hoveredSlot = slot;
 
 	if (slot < 0) {
 		return;
@@ -921,11 +924,21 @@ void VideoGrid::validateFocus() {
 }
 
 void VideoGrid::relayout() {
+	if (m_relayoutInProgress) {
+		// Already running, somewhere further down this same call stack - see m_relayoutInProgress. That
+		// pass will see whatever change asked for this one by the time it gets there.
+		return;
+	}
+
+	m_relayoutInProgress = true;
+
 	validateFocus();
 	relayoutControls(currentLayout());
 	updateHoveredBar();
 	updateFullscreenWindow();
 	update();
+
+	m_relayoutInProgress = false;
 }
 
 void VideoGrid::resizeEvent(QResizeEvent *event) {
@@ -1115,9 +1128,19 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 }
 
 void VideoGrid::mouseMoveEvent(QMouseEvent *event) {
-	m_mouseInside  = true;
-	m_lastMousePos = event->pos();
-	updateHoveredBar();
+	m_mouseInside = true;
+
+	const QPoint pos    = event->pos();
+	const Layout layout = currentLayout();
+
+	m_lastMousePos = pos;
+
+	// See m_hoveredSlot: only actually redo the show/hide work when the cursor has crossed into a
+	// different tile, not on every one of the many move events Qt delivers while it is simply gliding
+	// across the one it is already over.
+	if (slotAt(pos, layout) != m_hoveredSlot) {
+		updateHoveredBar();
+	}
 
 	QWidget::mouseMoveEvent(event);
 }
