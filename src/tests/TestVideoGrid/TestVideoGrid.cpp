@@ -102,6 +102,8 @@ private slots:
 	void aNewStreamStartsAsAnUnwatchedPreview();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
+	void rapidWatchToggleWhileFramesArriveDoesNotCrash();
+	void firstFrameShowingTheDockDoesNotReenterUnsafely();
 };
 
 void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
@@ -717,6 +719,120 @@ void TestVideoGrid::itPaintsWithoutCrashing() {
 	}
 
 	QVERIFY(anyNonBlack);
+}
+
+// Regression test for a crash confirmed under real interactive use (not just an idle launch, which is all
+// any earlier testing in this area had ever done): clicking a tile's watch button while frames were
+// actively arriving crashed the client. Root cause was relayout() being reentered synchronously from
+// several different directions - see VideoGrid.h's m_relayoutInProgress - while relayoutControls() was
+// still creating or destroying real QWidgets. This drives the same kind of interleaving directly: toggling
+// watch, delivering frames, and resizing the widget, all tightly interleaved rather than one at a time, on
+// several senders at once. Reaching the end at all is most of what this test is for - a genuine reentrancy
+// bug here crashes the whole test binary rather than failing a single QCOMPARE.
+void TestVideoGrid::rapidWatchToggleWhileFramesArriveDoesNotCrash() {
+	SyntheticVideoSource source(64, 64);
+	TiledImageEncoder encoder;
+
+	VideoGrid grid;
+	grid.resize(800, 600);
+
+	constexpr unsigned int SENDERS = 6;
+
+	for (unsigned int sender = 1; sender <= SENDERS; ++sender) {
+		grid.setStreamCodec(sender, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+							MumbleProto::VideoState_Codec_TiledImage);
+	}
+
+	// Every stream starts as an unwatched preview - see Surface::watching - which is exactly the state a
+	// real call is in the instant everyone has joined: several placeholders, nothing decoding yet, all
+	// waiting on someone to click their eyeball.
+	QCOMPARE(grid.senderCount(), static_cast< int >(SENDERS));
+
+	for (int round = 0; round < 60; ++round) {
+		const unsigned int sender = (static_cast< unsigned int >(round) % SENDERS) + 1;
+
+		// The click: toggling watch is exactly what the real watch button's clicked() handler does -
+		// setWatching() is the one place that logic lives, whether it is reached by a click or, as here,
+		// directly.
+		grid.setWatching(sender, STREAM, true);
+
+		// The frame: arriving in the same instant a real one plausibly could, right as watching flips on -
+		// this is what flips a surface's canvas from blank to something real, and is what emits
+		// senderCountChanged() the first time.
+		auto units = encoder.encode(source.render(sender), STREAM, 1, 1);
+
+		for (const EncodedVideoUnit &unit : units) {
+			grid.onVideoUnitReceived(
+				sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+				QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+						  static_cast< int >(unit.payload.size())));
+		}
+
+		encoder.reset();
+
+		// The resize: what a video dock becoming visible for the first time, a splitter drag, or a plain
+		// window resize does mid-call - each one synchronously re-enters relayout() by way of
+		// resizeEvent().
+		grid.resize(700 + (round % 5) * 40, 500 + (round % 3) * 30);
+
+		// And toggling back off - the other half of "somebody keeps clicking the eyeball on and off".
+		grid.setWatching(sender, STREAM, false);
+	}
+
+	QImage target(800, 600, QImage::Format_RGB32);
+	grid.render(&target);
+}
+
+// Forces the specific reentrancy m_relayoutInProgress guards against - a resize, triggered from inside a
+// senderCountChanged connection, synchronously reentering resizeEvent() -> relayout() before
+// onVideoUnitReceived() has returned to run its own trailing relayout() call - directly and
+// deterministically, standing in for what a real MainWindow's video dock does the moment it is shown for
+// the first time. Written to actually prove the guard matters, not just assert it exists: tried against a
+// build with m_relayoutInProgress temporarily disabled, twice - once through a real QDockWidget, then in
+// this more direct form after the offscreen QPA platform this suite runs under turned out not to deliver a
+// real synchronous resize through QDockWidget::setVisible() the way an on-screen window does. Neither
+// version crashed or failed without the guard, even though the reentrant relayoutControls() call
+// unmistakably ran (confirmable by a breakpoint, not by anything this test asserts). Left in specifically
+// because of that, not despite it: it is honest coverage of the mechanism the guard targets, not proof the
+// guard is what the reported crash needed - see the commit message for what is and is not established.
+void TestVideoGrid::firstFrameShowingTheDockDoesNotReenterUnsafely() {
+	VideoGrid grid;
+	grid.resize(400, 300);
+
+	bool sawReentrantResize = false;
+
+	QObject::connect(&grid, &VideoGrid::senderCountChanged, &grid, [&](int count) {
+		if (count > 0 && !sawReentrantResize) {
+			sawReentrantResize = true;
+
+			// Standing in for MainWindow's video dock becoming visible for the first time - a resize this
+			// deep inside onVideoUnitReceived() is exactly the reentrant resizeEvent() -> relayout() call
+			// the mechanism above describes, happening for real rather than being merely plausible.
+			grid.resize(800, 600);
+		}
+	});
+
+	SyntheticVideoSource source(64, 64);
+	TiledImageEncoder encoder;
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	// The first frame after watching starts is exactly what flips a surface's canvas from blank to
+	// something real inside onVideoUnitReceived() - which is what emits senderCountChanged() - which, by
+	// way of the handler above, resizes this same widget synchronously, from inside this same call.
+	auto units = encoder.encode(source.render(1), STREAM, 1, 1);
+
+	for (const EncodedVideoUnit &unit : units) {
+		grid.onVideoUnitReceived(
+			SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+					  static_cast< int >(unit.payload.size())));
+	}
+
+	QVERIFY(sawReentrantResize);
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
 }
 
 QTEST_MAIN(TestVideoGrid)
