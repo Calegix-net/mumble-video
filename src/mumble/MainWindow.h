@@ -219,6 +219,14 @@ protected:
 
 	static constexpr int stateVersion();
 
+	/// Snapshot of the dock/toolbar layout - saveState()'s output, not saveGeometry()'s - taken the
+	/// instant the window starts minimizing and reapplied the instant it finishes restoring. On Windows,
+	/// QMainWindow's dock area layout has a known habit of recomputing splitter proportions by size hint
+	/// across a minimize/restore round trip rather than preserving the exact pixel split a user last
+	/// dragged a splitter to; this puts it back afterward rather than leaving whatever that round trip
+	/// produced. See changeEvent()'s WindowStateChange handling.
+	QByteArray m_preMinimizeDockState;
+
 	void createActions();
 	void setupGui();
 

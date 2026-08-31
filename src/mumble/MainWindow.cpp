@@ -1479,9 +1479,23 @@ void MainWindow::changeEvent(QEvent *e) {
 		if (windowStateEvent) {
 			bool wasMinimizedState = (windowStateEvent->oldState() & Qt::WindowMinimized);
 			bool isMinimizedState  = (windowState() & Qt::WindowMinimized);
+
 			if (!wasMinimizedState && isMinimizedState) {
+				// Captured right now, while the layout is still whatever the user actually left it as -
+				// see m_preMinimizeDockState - before Qt's own minimize/restore round trip gets a chance
+				// to touch it.
+				m_preMinimizeDockState = saveState(stateVersion());
+
 				emit windowMinimized();
+			} else if (wasMinimizedState && !isMinimizedState && !m_preMinimizeDockState.isEmpty()) {
+				// Restored - put the dock/toolbar layout back exactly as it was a moment ago, overwriting
+				// whatever Qt's own restore-from-minimized did to splitter proportions. Deliberately just
+				// restoreState(), not the full loadState()/storeState() pair used for cross-session
+				// persistence: those also touch window geometry and Settings-backed disk state, neither
+				// of which this in-session round trip has any business writing to.
+				restoreState(m_preMinimizeDockState, stateVersion());
 			}
+
 			return;
 		}
 	}

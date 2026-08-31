@@ -19,6 +19,7 @@
 #include <memory>
 #include <unordered_map>
 
+class QEnterEvent;
 class QKeyEvent;
 class QMouseEvent;
 class QResizeEvent;
@@ -49,12 +50,18 @@ class QToolButton;
  * Your own camera and your own screen share each get a permanently reserved cell of their own - see
  * m_selfCameraFrame/m_selfScreenFrame - so that another participant's stream starting, stopping or being
  * re-announced can never so much as move your own tile, let alone hide it. Every other tile carries a
- * small always-on control strip: a fullscreen toggle on every tile, and, on a remote sender's tile, a
- * watch/unwatch toggle and - for a screen share specifically, which is the only kind of stream with audio
- * of its own - a volume slider. Unwatching a stream unsubscribes from it over the network (the sender
- * keeps broadcasting to everyone else) and leaves a compact placeholder in its cell with a way back in,
- * rather than removing the tile and its cell outright, which would just be this class's own reshuffling
- * bug by another name.
+ * small hover-reveal control strip: a fullscreen toggle on every tile, and, on a remote sender's tile, an
+ * eyeball watch/unwatch toggle and - for a screen share specifically, which is the only kind of stream
+ * with audio of its own - a volume slider.
+ *
+ * A remote stream starts out unwatched: announced, it claims its cell and shows a greyed-out preview
+ * placeholder immediately, but nothing is actually decoded - and nothing is even asked of the server -
+ * until its eyeball is clicked (or its placeholder double-clicked, the same thing by the more discoverable
+ * route every other tile's double-click already means). This is what keeps many people sharing at once
+ * affordable: the cost of decoding a stream is only ever paid for the ones somebody actually chose to
+ * watch. Watching a stream and then choosing to stop unsubscribes from it over the network (the sender
+ * keeps broadcasting to everyone else) and returns its cell to the same placeholder, rather than removing
+ * the tile and its cell outright, which would just be this class's own reshuffling bug by another name.
  */
 class VideoGrid : public QWidget {
 	Q_OBJECT
@@ -80,12 +87,12 @@ public:
 
 	explicit VideoGrid(QWidget *parent = nullptr);
 
-	/// Number of other participants' tiles currently drawable - one per stream that has decoded at least
-	/// one picture, not one per person, since a sender may hold more than one stream (a camera and a
-	/// screen, say). A surface exists from its stream's announcement onward, but one with nothing decoded
-	/// into it yet occupies no cell and must not reserve one, or the grid lays out around an empty
-	/// square. Unwatching a stream afterwards does not give its cell back - see the class comment - so
-	/// this does not change when a tile is unwatched, only when it is removed outright.
+	/// Number of other participants' tiles currently drawable - one per stream, not one per person, since
+	/// a sender may hold more than one stream (a camera and a screen, say). A stream not being watched
+	/// occupies its cell the moment it is announced, showing a preview placeholder there - it does not
+	/// wait on a canvas that, unwatched, will never fill. A stream still being watched but genuinely blank
+	/// - announced, but its first tile has not arrived yet - occupies no cell and must not reserve one, or
+	/// the grid lays out around an empty square.
 	int senderCount() const;
 
 	/// Everything drawn, including your own camera and your own screen share. This is what decides
@@ -128,13 +135,24 @@ public slots:
 	/**
 	 * Records the codec and source kind a sender's stream carries, from its VideoState announcement.
 	 *
-	 * Must arrive before the stream's units do, which the protocol guarantees: the announcement is what
-	 * causes a receiver to subscribe, and the server relays nothing until it has.
+	 * A stream this grid has not seen before claims a cell right away, as an unwatched preview - see
+	 * Surface::watching - rather than being subscribed to and decoded immediately.
 	 *
 	 * @param sourceKind A MumbleProto::VideoState::SourceKind value, used only to label the tile.
 	 * @param codec A MumbleProto::VideoState::Codec value.
 	 */
 	void setStreamCodec(unsigned int senderSession, unsigned int streamID, int sourceKind, int codec);
+
+	/**
+	 * Marks one of a sender's streams as watched or not - exactly what clicking its tile's own eyeball
+	 * button, or double-clicking its preview placeholder, does. Exposed as its own slot rather than left
+	 * as private lambda logic on those two controls, both so the two do not each carry their own copy of
+	 * it and so it can be driven directly - by a test, or in principle by anything else that learns a
+	 * subscription's state changed by some route other than a click.
+	 *
+	 * Does nothing if the sender holds no such stream, or is already in the requested state.
+	 */
+	void setWatching(unsigned int senderSession, unsigned int streamID, bool watching);
 
 	/**
 	 * Sets the name drawn on a sender's tile.
@@ -212,12 +230,14 @@ protected:
 		bool awaitingKeyframe   = false;
 		int unitsWhileAwaiting  = 0;
 
-		/// True until the tile's own "unwatch" button is clicked. A unit arriving for a stream that is
-		/// not being watched is dropped unread - see onVideoUnitReceived() - both because there is
-		/// nothing to paint it into right now and because the server is expected to stop sending them
-		/// shortly after watchToggled(false) goes out; this is the defensive side of that, not the
-		/// mechanism itself.
-		bool watching = true;
+		/// False for a brand new stream - it starts as a greyed-out preview, and only actually decodes
+		/// once its tile's eyeball is clicked - and left alone by whatever an existing surface's stream id
+		/// changing under it resets, so a resolution or codec change mid-share does not silently revert a
+		/// choice the user already made either way. A unit arriving for a stream that is not being watched
+		/// is dropped unread - see onVideoUnitReceived() - both because there is nothing to paint it into
+		/// right now and because the server is expected to stop sending them shortly after
+		/// watchToggled(false) goes out; this is the defensive side of that, not the mechanism itself.
+		bool watching = false;
 
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
@@ -313,6 +333,14 @@ protected:
 	std::unique_ptr< TileControlBar > m_ownScreenControls;
 	std::map< std::uint64_t, std::unique_ptr< TileControlBar > > m_remoteControls;
 
+	/// Whether the cursor is currently over this widget at all, and where - see updateHoveredBar(). A
+	/// plain QWidget*, not a smart pointer to a locally-defined type: FullscreenVideoWindow is declared in
+	/// VideoGrid.cpp, not here, and it is parented to this widget, so Qt's own parent/child ownership is
+	/// what actually destroys it - this pointer never has to.
+	bool m_mouseInside = false;
+	QPoint m_lastMousePos;
+	QWidget *m_fullscreenWindow = nullptr;
+
 	/// Builds a bar with just a fullscreen button - what every own tile gets.
 	std::unique_ptr< TileControlBar > makeOwnControlBar(FocusTarget target);
 
@@ -321,9 +349,10 @@ protected:
 	std::unique_ptr< TileControlBar > makeRemoteControlBar(unsigned int senderSession, unsigned int streamID,
 														   bool hasAudio);
 
-	/// Positions and shows or hides every control bar to match the tile currently occupying each cell -
-	/// creating bars for tiles that just gained one, destroying them for tiles that are gone, and moving
-	/// the rest to wherever the current layout puts their cell.
+	/// Positions every control bar to match the tile currently occupying each cell - creating bars for
+	/// tiles that just gained one, destroying them for tiles that are gone, and moving the rest to
+	/// wherever the current layout puts their cell. Bars are positioned but left hidden here; whether one
+	/// is actually visible is entirely updateHoveredBar()'s job, called right after this by relayout().
 	///
 	/// Deliberately never called from paintEvent(): creating or showing a QWidget can, in general, pump
 	/// enough of the event queue to re-enter painting on its parent - and doing that while this widget's
@@ -332,15 +361,39 @@ protected:
 	/// so control-bar bookkeeping and repainting can never interleave.
 	void relayoutControls(const Layout &layout);
 
-	/// Recomputes the layout, brings every control bar in line with it, and schedules a repaint - the one
-	/// place "something changed, the grid may need to look different" goes through, called from every
-	/// slot and click handler that used to call update() directly, and from resizeEvent() below for a
-	/// plain window resize that does not otherwise change what update() would have repainted anyway.
+	/// Shows the control bar for whichever tile the cursor is currently over, and hides every other one -
+	/// bars are hover-reveal, not always-on, so a tile's picture is not permanently sitting under a
+	/// translucent strip nobody is interacting with. Uses m_mouseInside/m_lastMousePos rather than an
+	/// event's own position, since this also has to re-run whenever the layout changes under a stationary
+	/// cursor - a tile appearing or disappearing elsewhere can move the cell the cursor is already over.
+	void updateHoveredBar();
+
+	/// Builds and (still hidden) positions the picture-in-picture window a fullscreened tile is actually
+	/// shown in - see FullscreenVideoWindow's own comment for why the grid does not simply fill itself the
+	/// way an early version did. Shows, updates, or hides that window to match m_focus, called from
+	/// relayout() so it can never fall out of sync with which tile paintEvent() and the control bars agree
+	/// is focused.
+	void updateFullscreenWindow();
+
+	/// The name and, for anything other than a camera, the kind of stream a tile is showing - "Screen",
+	/// "Window", "App" - shared between paintEvent()'s labels and the fullscreen window's, so the two
+	/// never describe the same tile differently.
+	QString labelForSurface(const Surface &surface) const;
+
+	/// Recomputes the layout, brings every control bar and the fullscreen window in line with it, and
+	/// schedules a repaint - the one place "something changed, the grid may need to look different" goes
+	/// through, called from every slot and click handler that used to call update() directly, and from
+	/// resizeEvent() below for a plain window resize that does not otherwise change what update() would
+	/// have repainted anyway.
 	void relayout();
 
 	void paintEvent(QPaintEvent *event) override;
 
 	void resizeEvent(QResizeEvent *event) override;
+
+	void mouseMoveEvent(QMouseEvent *event) override;
+	void enterEvent(QEnterEvent *event) override;
+	void leaveEvent(QEvent *event) override;
 
 	/// Toggles fullscreen on whichever tile is under the cursor: focuses it if nothing is focused, returns
 	/// to the grid if that same tile already is, or moves focus straight to the newly clicked one if a

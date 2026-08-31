@@ -1383,6 +1383,15 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		m_videoStreamDispatcher->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.codec()));
 	}
 
+	// A picture stream starts as a preview - VideoGrid shows a greyed placeholder and this side does not
+	// ask to actually receive it until the eyeball button is clicked (VideoGrid::watchToggled, wired in
+	// setupVideoGrid()), matching the "click to watch" flow. Audio is not gated the same way: screen-share
+	// audio only ever exists as a second stream on a sender whose picture is already in the grid, and
+	// holding it back the same way would mean muting a stream the UI offers no control to un-mute.
+	if (msg.codec() != MumbleProto::VideoState_Codec_OpusAudio) {
+		return;
+	}
+
 	MumbleProto::VideoSubscribe mpvs;
 	mpvs.set_session(msg.session());
 	mpvs.set_stream_id(msg.stream_id());

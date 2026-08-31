@@ -28,12 +28,16 @@ namespace {
 constexpr unsigned int SENDER = 5;
 constexpr unsigned int STREAM = 1;
 
-/// Announces a stream, as the VideoState message does. Nothing is decoded without this: the payload
-/// never says which codec produced it, so an unannounced stream has no decoder to hand it to.
+/// Announces a stream, as the VideoState message does, and marks it watched. Nothing is decoded without
+/// the announcement: the payload never says which codec produced it, so an unannounced stream has no
+/// decoder to hand it to. A newly announced stream also starts out an unwatched preview - see
+/// Surface::watching - so this additionally opts it in, matching what every test in this file other than
+/// the ones about the preview state itself actually wants: units delivered right after this decode.
 void announce(VideoGrid &grid, unsigned int sender, unsigned int stream,
 			  int codec = MumbleProto::VideoState_Codec_TiledImage,
 			  int sourceKind = MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN) {
 	grid.setStreamCodec(sender, stream, sourceKind, codec);
+	grid.setWatching(sender, stream, true);
 }
 
 /// Feeds every tile of one encoded frame into the grid, as the network path would.
@@ -95,6 +99,7 @@ private slots:
 	void decodeResumesAtTheNextKeyframe();
 	void aStaleVp8FrameArrivingLateIsDropped();
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
+	void aNewStreamStartsAsAnUnwatchedPreview();
 	void nonJpegDataIsRefused();
 	void itPaintsWithoutCrashing();
 };
@@ -502,12 +507,64 @@ void TestVideoGrid::anAnnouncedButBlankStreamPaintsWithoutCrashing() {
 	VideoGrid grid;
 	grid.resize(320, 240);
 
-	announce(grid, SENDER, STREAM);
+	// The raw announcement, not the announce() helper: this test wants the real just-announced state,
+	// still an unwatched preview, not the helper's "and mark it watched" convenience for every other test
+	// in this file.
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
 
-	QCOMPARE(grid.senderCount(), 0);
+	// Unwatched from the moment it is announced, so it already occupies a cell as a preview placeholder -
+	// it does not wait on a canvas that, unwatched, will never fill.
+	QCOMPARE(grid.senderCount(), 1);
 
 	QImage target(320, 240, QImage::Format_RGB32);
 	grid.render(&target);
+
+	// Watching it before any tile has actually arrived is the other blank case worth covering: genuinely
+	// nothing decoded yet, not a placeholder by choice. This must not divide by a zero-tile layout either.
+	grid.setWatching(SENDER, STREAM, true);
+	QCOMPARE(grid.senderCount(), 0);
+
+	grid.render(&target);
+}
+
+// The eyeball-preview feature itself: a stream nobody has opted into watching yet must not be decoded -
+// the whole point is to not pay for a picture nobody asked to see - but must still show something, or a
+// screen full of people sharing would look like nothing was happening at all.
+void TestVideoGrid::aNewStreamStartsAsAnUnwatchedPreview() {
+	VideoGrid grid;
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	// Announced directly, not through the announce() helper, since the helper's whole job is to opt every
+	// other test in this file out of exactly the state this one exists to check.
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+
+	// Claims its cell immediately, as a preview - but nothing is decoded into it.
+	QCOMPARE(grid.senderCount(), 1);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// A tile arriving before anyone opted in is dropped, not queued - see onVideoUnitReceived().
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// Clicking the eyeball (setWatching) is what actually starts decoding.
+	grid.setWatching(SENDER, STREAM, true);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(32, 32));
+
+	// Un-watching again leaves the last picture in place rather than clearing it - paintEvent() falls back
+	// to the placeholder instead of painting it, but it is still there if watching resumes.
+	grid.setWatching(SENDER, STREAM, false);
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
 }
 
 // Every tile except your own went unlabelled, because the paint code had a name for the self view and

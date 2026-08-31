@@ -7,6 +7,7 @@
 
 #include "Mumble.pb.h"
 
+#include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
@@ -17,6 +18,81 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+
+namespace {
+
+/**
+ * The picture-in-picture window a fullscreened tile is actually shown in - a genuine top-level,
+ * showFullScreen()'d window covering the whole monitor, not VideoGrid filling its own (dock-sized, not
+ * screen-sized) rect the way an early version did. That approach could never fill more than whatever room
+ * the video dock happened to have, which on any window smaller than the monitor is not "fullscreen" by
+ * any definition a user watching, say, someone else's gameplay would recognise.
+ *
+ * Deliberately dumb: it owns no state of its own beyond what setContent() was last called with, and reacts
+ * to Esc or a double-click by asking its owner to leave fullscreen rather than closing itself - m_focus is
+ * the single source of truth for what is fullscreened, in VideoGrid, and this window is just one of the
+ * things relayout() brings into line with it.
+ */
+class FullscreenVideoWindow : public QWidget {
+public:
+	explicit FullscreenVideoWindow(VideoGrid *owner) : QWidget(owner, Qt::Window), m_owner(owner) {
+		setWindowTitle(tr("Mumble"));
+
+		QPalette pal = palette();
+		pal.setColor(QPalette::Window, Qt::black);
+		setPalette(pal);
+		setAutoFillBackground(true);
+	}
+
+	void setContent(const QImage &image, const QString &label) {
+		m_image = image;
+		m_label = label;
+		update();
+	}
+
+protected:
+	void paintEvent(QPaintEvent *) override {
+		QPainter painter(this);
+		painter.fillRect(rect(), Qt::black);
+
+		if (!m_image.isNull()) {
+			const QSize scaled = m_image.size().scaled(size(), Qt::KeepAspectRatio);
+			const QRect target((width() - scaled.width()) / 2, (height() - scaled.height()) / 2, scaled.width(),
+							   scaled.height());
+
+			painter.drawImage(target, m_image);
+		}
+
+		const QRect margin = rect().adjusted(16, 12, -16, -12);
+
+		if (!m_label.isEmpty()) {
+			painter.setPen(Qt::white);
+			painter.drawText(margin, Qt::AlignTop | Qt::AlignLeft, m_label);
+		}
+
+		painter.setPen(QColor(200, 200, 200));
+		painter.drawText(margin, Qt::AlignBottom | Qt::AlignRight, tr("Esc or double-click to exit fullscreen"));
+	}
+
+	void keyPressEvent(QKeyEvent *event) override {
+		if (event->key() == Qt::Key_Escape) {
+			m_owner->clearFocusedTile();
+
+			return;
+		}
+
+		QWidget::keyPressEvent(event);
+	}
+
+	void mouseDoubleClickEvent(QMouseEvent *) override { m_owner->clearFocusedTile(); }
+
+private:
+	VideoGrid *m_owner;
+	QImage m_image;
+	QString m_label;
+};
+
+} // namespace
 
 VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setAutoFillBackground(true);
@@ -30,6 +106,10 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	// actually holds keyboard focus, and a click is the only way a user has told it they mean to interact
 	// with a particular tile rather than whatever else is on screen.
 	setFocusPolicy(Qt::StrongFocus);
+
+	// Without this, mouseMoveEvent() only fires while a button is held down, which would make hover-reveal
+	// controls require a click-and-hold to even discover. updateHoveredBar() is what actually uses it.
+	setMouseTracking(true);
 }
 
 QSize VideoGrid::sizeHint() const {
@@ -40,7 +120,9 @@ int VideoGrid::senderCount() const {
 	int count = 0;
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (!it->second.canvas.isNull()) {
+		// A surface not being watched occupies a slot the moment it is announced - it shows a preview
+		// placeholder immediately, it does not wait on a canvas that opting out means will never fill.
+		if (!it->second.watching || !it->second.canvas.isNull()) {
 			++count;
 		}
 	}
@@ -169,8 +251,9 @@ QString VideoGrid::senderName(unsigned int senderSession) const {
 
 void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int sourceKind, int codec) {
 	const std::uint64_t key = surfaceKey(senderSession, streamID);
+	const bool isNewSurface = m_surfaces.find(key) == m_surfaces.end();
 
-	if (m_surfaces.find(key) == m_surfaces.end()) {
+	if (isNewSurface) {
 		bool senderAlreadyPresent = false;
 
 		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend();) {
@@ -203,9 +286,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 
 	// A codec or source-kind announcement for a stream id already in use replaces it wholesale: a stream
 	// id changes whenever the codec, source or dimensions do, so nothing about the old content carries
-	// over - least of all a decoder holding reference frames from different content. A fresh (or
-	// effectively fresh) stream also starts out watched: whatever the user chose about the old content
-	// this stream id used to carry does not bind the new content it carries now.
+	// over - least of all a decoder holding reference frames from different content.
 	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.canvas = QImage();
 		surface.vp8.reset();
@@ -213,13 +294,40 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		surface.hasDecodedFrame    = false;
 		surface.awaitingKeyframe   = false;
 		surface.unitsWhileAwaiting = 0;
-		surface.watching           = true;
+	}
+
+	if (isNewSurface) {
+		// Brand new: starts as a greyed-out preview, not auto-watched - the person has to click the
+		// eyeball to actually decode it. A surface that already existed and is only transitioning to a
+		// new stream id (its sender's resolution or codec changed mid-share) leaves watching exactly as
+		// the user last set it instead: someone already watching stays watching through the change,
+		// and someone who opted out stays out.
+		surface.watching = false;
 	}
 
 	surface.senderSession = senderSession;
 	surface.streamID      = streamID;
 	surface.codec         = codec;
 	surface.sourceKind    = sourceKind;
+}
+
+void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, bool watching) {
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+
+	if (it == m_surfaces.end() || it->second.watching == watching) {
+		return;
+	}
+
+	it->second.watching = watching;
+
+	if (!watching && m_focus == FocusTarget::Surface && m_focusedSurfaceKey == it->first) {
+		// Un-fullscreen whatever was just told to stop being watched, rather than leaving a placeholder
+		// filling the whole grid.
+		m_focus = FocusTarget::None;
+	}
+
+	emit watchToggled(senderSession, streamID, watching);
+	relayout();
 }
 
 void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
@@ -576,17 +684,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 			return;
 		}
 
-		const bool wantToWatch = !it->second.watching;
-		it->second.watching    = wantToWatch;
-
-		if (!wantToWatch && m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
-			// Un-fullscreen whatever was just told to stop being watched, rather than leaving a
-			// placeholder filling the whole grid.
-			m_focus = FocusTarget::None;
-		}
-
-		emit watchToggled(senderSession, streamID, wantToWatch);
-		relayout();
+		setWatching(senderSession, streamID, !it->second.watching);
 	});
 
 	controls->bar->show();
@@ -597,43 +695,9 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 void VideoGrid::relayoutControls(const Layout &layout) {
 	constexpr int BAR_HEIGHT = 28;
 
-	if (m_focus != FocusTarget::None) {
-		// Fullscreen: every bar but the focused tile's own is hidden, not destroyed - a bar is cheap to
-		// keep around and this avoids rebuilding (and losing the user's slider position) every time
-		// someone fullscreens, then un-fullscreens, a tile.
-		if (m_ownCameraControls) {
-			m_ownCameraControls->bar->setVisible(m_focus == FocusTarget::SelfCamera);
-		}
-
-		if (m_ownScreenControls) {
-			m_ownScreenControls->bar->setVisible(m_focus == FocusTarget::SelfScreen);
-		}
-
-		for (auto &entry : m_remoteControls) {
-			entry.second->bar->setVisible(m_focus == FocusTarget::Surface && entry.first == m_focusedSurfaceKey);
-		}
-
-		QWidget *activeBar = nullptr;
-
-		if (m_focus == FocusTarget::SelfCamera && m_ownCameraControls) {
-			activeBar = m_ownCameraControls->bar;
-		} else if (m_focus == FocusTarget::SelfScreen && m_ownScreenControls) {
-			activeBar = m_ownScreenControls->bar;
-		} else if (m_focus == FocusTarget::Surface) {
-			const auto it = m_remoteControls.find(m_focusedSurfaceKey);
-
-			if (it != m_remoteControls.end()) {
-				activeBar = it->second->bar;
-			}
-		}
-
-		if (activeBar) {
-			activeBar->setGeometry(0, height() - BAR_HEIGHT, width(), BAR_HEIGHT);
-			activeBar->raise();
-		}
-
-		return;
-	}
+	// The grid always shows its normal multi-tile layout now, fullscreen or not - see the class comment
+	// on FullscreenVideoWindow for why a focused tile no longer makes paintEvent() fill the whole widget
+	// with just that one picture. So there is only ever one layout to position bars against here.
 
 	int index = 0;
 
@@ -643,7 +707,6 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 		}
 
 		const QRect cell = cellRect(layout, index++);
-		m_ownCameraControls->bar->setVisible(true);
 		m_ownCameraControls->bar->setGeometry(cell.x(), cell.bottom() - BAR_HEIGHT + 1, cell.width(), BAR_HEIGHT);
 		m_ownCameraControls->bar->raise();
 	} else {
@@ -656,7 +719,6 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 		}
 
 		const QRect cell = cellRect(layout, index++);
-		m_ownScreenControls->bar->setVisible(true);
 		m_ownScreenControls->bar->setGeometry(cell.x(), cell.bottom() - BAR_HEIGHT + 1, cell.width(), BAR_HEIGHT);
 		m_ownScreenControls->bar->raise();
 	} else {
@@ -677,7 +739,10 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 	for (auto &entry : m_surfaces) {
 		const Surface &surface = entry.second;
 
-		if (surface.canvas.isNull()) {
+		// Unwatched-but-blank is exactly the preview state, not a slot to skip - it is watched-but-blank
+		// (announced, watching just requested, first frame not decoded yet) that is the brief race worth
+		// skipping a bar for.
+		if (surface.watching && surface.canvas.isNull()) {
 			continue;
 		}
 
@@ -694,14 +759,147 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 		TileControlBar &controls = *controlsIt->second;
 
 		if (controls.watchButton) {
-			controls.watchButton->setText(surface.watching ? QStringLiteral("✕") : QStringLiteral("▶"));
+			controls.watchButton->setText(surface.watching ? QStringLiteral("✕") : QStringLiteral("👁"));
 			controls.watchButton->setToolTip(surface.watching ? tr("Stop watching") : tr("Watch"));
 		}
 
 		const QRect cell = cellRect(layout, index++);
-		controls.bar->setVisible(true);
 		controls.bar->setGeometry(cell.x(), cell.bottom() - BAR_HEIGHT + 1, cell.width(), BAR_HEIGHT);
 		controls.bar->raise();
+	}
+}
+
+void VideoGrid::updateHoveredBar() {
+	// Hidden first, unconditionally - simpler than trying to track "which bar was visible last time" and
+	// only touch the ones that changed, and this runs at most once per relayout(), not once per frame.
+	if (m_ownCameraControls) {
+		m_ownCameraControls->bar->setVisible(false);
+	}
+
+	if (m_ownScreenControls) {
+		m_ownScreenControls->bar->setVisible(false);
+	}
+
+	for (auto &entry : m_remoteControls) {
+		entry.second->bar->setVisible(false);
+	}
+
+	if (!m_mouseInside) {
+		return;
+	}
+
+	const Layout layout = currentLayout();
+	const int slot       = slotAt(m_lastMousePos, layout);
+
+	if (slot < 0) {
+		return;
+	}
+
+	// Same walk order as paintEvent(), mouseDoubleClickEvent() and relayoutControls() - see the latter's
+	// comment on why m_surfaces being a std::map is what makes this order something worth relying on.
+	int index = 0;
+
+	if (!m_selfCameraFrame.isNull()) {
+		if (index == slot) {
+			if (m_ownCameraControls) {
+				m_ownCameraControls->bar->setVisible(true);
+			}
+
+			return;
+		}
+
+		++index;
+	}
+
+	if (!m_selfScreenFrame.isNull()) {
+		if (index == slot) {
+			if (m_ownScreenControls) {
+				m_ownScreenControls->bar->setVisible(true);
+			}
+
+			return;
+		}
+
+		++index;
+	}
+
+	for (auto &entry : m_surfaces) {
+		if (entry.second.watching && entry.second.canvas.isNull()) {
+			continue;
+		}
+
+		if (index == slot) {
+			const auto it = m_remoteControls.find(entry.first);
+
+			if (it != m_remoteControls.end()) {
+				it->second->bar->setVisible(true);
+			}
+
+			return;
+		}
+
+		++index;
+	}
+}
+
+void VideoGrid::updateFullscreenWindow() {
+	if (m_focus == FocusTarget::None) {
+		if (m_fullscreenWindow) {
+			m_fullscreenWindow->hide();
+		}
+
+		return;
+	}
+
+	QImage image;
+	QString label;
+
+	if (m_focus == FocusTarget::SelfCamera) {
+		image = m_selfCameraFrame;
+		label = tr("You");
+	} else if (m_focus == FocusTarget::SelfScreen) {
+		image = m_selfScreenFrame;
+		label = tr("You (screen)");
+	} else if (m_focus == FocusTarget::Surface) {
+		const auto it = m_surfaces.find(m_focusedSurfaceKey);
+
+		if (it != m_surfaces.end()) {
+			image = it->second.canvas;
+			label = labelForSurface(it->second);
+		}
+	}
+
+	if (image.isNull()) {
+		return;
+	}
+
+	if (!m_fullscreenWindow) {
+		m_fullscreenWindow = new FullscreenVideoWindow(this);
+	}
+
+	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setContent(image, label);
+
+	if (!m_fullscreenWindow->isVisible()) {
+		m_fullscreenWindow->showFullScreen();
+	}
+}
+
+QString VideoGrid::labelForSurface(const Surface &surface) const {
+	const auto nameIt = m_senderNames.find(surface.senderSession);
+	QString label      = nameIt == m_senderNames.end() ? QString() : nameIt->second;
+
+	// A camera tile is unlabelled beyond the name, matching today's behaviour. Anything else - a
+	// screen or a window - is called out, since a sender showing a camera and a screen at once
+	// would otherwise present as one person with two identical names.
+	switch (surface.sourceKind) {
+		case MumbleProto::VideoState_SourceKind_Display:
+			return label.isEmpty() ? tr("Screen") : tr("%1 (screen)").arg(label);
+		case MumbleProto::VideoState_SourceKind_Window:
+			return label.isEmpty() ? tr("Window") : tr("%1 (window)").arg(label);
+		case MumbleProto::VideoState_SourceKind_Application:
+			return label.isEmpty() ? tr("App") : tr("%1 (app)").arg(label);
+		default:
+			return label;
 	}
 }
 
@@ -724,7 +922,9 @@ void VideoGrid::validateFocus() {
 
 void VideoGrid::relayout() {
 	validateFocus();
-	relayoutControls(m_focus == FocusTarget::None ? currentLayout() : Layout());
+	relayoutControls(currentLayout());
+	updateHoveredBar();
+	updateFullscreenWindow();
 	update();
 }
 
@@ -768,25 +968,6 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		}
 	};
 
-	// A sender's tile is unlabelled beyond their name, matching today's behaviour for a camera. Anything
-	// else - a screen or a window - is called out, since a sender showing a camera and a screen at once
-	// would otherwise present as one person with two identical names.
-	const auto labelFor = [&](const Surface &surface) {
-		const auto nameIt = m_senderNames.find(surface.senderSession);
-		QString label      = nameIt == m_senderNames.end() ? QString() : nameIt->second;
-
-		switch (surface.sourceKind) {
-			case MumbleProto::VideoState_SourceKind_Display:
-				return label.isEmpty() ? tr("Screen") : tr("%1 (screen)").arg(label);
-			case MumbleProto::VideoState_SourceKind_Window:
-				return label.isEmpty() ? tr("Window") : tr("%1 (window)").arg(label);
-			case MumbleProto::VideoState_SourceKind_Application:
-				return label.isEmpty() ? tr("App") : tr("%1 (app)").arg(label);
-			default:
-				return label;
-		}
-	};
-
 	// A placeholder for a tile whose stream is not currently being watched - dark, labelled, and with
 	// nothing decoded into it drawn, so it is obvious at a glance that this is a deliberate "not watching"
 	// state rather than a stalled or broken picture.
@@ -794,33 +975,12 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		painter.fillRect(cell, QColor(32, 32, 32));
 		painter.setPen(QColor(180, 180, 180));
 		painter.drawText(cell, Qt::AlignCenter | Qt::TextWordWrap,
-						 label.isEmpty() ? tr("Not watching") : tr("%1\n(not watching)").arg(label));
+						 label.isEmpty() ? tr("👁 Click to watch") : tr("%1\n👁 Click to watch").arg(label));
 	};
 
-	// Kept in sync with relayout() rather than only checked here: paintEvent() runs after relayoutControls()
-	// already positioned the bars for this repaint, and both need to agree on whether a focus target that
-	// just became invalid still counts as focused, or the control bar and the picture could disagree about
-	// it for one frame.
-	validateFocus();
-
-	if (m_focus == FocusTarget::SelfCamera) {
-		drawInto(m_selfCameraFrame, rect(), tr("You"));
-
-		return;
-	}
-
-	if (m_focus == FocusTarget::SelfScreen) {
-		drawInto(m_selfScreenFrame, rect(), tr("You (screen)"));
-
-		return;
-	}
-
-	if (m_focus == FocusTarget::Surface) {
-		const Surface &surface = m_surfaces.at(m_focusedSurfaceKey);
-		drawInto(surface.canvas, rect(), labelFor(surface));
-
-		return;
-	}
+	// The grid always shows every tile in its own cell now, fullscreen or not - a fullscreened tile is
+	// shown full-screen in FullscreenVideoWindow, a genuine top-level window, not by VideoGrid filling
+	// its own (dock-sized) rect with just that one picture the way an early version did.
 
 	// Tested on what is drawable, not on whether any surface exists. A surface is created when a stream
 	// is announced and stays blank until the first frame decodes, so "holds surfaces" and "has something
@@ -845,32 +1005,21 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
 		const Surface &surface = it->second;
 
-		if (surface.canvas.isNull()) {
+		if (surface.watching && surface.canvas.isNull()) {
 			continue;
 		}
 
 		const QRect cell = cellRect(layout, index++);
 
 		if (surface.watching) {
-			drawInto(surface.canvas, cell, labelFor(surface));
+			drawInto(surface.canvas, cell, labelForSurface(surface));
 		} else {
-			drawPlaceholder(cell, labelFor(surface));
+			drawPlaceholder(cell, labelForSurface(surface));
 		}
 	}
-
-	relayoutControls(layout);
 }
 
 void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
-	// A double-click while some tile already fills the grid means "shrink back", regardless of where in
-	// that tile the click landed - there is only one thing on screen to have clicked.
-	if (m_focus != FocusTarget::None) {
-		clearFocusedTile();
-		event->accept();
-
-		return;
-	}
-
 	const Layout layout = currentLayout();
 	const int slot       = slotAt(event->pos(), layout);
 
@@ -884,15 +1033,24 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 	// so the slot a click landed on and the tile it visually looked like it landed on are always the same
 	// tile. m_surfaces being a std::map, not an unordered_map, is exactly what makes that order something
 	// a click can rely on between one repaint and the next.
+	//
+	// Double-clicking whichever tile is already fullscreened is what un-fullscreens it - the grid always
+	// shows its normal layout, fullscreen or not, so there is no "any click anywhere shrinks back" case
+	// distinct from clicking the specific tile that is focused.
 	int index = 0;
 
 	if (!m_selfCameraFrame.isNull()) {
 		if (index == slot) {
-			m_focus = FocusTarget::SelfCamera;
-			// So Esc works immediately, without the user having to click the grid a second time just to
-			// give it keyboard focus.
-			setFocus(Qt::MouseFocusReason);
-			relayout();
+			if (m_focus == FocusTarget::SelfCamera) {
+				clearFocusedTile();
+			} else {
+				m_focus = FocusTarget::SelfCamera;
+				// So Esc works immediately, without the user having to click the grid a second time just
+				// to give it keyboard focus.
+				setFocus(Qt::MouseFocusReason);
+				relayout();
+			}
+
 			event->accept();
 
 			return;
@@ -903,9 +1061,14 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 
 	if (!m_selfScreenFrame.isNull()) {
 		if (index == slot) {
-			m_focus = FocusTarget::SelfScreen;
-			setFocus(Qt::MouseFocusReason);
-			relayout();
+			if (m_focus == FocusTarget::SelfScreen) {
+				clearFocusedTile();
+			} else {
+				m_focus = FocusTarget::SelfScreen;
+				setFocus(Qt::MouseFocusReason);
+				relayout();
+			}
+
 			event->accept();
 
 			return;
@@ -915,15 +1078,31 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (it->second.canvas.isNull()) {
+		if (it->second.watching && it->second.canvas.isNull()) {
 			continue;
 		}
 
 		if (index == slot) {
-			m_focus             = FocusTarget::Surface;
-			m_focusedSurfaceKey = it->first;
-			setFocus(Qt::MouseFocusReason);
-			relayout();
+			if (!it->second.watching) {
+				// Double-clicking a preview tile is the same as clicking its eyeball - it is the obvious
+				// thing to try first, and there is no useful "fullscreen a placeholder" behaviour to give
+				// up in exchange for supporting it.
+				setWatching(it->second.senderSession, it->second.streamID, true);
+
+				event->accept();
+
+				return;
+			}
+
+			if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == it->first) {
+				clearFocusedTile();
+			} else {
+				m_focus             = FocusTarget::Surface;
+				m_focusedSurfaceKey = it->first;
+				setFocus(Qt::MouseFocusReason);
+				relayout();
+			}
+
 			event->accept();
 
 			return;
@@ -933,6 +1112,29 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 	}
 
 	event->ignore();
+}
+
+void VideoGrid::mouseMoveEvent(QMouseEvent *event) {
+	m_mouseInside  = true;
+	m_lastMousePos = event->pos();
+	updateHoveredBar();
+
+	QWidget::mouseMoveEvent(event);
+}
+
+void VideoGrid::enterEvent(QEnterEvent *event) {
+	m_mouseInside  = true;
+	m_lastMousePos = event->position().toPoint();
+	updateHoveredBar();
+
+	QWidget::enterEvent(event);
+}
+
+void VideoGrid::leaveEvent(QEvent *event) {
+	m_mouseInside = false;
+	updateHoveredBar();
+
+	QWidget::leaveEvent(event);
 }
 
 void VideoGrid::keyPressEvent(QKeyEvent *event) {
