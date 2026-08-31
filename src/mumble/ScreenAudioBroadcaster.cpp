@@ -70,6 +70,8 @@ bool ScreenAudioBroadcaster::start(std::unique_ptr< AudioLoopbackSource > source
 
 	m_accumulator.clear();
 	m_frameNumber = 0;
+	m_loggedFirstSamples = false;
+	m_loggedFirstUnit    = false;
 
 	if (!m_source->start()) {
 		opus_encoder_destroy(m_opusState);
@@ -126,6 +128,13 @@ void ScreenAudioBroadcaster::onSamplesReady(const QByteArray &pcm, std::uint64_t
 
 	if (frameCount == 0) {
 		return;
+	}
+
+	if (!m_loggedFirstSamples) {
+		m_loggedFirstSamples = true;
+
+		qWarning("ScreenAudioBroadcaster: first samples from capture source (%u ch, %u Hz, %zu frames)",
+				 sourceChannels, m_source->sampleRate(), frameCount);
 	}
 
 	appendResampledFrames(floatData, frameCount);
@@ -214,6 +223,13 @@ void ScreenAudioBroadcaster::encodeAccumulatedFrames() {
 
 		if (encodedBytes <= 0) {
 			continue;
+		}
+
+		if (!m_loggedFirstUnit) {
+			m_loggedFirstUnit = true;
+
+			qWarning("ScreenAudioBroadcaster: first Opus unit encoded (%d bytes, stream %u)", encodedBytes,
+					 m_streamID);
 		}
 
 		Mumble::Protocol::VideoUnitHeader header;

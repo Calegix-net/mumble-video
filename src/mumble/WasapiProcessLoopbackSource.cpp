@@ -386,6 +386,18 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 	m_running = true;
 	m_clock.restart();
 
+	qWarning("WasapiProcessLoopbackSource: capture started (target pid %lu, %s, requested %u Hz)",
+			 m_targetProcessId, m_excludeTargetTree ? "exclude tree" : "include tree only", kSampleRate);
+
+	// Diagnostic only, not behavioural: this class has never been confirmed to actually deliver audio on a
+	// real (non-headless) machine - see the project's own release notes. These counters, logged once
+	// capture stops, are what turns "screen-share audio doesn't work" into "the capture loop never ran",
+	// "it ran but every packet was silence", or "it delivered real audio and something later in the
+	// pipeline dropped it" on the next test, instead of another guess.
+	std::uint64_t packetsDelivered = 0;
+	std::uint64_t silentPackets    = 0;
+	std::uint64_t bytesDelivered   = 0;
+
 	while (!m_stopRequested) {
 		// Polled, not event-driven. An event-callback *loopback* stream is documented by Microsoft
 		// never to signal its event (only a render stream on the same device would pump it), so a loop
@@ -423,9 +435,13 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 				// than skipped, same reasoning as WasapiLoopbackSource: the Opus encoder downstream needs
 				// an unbroken stream, not gaps it would have to detect and paper over itself.
 				pcm = QByteArray(static_cast< int >(byteCount), '\0');
+				++silentPackets;
 			} else {
 				pcm = QByteArray(reinterpret_cast< const char * >(data), static_cast< int >(byteCount));
 			}
+
+			++packetsDelivered;
+			bytesDelivered += byteCount;
 
 			captureClient->ReleaseBuffer(numFramesAvailable);
 
@@ -437,6 +453,10 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 			packetResult = captureClient->GetNextPacketSize(&packetLength);
 		}
 	}
+
+	qWarning("WasapiProcessLoopbackSource: capture stopped after %llu packets (%llu bytes, %llu silent)",
+			 static_cast< unsigned long long >(packetsDelivered), static_cast< unsigned long long >(bytesDelivered),
+			 static_cast< unsigned long long >(silentPackets));
 
 	cleanup();
 

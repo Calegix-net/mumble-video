@@ -106,6 +106,16 @@ protected:
 	std::uint64_t m_frameNumber = 0;
 	std::uint32_t m_streamID    = 0;
 
+	/// Diagnostic only: logged once each, the first time onSamplesReady() actually receives something from
+	/// the capture source and the first time encodeAccumulatedFrames() actually emits a unit. This class's
+	/// capture path has never been confirmed to deliver real audio on a non-headless machine - see the
+	/// project's release notes - so on the next report of "screen-share audio doesn't work", these two
+	/// lines are what tell whether the capture source is delivering anything at all, versus delivering
+	/// samples that never reach a full Opus frame, versus encoding fine with the problem lying further
+	/// downstream.
+	bool m_loggedFirstSamples = false;
+	bool m_loggedFirstUnit    = false;
+
 	/// Converts one delivery's worth of interleaved samples - at the source's current sample rate and
 	/// channel count, read from m_source - to TARGET_SAMPLE_RATE/TARGET_CHANNELS, appending the result to
 	/// m_accumulator. Channel mixing happens first, so the resampler only ever has to handle stereo

@@ -1090,17 +1090,38 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		ClientUser *sender = ClientUser::get(senderSession);
 
 		if (!sender) {
+			qWarning("MainWindow: screen-share audio unit for unknown session %u, dropped", senderSession);
+
 			return;
 		}
 
-		auto *buffer                 = new AudioOutputScreenShare(Global::get().ao->getMixerFreq());
+		// Diagnostic only: this path has never been confirmed to actually produce audible sound on a real
+		// machine - see WasapiProcessLoopbackSource's own diagnostic logging on the sending end. Reaching
+		// this line at all means an Opus unit made it all the way from the sender's capture device, through
+		// the network, to this client - if screen-share audio is reported silent again with this line
+		// present in the log, the problem is downstream of here: getMixerFreq(), addExternalBuffer(), the
+		// mixer's local-mute gate, or the buffer's own decode/resample path, not capture or transport.
+		const unsigned int mixerFreq = Global::get().ao->getMixerFreq();
+
+		if (mixerFreq == 0) {
+			qWarning("MainWindow: screen-share audio for session %u arriving before the mixer has a "
+					 "frequency - the buffer will skip resampling and may play at the wrong pitch",
+					 senderSession);
+		}
+
+		auto *buffer                 = new AudioOutputScreenShare(mixerFreq);
 		const AudioOutputToken token = Global::get().ao->addExternalBuffer(sender, buffer);
 
 		if (!token) {
+			qWarning("MainWindow: could not attach a screen-share audio buffer for session %u", senderSession);
+
 			delete buffer;
 
 			return;
 		}
+
+		qWarning("MainWindow: first screen-share audio unit received (session %u, stream %u, mixer %u Hz)",
+				 senderSession, streamID, mixerFreq);
 
 		ScreenShareAudioEntry entry;
 		entry.token  = token;
