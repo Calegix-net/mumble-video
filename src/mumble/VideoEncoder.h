@@ -119,7 +119,14 @@ protected:
 	/// is trying to repair - a single burst of every tile in a 1080p frame is well over a hundred JPEG units
 	/// landing in one frame interval, and if some of that burst is itself lost, the compounding cost is a
 	/// human-visible stretch of corruption well past the nominal recovery window, not a single lost tile.
-	static constexpr unsigned int FULL_REFRESH_INTERVAL_FRAMES = 150;
+	///
+	/// 60, not the 150 this was originally shipped with: at the default 30fps that is a 2 second worst-case
+	/// recovery window instead of 5, still comfortably staggered rather than bursty (see encode()'s
+	/// per-tile modulo schedule) so this is a real reduction in how long a lost tile stays visibly wrong,
+	/// not a reintroduction of the bandwidth spike the staggering exists to avoid - the periodic-refresh
+	/// traffic this produces is still exactly one extra tile's worth of bandwidth per frame it falls on,
+	/// only more of those frames now carry one.
+	static constexpr unsigned int FULL_REFRESH_INTERVAL_FRAMES = 60;
 
 	Stats m_lastStats;
 

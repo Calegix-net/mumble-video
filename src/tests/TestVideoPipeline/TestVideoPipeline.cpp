@@ -368,8 +368,10 @@ void TestVideoPipeline::periodicRefreshIsStaggeredNotBurst() {
 	QVERIFY(tileCount > 1);
 
 	// One full staggered cycle, feeding back the identical frame throughout - anything at all emitted
-	// after the baseline is the periodic refresh, not a genuine content change.
-	constexpr int CYCLE_FRAMES = 150;
+	// after the baseline is the periodic refresh, not a genuine content change. Matches
+	// TiledImageEncoder::FULL_REFRESH_INTERVAL_FRAMES, which is not itself public - kept in sync by hand
+	// rather than exposed just for this test to read.
+	constexpr int CYCLE_FRAMES = 60;
 
 	int framesWithOutput            = 0;
 	std::size_t maxUnitsInOneFrame = 0;

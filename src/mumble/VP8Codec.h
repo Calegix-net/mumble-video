@@ -98,9 +98,18 @@ protected:
 
 	int m_width                     = 0;
 	int m_height                    = 0;
-	unsigned int m_bitrate          = 800;
-	unsigned int m_keyframeInterval = 120;
-	unsigned int m_framerate        = 30;
+	unsigned int m_bitrate = 800;
+
+	// 60, not a more compression-friendly 120 or higher: this bounds how long a viewer's picture can stay
+	// frozen after a lost inter-frame, in the worst case where an explicit keyframe request (see
+	// VideoGrid::onVideoUnitReceived()'s KEYFRAME_REREQUEST_AFTER_UNITS, and the server's own once-a-
+	// second relay limit on it) is itself delayed or lost - the periodic keyframe libvpx forces regardless
+	// is what still bounds the freeze even then. At this class's own 30fps default that is a 2 second
+	// worst case instead of 4; the cost is a larger, more frequent keyframe every 2 seconds rather than
+	// every 4, not a change to ordinary inter-frame bitrate.
+	unsigned int m_keyframeInterval = 60;
+
+	unsigned int m_framerate = 30;
 	bool m_forceKeyframe            = true;
 
 	// Presentation timestamp in timebase units, advanced by one per frame. Deliberately not the caller's

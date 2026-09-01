@@ -7,7 +7,9 @@
 
 #include "Mumble.pb.h"
 
+#include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
+#include <QtCore/QFutureWatcher>
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
@@ -114,17 +116,27 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	// controls require a click-and-hold to even discover. updateHoveredBar() is what actually uses it.
 	setMouseTracking(true);
 
-	// See checkForStaleStreams(). A tenth of the timeout: frequent enough that a genuinely dead stream is
-	// not left hanging noticeably past the timeout itself, cheap enough that running it this often is not
-	// worth thinking about further.
+	// See checkForStaleStreams() and applyPollInterval(). A tenth of the tighter of the two timeouts:
+	// frequent enough that a genuinely dead or merely-stalled stream is not left hanging noticeably past
+	// whichever threshold applies to it, cheap enough that running it this often is not worth thinking
+	// about further.
 	m_staleCheckTimer = new QTimer(this);
 	connect(m_staleCheckTimer, &QTimer::timeout, this, &VideoGrid::checkForStaleStreams);
-	m_staleCheckTimer->start(m_staleStreamTimeoutMsec / 10);
+	applyPollInterval();
 }
 
 void VideoGrid::setStaleStreamTimeoutMsecForTesting(int msec) {
 	m_staleStreamTimeoutMsec = msec;
-	m_staleCheckTimer->start(std::max(1, msec / 10));
+	applyPollInterval();
+}
+
+void VideoGrid::setStallRefreshTimeoutMsecForTesting(int msec) {
+	m_stallRefreshTimeoutMsec = msec;
+	applyPollInterval();
+}
+
+void VideoGrid::applyPollInterval() {
+	m_staleCheckTimer->start(std::max(1, std::min(m_staleStreamTimeoutMsec, m_stallRefreshTimeoutMsec) / 10));
 }
 
 QSize VideoGrid::sizeHint() const {
@@ -195,20 +207,22 @@ bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
 	return true;
 }
 
+QImage VideoGrid::decodeJpegTile(const QByteArray &payload) {
+	QImage tile;
+
+	// Explicitly JPEG rather than letting Qt sniff the format. Sniffing would let a sender pick the
+	// decoder by crafting a header, which turns every image format Qt supports into attack surface.
+	if (!tile.loadFromData(payload, "JPEG")) {
+		return QImage();
+	}
+
+	return tile;
+}
+
 QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
 	switch (surface.codec) {
-		case MumbleProto::VideoState_Codec_TiledImage: {
-			QImage tile;
-
-			// Explicitly JPEG rather than letting Qt sniff the format. Sniffing would let a sender pick
-			// the decoder by crafting a header, which turns every image format Qt supports into attack
-			// surface.
-			if (!tile.loadFromData(payload, "JPEG")) {
-				return QImage();
-			}
-
-			return tile;
-		}
+		case MumbleProto::VideoState_Codec_TiledImage:
+			return decodeJpegTile(payload);
 		case MumbleProto::VideoState_Codec_VP8: {
 			if (!surface.vp8) {
 				surface.vp8 = std::make_unique< VP8Decoder >();
@@ -339,7 +353,8 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 		// A fresh grace period: whatever it was doing while unwatched - possibly nothing, for a long time
 		// - must not count against it the instant someone actually starts watching. See
 		// checkForStaleStreams().
-		it->second.lastUnitMsec = QDateTime::currentMSecsSinceEpoch();
+		it->second.lastUnitMsec         = QDateTime::currentMSecsSinceEpoch();
+		it->second.stallRefreshRequested = false;
 	}
 
 	if (!watching && m_focus == FocusTarget::Surface && m_focusedSurfaceKey == it->first) {
@@ -366,7 +381,8 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	Surface &surface = existing->second;
 
 	// Recorded regardless of watching state, deliberately - see setWatching() and checkForStaleStreams().
-	surface.lastUnitMsec = QDateTime::currentMSecsSinceEpoch();
+	surface.lastUnitMsec         = QDateTime::currentMSecsSinceEpoch();
+	surface.stallRefreshRequested = false;
 
 	if (!surface.watching) {
 		// Unwatched: the owner has already sent (or is about to send) a VideoSubscribe withdrawing this,
@@ -417,13 +433,40 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		}
 	}
 
+	if (surface.codec == MumbleProto::VideoState_Codec_TiledImage) {
+		// A JPEG tile is a pure function of its own bytes - nothing else about the surface it belongs to
+		// matters to decoding it, which is exactly what makes it safe to decode off this thread. Screen
+		// sharing is the busiest source of units this class ever handles - a moving or text-heavy share
+		// can produce dozens a second - and decoding every one of them synchronously here competed with
+		// this thread's own paint and input responsiveness for CPU time. That competition, not anything
+		// about layout, was the real, measured source of lag reported on other people's screens and never
+		// on the sender's own: a sender's local preview never runs this function at all.
+		//
+		// VP8 below stays fully synchronous: its decoder carries reference-frame state that must only
+		// ever be touched from one thread, in strict frame order, which a background task queue cannot
+		// promise the way a stateless JPEG tile can.
+		auto *watcher = new QFutureWatcher< QImage >(this);
+
+		connect(watcher, &QFutureWatcher< QImage >::finished, this,
+				[this, watcher, senderSession, streamID, x, y]() {
+					onTiledImageTileDecoded(senderSession, streamID, x, y, watcher->result());
+					watcher->deleteLater();
+				});
+
+		watcher->setFuture(QtConcurrent::run(&VideoGrid::decodeJpegTile, encodedTile));
+
+		return;
+	}
+
 	const QImage tile = decodeUnit(surface, encodedTile);
 
 	if (tile.isNull()) {
-		// Only for codecs this build can decode. An unknown codec fails on every unit forever, and
-		// asking its sender for keyframes would be a request nothing can satisfy.
-		const bool decodable = surface.codec == MumbleProto::VideoState_Codec_TiledImage
-							   || surface.codec == MumbleProto::VideoState_Codec_VP8;
+		// Only for a codec this build can actually decode - TiledImage never reaches this line at all any
+		// more (dispatched off-thread above), so in practice this now only ever admits VP8, but the check
+		// stays explicit rather than assuming that: an unrecognised codec (CODEC_UNKNOWN, or one a future
+		// build added that this one predates) fails on every unit forever, and asking its sender for
+		// keyframes would be a request nothing can satisfy.
+		const bool decodable = surface.codec == MumbleProto::VideoState_Codec_VP8;
 
 		if (decodable && ++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
 			// Reset on emit, so a sender that ignores the request is asked again only after another full
@@ -437,14 +480,54 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	surface.consecutiveFailures = 0;
+	surface.lastFrameNumber     = frameNumber;
+	surface.hasDecodedFrame     = true;
+	surface.awaitingKeyframe    = false;
+	surface.unitsWhileAwaiting  = 0;
 
-	if (surface.codec == MumbleProto::VideoState_Codec_VP8) {
-		surface.lastFrameNumber    = frameNumber;
-		surface.hasDecodedFrame    = true;
-		surface.awaitingKeyframe   = false;
-		surface.unitsWhileAwaiting = 0;
+	applyDecodedTile(existing->first, surface, x, y, tile);
+}
+
+void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int streamID, unsigned int x,
+										unsigned int y, QImage tile) {
+	// Re-looked-up rather than captured by reference at dispatch time: this decode ran on a background
+	// thread, so by the time it finishes, the stream may have ended, or the surface holding it destroyed
+	// entirely, while it was in flight.
+	const auto existing = m_surfaces.find(surfaceKey(senderSession, streamID));
+
+	if (existing == m_surfaces.end()) {
+		return;
 	}
 
+	Surface &surface = existing->second;
+
+	if (!surface.watching || surface.codec != MumbleProto::VideoState_Codec_TiledImage) {
+		// Either unwatched since this decode was dispatched, or the stream was re-announced under a
+		// different codec in the meantime - either way, a stale result that must be dropped rather than
+		// painted into a surface it no longer describes.
+		return;
+	}
+
+	if (tile.isNull()) {
+		// Only for a codec this build can decode - which TiledImage always is, so no such gate is needed
+		// here the way onVideoUnitReceived()'s own synchronous path needs one for an announced-but-unknown
+		// codec.
+		if (++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
+			surface.consecutiveFailures = 0;
+
+			emit keyframeNeeded(senderSession, streamID);
+		}
+
+		return;
+	}
+
+	surface.consecutiveFailures = 0;
+
+	applyDecodedTile(existing->first, surface, x, y, tile);
+}
+
+void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned int x, unsigned int y,
+								 const QImage &tile) {
 	// A surface exists from the announcement onwards but holds no picture until now, so this is what
 	// makes the sender count - and with it the video panel - appear.
 	const bool wasBlank = surface.canvas.isNull();
@@ -475,7 +558,7 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		return;
 	}
 
-	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == existing->first) {
+	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
 		updateFullscreenWindow();
 	}
 
@@ -578,11 +661,32 @@ void VideoGrid::checkForStaleStreams() {
 	// the very map this loop would otherwise still be iterating.
 	std::vector< std::pair< unsigned int, unsigned int > > stale;
 
-	for (const auto &entry : m_surfaces) {
-		const Surface &surface = entry.second;
+	for (auto &entry : m_surfaces) {
+		Surface &surface = entry.second;
 
-		if (surface.watching && now - surface.lastUnitMsec > m_staleStreamTimeoutMsec) {
+		if (!surface.watching) {
+			continue;
+		}
+
+		const qint64 silentFor = now - surface.lastUnitMsec;
+
+		if (silentFor > m_staleStreamTimeoutMsec) {
 			stale.emplace_back(surface.senderSession, surface.streamID);
+
+			continue;
+		}
+
+		// A lighter, faster sibling of the stale-drop check above: a stream that is merely overdue for its
+		// next update - a lost periodic refresh, a burst of loss the codec's own recovery has not caught
+		// up with yet - gets an explicit nudge long before it would ever be given up on entirely. TiledImage
+		// has no other proactive recovery signal at all (unlike VP8's own frame-continuity tracking further
+		// up this file), so this is the only thing that can shorten its recovery time below waiting out the
+		// periodic refresh cycle. Asked once per stall, not once per poll: stallRefreshRequested is what
+		// stops this from re-firing every poll interval for the same silence.
+		if (silentFor > m_stallRefreshTimeoutMsec && !surface.stallRefreshRequested) {
+			surface.stallRefreshRequested = true;
+
+			emit keyframeNeeded(surface.senderSession, surface.streamID);
 		}
 	}
 

@@ -40,6 +40,17 @@ void announce(VideoGrid &grid, unsigned int sender, unsigned int stream,
 	grid.setWatching(sender, stream, true);
 }
 
+/// TiledImage tiles now decode on a background thread - see VideoGrid::onTiledImageTileDecoded() - so a
+/// test that just called onVideoUnitReceived() for one has to pump the event loop before checking the
+/// result, or it is checking a decode that has not actually happened yet. VP8 stays fully synchronous and
+/// never needs this. 200ms is generous for a JPEG this small on an otherwise-idle thread pool - qWait()
+/// does process events for the full duration given, not just until something happens, so this is a real
+/// per-call cost, not a ceiling - but reliability against a slower or loaded machine matters more here
+/// than shaving this test suite's total run time.
+void waitForAsyncDecode() {
+	QTest::qWait(200);
+}
+
 /// Feeds every tile of one encoded frame into the grid, as the network path would.
 void deliverFrame(VideoGrid &grid, const std::vector< EncodedVideoUnit > &units, unsigned int sender,
 				  unsigned int stream, int codec = MumbleProto::VideoState_Codec_TiledImage) {
@@ -50,6 +61,10 @@ void deliverFrame(VideoGrid &grid, const std::vector< EncodedVideoUnit > &units,
 		grid.onVideoUnitReceived(
 			sender, stream, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
 			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
+	}
+
+	if (codec == MumbleProto::VideoState_Codec_TiledImage) {
+		waitForAsyncDecode();
 	}
 }
 
@@ -107,6 +122,8 @@ private slots:
 	void watchedStreamGoingSilentIsDroppedAsStale();
 	void watchedStreamStillActiveIsNotDroppedAsStale();
 	void routineTileUpdatesDoNotReflowEveryTilesControls();
+	void tiledImageDecodeDoesNotBlockTheCallingThread();
+	void stalledStreamGetsOneKeyframeRequest();
 };
 
 void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
@@ -187,10 +204,12 @@ void TestVideoGrid::surfaceGrowthKeepsWhatWasAlreadyDrawn() {
 
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(64, 64));
 
 	// A tile further right and down forces the surface to grow.
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 64, 64, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 
 	// And the first tile is still there. Reallocating blank would make a resolution change flash black.
@@ -217,6 +236,7 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 
 	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
 	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(128, 128));
 
 	QImage small(32, 32, QImage::Format_RGB32);
@@ -232,6 +252,7 @@ void TestVideoGrid::twoStreamsFromTheSameSenderCoexist() {
 	// a second stream of the SAME kind is a restart and replaces the first (see the next test).
 	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
 	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, smallEncoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(32, 32));
 
 	// The first stream's picture is untouched by the second one arriving.
@@ -263,6 +284,7 @@ void TestVideoGrid::reannouncingAStreamDiscardsItsOldPicture() {
 
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
 
 	// Same stream id, announced again with a different codec - a misbehaving peer, since the protocol
@@ -288,11 +310,13 @@ void TestVideoGrid::sendersAppearAndDisappear() {
 	announce(grid, 2, STREAM);
 	grid.onVideoUnitReceived(1, STREAM, 0, true, 0, 0, encoded);
 	grid.onVideoUnitReceived(2, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 2);
 	QCOMPARE(spy.count(), 2);
 
 	// Further tiles from a known sender are not a new arrival.
 	grid.onVideoUnitReceived(1, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(spy.count(), 2);
 
 	grid.removeSender(1);
@@ -325,6 +349,7 @@ void TestVideoGrid::theSenderCountIsCapped() {
 		grid.onVideoUnitReceived(session, STREAM, 0, true, 0, 0, encoded);
 	}
 
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), VideoGrid::MAX_SENDERS);
 }
 
@@ -375,6 +400,7 @@ void TestVideoGrid::unitsForAnUnannouncedStreamAreDropped() {
 	// And it starts working the moment the announcement does arrive.
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, jpeg);
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 1);
 }
 
@@ -564,6 +590,7 @@ void TestVideoGrid::aNewStreamStartsAsAnUnwatchedPreview() {
 	// Clicking the eyeball (setWatching) is what actually starts decoding.
 	grid.setWatching(SENDER, STREAM, true);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(32, 32));
 
 	// Un-watching again leaves the last picture in place rather than clearing it - paintEvent() falls back
@@ -653,9 +680,13 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 	buffer.close();
 
 	// The offset comes off the network. A tile claiming to belong far outside any real frame must not
-	// make the client allocate a surface to match.
+	// make the client allocate a surface to match. growToFit()'s bounds check now runs inside the
+	// asynchronous continuation (see onTiledImageTileDecoded()), not inline here - waitForAsyncDecode()
+	// is what makes this test actually exercise that check, rather than merely observing that nothing has
+	// happened yet because the decode has not run at all.
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 100000, 100000, encoded);
+	waitForAsyncDecode();
 
 	QCOMPARE(grid.senderCount(), 0);
 	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
@@ -663,17 +694,23 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 	// Exactly at the boundary is still refused, since the tile would extend past it.
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, static_cast< unsigned int >(VideoGrid::MAX_SURFACE_WIDTH), 0,
 							 encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 0);
 }
 
 void TestVideoGrid::nonJpegDataIsRefused() {
 	VideoGrid grid;
 
+	// waitForAsyncDecode() after each call is what makes this test actually exercise the decode-failure
+	// path asynchronously, rather than merely observing that the (now backgrounded) decode has not
+	// finished yet.
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, QByteArray("not an image at all"));
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 0);
 
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, QByteArray());
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 0);
 
 	// A PNG is a valid image but not what the codec says it is. Decoding is pinned to JPEG so that a
@@ -688,6 +725,7 @@ void TestVideoGrid::nonJpegDataIsRefused() {
 	buffer.close();
 
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 0);
 }
 
@@ -834,6 +872,8 @@ void TestVideoGrid::firstFrameShowingTheDockDoesNotReenterUnsafely() {
 					  static_cast< int >(unit.payload.size())));
 	}
 
+	waitForAsyncDecode();
+
 	QVERIFY(sawReentrantResize);
 	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
 }
@@ -848,7 +888,11 @@ void TestVideoGrid::firstFrameShowingTheDockDoesNotReenterUnsafely() {
 // staleness from silence on the stream itself, needing no notification at all.
 void TestVideoGrid::watchedStreamGoingSilentIsDroppedAsStale() {
 	VideoGrid grid;
-	grid.setStaleStreamTimeoutMsecForTesting(100);
+
+	// Comfortably above waitForAsyncDecode()'s own 200ms: the staleness clock starts ticking the instant
+	// onVideoUnitReceived() is called, not once its (now asynchronous) decode actually finishes, so that
+	// wait already eats into this budget before the "still there" check below even runs.
+	grid.setStaleStreamTimeoutMsecForTesting(350);
 
 	QSignalSpy staleSpy(&grid, &VideoGrid::streamWentStale);
 
@@ -866,6 +910,7 @@ void TestVideoGrid::watchedStreamGoingSilentIsDroppedAsStale() {
 	buffer.close();
 
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
 
 	// Real silence, past the (shrunk, for this test) timeout - the actual timer firing is what drops it,
@@ -944,6 +989,8 @@ void TestVideoGrid::routineTileUpdatesDoNotReflowEveryTilesControls() {
 				QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
 						  static_cast< int >(unit.payload.size())));
 		}
+
+		waitForAsyncDecode();
 	};
 
 	// The first frame for each surface is the wasBlank transition - the one case that legitimately still
@@ -961,6 +1008,110 @@ void TestVideoGrid::routineTileUpdatesDoNotReflowEveryTilesControls() {
 	}
 
 	QCOMPARE(grid.relayoutControlsCallCountForTesting(), countAfterFirstFrames);
+}
+
+// Regression test for the same lag report the previous test covers, from the other end of the fix:
+// JPEG decode for TiledImage units - the busiest source of units this class ever handles - now runs on a
+// background thread rather than inline, so the real, measurable decode work no longer competes with the
+// GUI thread's own paint and input handling. Proven independently via a temporary qWarning() printing
+// QThread::currentThread() from inside decodeJpegTile() during manual verification - every decode ran on
+// a distinct worker-pool thread, never once on the app's own thread - but that instrumentation does not
+// belong in shipped code, so this test instead asserts the same fact by its one directly observable
+// consequence: onVideoUnitReceived() must return before the decode it just dispatched has necessarily
+// finished, which a synchronous implementation could never do.
+void TestVideoGrid::tiledImageDecodeDoesNotBlockTheCallingThread() {
+	SyntheticVideoSource source(64, 64);
+	TiledImageEncoder encoder;
+
+	VideoGrid grid;
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	const std::vector< EncodedVideoUnit > units = encoder.encode(source.render(0), STREAM, 1, 1);
+	QVERIFY(!units.empty());
+
+	for (const EncodedVideoUnit &unit : units) {
+		grid.onVideoUnitReceived(
+			SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+					  static_cast< int >(unit.payload.size())));
+	}
+
+	// Every one of those calls has already returned, but nothing has actually been painted into the
+	// surface yet: the decode they dispatched has not necessarily run, because it was handed to a
+	// background thread rather than done inline. QFutureWatcher::finished() cannot fire until this
+	// thread's own event loop actually turns - not yet, on the very next line after dispatching it - so a
+	// still-null surface here is not a timing fluke, it is the one thing a synchronous implementation
+	// could never produce.
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+
+	waitForAsyncDecode();
+
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+}
+
+// TiledImage has no proactive recovery signal of its own the way VP8's frame-continuity tracking does -
+// before this, a watched stream that stalled anywhere short of the full stale-drop window (see
+// watchedStreamGoingSilentIsDroppedAsStale) just sat there until the periodic refresh cycle eventually
+// got around to it, which for a large grid can be the whole multi-second cycle. This proves a stall past
+// the (shrunk, for this test) stall threshold gets exactly one keyframeNeeded() request - not zero, and
+// not a flood of them for the same silence - while staying well short of the (deliberately lengthened,
+// here) drop threshold, so the surface is still there afterward.
+void TestVideoGrid::stalledStreamGetsOneKeyframeRequest() {
+	// 350ms, not the tighter 100ms first tried here: waitForAsyncDecode() below already burns 200ms on
+	// every TiledImage delivery (see its own comment), and that clock starts at onVideoUnitReceived(), not
+	// at decode completion - so a stall threshold shorter than the decode wait would already have tripped
+	// by the time the first assertion below even runs. Same reasoning, same margin, as the sibling stale-
+	// drop test (watchedStreamGoingSilentIsDroppedAsStale).
+	VideoGrid grid;
+	grid.setStallRefreshTimeoutMsecForTesting(350);
+	grid.setStaleStreamTimeoutMsecForTesting(8000);
+
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
+
+	QCOMPARE(needed.count(), 0);
+
+	// Real silence, past the (shrunk) stall threshold but nowhere near the (deliberately lengthened, for
+	// this test) stale-drop one.
+	QTest::qWait(400);
+
+	QCOMPARE(needed.count(), 1);
+	QCOMPARE(needed.at(0).at(0).toUInt(), SENDER);
+	QCOMPARE(needed.at(0).at(1).toUInt(), STREAM);
+
+	// Only the drop threshold removes the surface, and this test kept that far away - the stall request
+	// is a nudge, not a removal.
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// Continued silence for the same stall must not spam further requests.
+	QTest::qWait(400);
+	QCOMPARE(needed.count(), 1);
+
+	// A fresh unit resets the stall clock, so the next silence earns its own request.
+	grid.onVideoUnitReceived(SENDER, STREAM, 1, true, 0, 0, encoded);
+	waitForAsyncDecode();
+	QCOMPARE(needed.count(), 1);
+
+	QTest::qWait(400);
+	QCOMPARE(needed.count(), 2);
 }
 
 QTEST_MAIN(TestVideoGrid)
@@ -983,6 +1134,7 @@ void TestVideoGrid::aRestartedStreamOfTheSameKindReplacesTheOld() {
 
 	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
 	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 1).size(), QSize(64, 64));
 
 	// No removeSender(SENDER, 1) in between: the end-of-stream never arrived.
@@ -992,6 +1144,7 @@ void TestVideoGrid::aRestartedStreamOfTheSameKindReplacesTheOld() {
 	QCOMPARE(grid.senderCount(), 0);
 
 	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(64, 64));
 	QCOMPARE(grid.senderCount(), 1);
 }

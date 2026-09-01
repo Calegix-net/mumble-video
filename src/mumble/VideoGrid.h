@@ -93,6 +93,13 @@ public:
 	/// dead one.
 	static constexpr int DEFAULT_STALE_STREAM_TIMEOUT_MSEC = 45000;
 
+	/// Default for m_stallRefreshTimeoutMsec (see there). Comfortably longer than TiledImageEncoder's own
+	/// 2-second periodic refresh cycle (VideoEncoder.h's FULL_REFRESH_INTERVAL_FRAMES at an ordinary
+	/// framerate), so ordinary jitter in when that cycle's next tile happens to land does not itself look
+	/// like a stall - but far short of DEFAULT_STALE_STREAM_TIMEOUT_MSEC, which exists to catch a stream
+	/// that is not coming back at all, not one that is merely overdue for its next update.
+	static constexpr int DEFAULT_STALL_REFRESH_TIMEOUT_MSEC = 4000;
+
 	explicit VideoGrid(QWidget *parent = nullptr);
 
 	/// Shrinks the stale-stream watchdog's timeout (see checkForStaleStreams()) and restarts its poll
@@ -101,6 +108,12 @@ public:
 	/// 45-second default or calling checkForStaleStreams() directly and never actually exercising the
 	/// timer wiring it normally runs from. Not meant to be called outside a test.
 	void setStaleStreamTimeoutMsecForTesting(int msec);
+
+	/// The stall-refresh sibling of setStaleStreamTimeoutMsecForTesting() above - same reasoning, same
+	/// caveat: not meant to be called outside a test. Also restarts the poll timer: it is driven by
+	/// whichever of the two timeouts is currently smaller (see applyPollInterval()), and the whole point
+	/// of this setter is usually to make the stall threshold the tighter of the two.
+	void setStallRefreshTimeoutMsecForTesting(int msec);
 
 	/// How many times relayoutControls() has actually run - real per-tile widget work (setGeometry(),
 	/// raise(), sometimes creating a QWidget), unlike the update() a routine tile content change now uses
@@ -277,6 +290,12 @@ protected:
 		/// remove it, and there is no other signal that the stream is actually gone.
 		qint64 lastUnitMsec = 0;
 
+		/// Set once a stall refresh request has gone out for the current silence - see
+		/// checkForStaleStreams() - so the same stall does not re-trigger keyframeNeeded() on every poll
+		/// between the stall threshold and the much longer stale-drop one. Cleared alongside lastUnitMsec
+		/// whenever a real unit actually arrives, so the next stall gets its own fresh request.
+		bool stallRefreshRequested = false;
+
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
 		std::unique_ptr< VP8Decoder > vp8;
@@ -423,6 +442,18 @@ protected:
 	/// changes it from the default.
 	int m_staleStreamTimeoutMsec = DEFAULT_STALE_STREAM_TIMEOUT_MSEC;
 
+	/// See DEFAULT_STALL_REFRESH_TIMEOUT_MSEC and setStallRefreshTimeoutMsecForTesting().
+	int m_stallRefreshTimeoutMsec = DEFAULT_STALL_REFRESH_TIMEOUT_MSEC;
+
+	/// (Re)starts m_staleCheckTimer at a tenth of whichever of m_staleStreamTimeoutMsec and
+	/// m_stallRefreshTimeoutMsec is smaller. Both setters above call this rather than deriving the
+	/// interval from the stale timeout alone: the stall threshold is the shorter of the two by design
+	/// (see DEFAULT_STALL_REFRESH_TIMEOUT_MSEC's doc comment), and a poll interval derived only from the
+	/// longer one can be coarser than the shorter threshold it is supposed to be catching - at the
+	/// defaults, 4500ms polls against a 4000ms stall threshold, which lets a stall run up to ~8.5s before
+	/// it is ever noticed instead of the intended ~4s.
+	void applyPollInterval();
+
 	/// See relayoutControlsCallCountForTesting(). Incremented at the top of relayoutControls() itself, so
 	/// it counts every real call regardless of which of relayout()'s several call sites reached it.
 	int m_relayoutControlsCallCount = 0;
@@ -516,6 +547,29 @@ protected:
 	/// Turns one unit's payload into an image using the codec the stream announced. Returns a null
 	/// image if the codec is unknown, unsupported, or the payload did not decode.
 	static QImage decodeUnit(Surface &surface, const QByteArray &payload);
+
+	/// The TiledImage half of decodeUnit(), pulled out on its own: unlike VP8, whose decoder carries
+	/// reference-frame state that must only ever be touched from one thread in strict order, a JPEG tile
+	/// is a pure function of its own bytes alone - nothing else about the surface it belongs to matters to
+	/// decoding it. That statelessness is what makes it safe to run this off the GUI thread at all, which
+	/// onVideoUnitReceived() does for exactly this codec. decodeUnit() itself still calls this for the
+	/// synchronous TestVideoGrid-facing cases that expect one.
+	static QImage decodeJpegTile(const QByteArray &payload);
+
+	/// The continuation of onVideoUnitReceived() for a TiledImage unit, once its JPEG decode - dispatched
+	/// there to a background thread, see the comment at that call site - has actually finished. Re-looks
+	/// up the surface by key rather than capturing a reference to it: the decode ran asynchronously, so
+	/// the surface may have been removed, or stopped being watched, in the meantime, and a stale result
+	/// must be discarded rather than painted into whatever now occupies - or no longer occupies - that
+	/// slot in m_surfaces.
+	void onTiledImageTileDecoded(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
+								 QImage tile);
+
+	/// Paints one successfully decoded tile into its surface's canvas and brings the rest of the grid in
+	/// line with it - shared by onVideoUnitReceived()'s own synchronous VP8 path and
+	/// onTiledImageTileDecoded()'s asynchronous one, so the two never have a reason to disagree about what
+	/// a successful decode actually does.
+	void applyDecodedTile(std::uint64_t key, Surface &surface, unsigned int x, unsigned int y, const QImage &tile);
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOGRID_H_
