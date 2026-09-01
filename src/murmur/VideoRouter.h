@@ -101,7 +101,6 @@ public:
 	std::size_t streamCount() const;
 	std::size_t subscriptionCount() const;
 
-protected:
 	struct StreamKey {
 		std::uint32_t sender;
 		std::uint32_t streamID;
@@ -109,6 +108,52 @@ protected:
 		bool operator<(const StreamKey &other) const;
 	};
 
+	/**
+	 * Marks a stream as alive right now, for staleStreams() below to judge future silence against. Meant
+	 * to be called for two different reasons, both of which amount to "this is a fresh, known-good
+	 * baseline, not evidence anything is wrong yet":
+	 *
+	 *  - After actually relaying a unit for the stream to at least one recipient - the real liveness
+	 *    signal this exists to track.
+	 *  - Right after a successful subscribe() adds a subscriber to a stream, particularly its first -
+	 *    the moment a fresh grace period is deserved, before anything has had a chance to actually flow
+	 *    to that subscriber yet. Announcing a stream with no subscriber does not need this call at all:
+	 *    staleStreams() below ignores any stream with none, so there is nothing yet for a clock to judge.
+	 *
+	 * Deliberately not called automatically from inside subscribe() itself: doing so would mean giving an
+	 * already-tested, security-sensitive method with subscription and permission logic of its own a
+	 * reason to also depend on a clock, for a concern that is entirely separate from what it already
+	 * does. The owner already calls it at the right moment; calling this alongside costs nothing extra to
+	 * get right.
+	 *
+	 * Not meaningful, and not expected to be called, for a stream with no subscribers: there is nothing to
+	 * relay to, and that is a normal, indefinitely-lasting state (see m_streams's own comment) that must
+	 * never look stale for it. Does nothing if the stream does not exist.
+	 *
+	 * @param nowMsec Caller-supplied rather than read from a clock in here, so this class stays testable
+	 *   without a real one - same reasoning revalidate() and subscribersOf() already follow by taking
+	 *   their inputs as plain arguments instead of reaching for global state.
+	 */
+	void noteRelayed(std::uint32_t sender, std::uint32_t streamID, std::int64_t nowMsec);
+
+	/**
+	 * Streams that currently have at least one subscriber but have not actually relayed anything in more
+	 * than @p timeoutMsec - almost certainly a sender whose encoder or capture hung while its connection
+	 * otherwise stayed healthy. Nothing else here, or in a connection-level timeout elsewhere in the
+	 * server, can detect this specific failure: the connection itself never goes quiet, only this one
+	 * stream does, and a client watching it has no way to tell "nothing changed" apart from "nothing is
+	 * coming" on its own.
+	 *
+	 * Freshly announced streams are exempt for @p timeoutMsec from the moment they are announced, not
+	 * from some earlier default, so a sender who has not sent a first unit yet is not immediately treated
+	 * as stale.
+	 *
+	 * Does not itself end anything - the caller decides what "stale" means to do about it, the same
+	 * separation of concerns revalidate() already uses for permission changes.
+	 */
+	std::vector< StreamKey > staleStreams(std::int64_t nowMsec, std::int64_t timeoutMsec) const;
+
+protected:
 	ReceiveAuthorizer m_mayReceive;
 	SendAuthorizer m_maySend;
 
@@ -118,6 +163,13 @@ protected:
 
 	// Reverse index, so that removing a user does not require scanning every stream.
 	std::map< std::uint32_t, std::set< StreamKey > > m_subscriptions;
+
+	// Wall-clock time (caller's own clock, via nowMsec - see noteRelayed()) each live stream last actually
+	// relayed a unit, seeded to the moment it was announced. A parallel map rather than folding into
+	// m_streams's own value type deliberately: this is new, staleness-only bookkeeping layered on top of
+	// the existing, security-sensitive subscription logic above, not something worth touching every
+	// existing call site over.
+	std::map< StreamKey, std::int64_t > m_lastRelayedMsec;
 };
 
 #endif // MUMBLE_MURMUR_VIDEOROUTER_H_

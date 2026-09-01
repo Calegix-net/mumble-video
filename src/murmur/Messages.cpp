@@ -2659,6 +2659,13 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 		return;
 	}
 
+	if (msg.subscribe()) {
+		// A fresh baseline for endStaleVideoStreams() to judge future silence against - see
+		// VideoRouter::noteRelayed(). This subscriber has not received anything yet, so there is nothing
+		// to hold against the stream until some time has actually passed without it.
+		m_videoRouter.noteRelayed(sender, msg.stream_id(), tUptime.elapsed< std::chrono::milliseconds >().count());
+	}
+
 	// A new subscriber needs a keyframe before it can decode anything, and after heavy loss an existing
 	// one needs a fresh point to resume from. The request is relayed to the sender, rate-limited per
 	// sender: a keyframe costs several normal frames of bandwidth, so a burst of subscribers must cost

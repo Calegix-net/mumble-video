@@ -45,6 +45,10 @@ private slots:
 	void streamsPerSenderAreCapped();
 	void subscriptionsPerUserAreCapped();
 	void unsubscribingIsIdempotent();
+	void staleStreamsIgnoresAStreamWithNoSubscribers();
+	void staleStreamsIgnoresAStreamWithNoBaselineYet();
+	void staleStreamsFlagsAWatchedStreamThatWentQuiet();
+	void noteRelayedIsIgnoredForAStreamThatDoesNotExist();
 };
 
 #define ROUTER(perms)                                                                                 \
@@ -276,6 +280,76 @@ void TestVideoRouter::unsubscribingIsIdempotent() {
 	// tidy up, and refusing would strand the subscription.
 	perms.mayWatch.clear();
 	QVERIFY(router.subscribe(2, 1, 0, false));
+}
+
+// Regression coverage for a real report: a sender's client crashing left their video frozen on every
+// viewer's screen indefinitely, because nothing server-side notices a sender go quiet unless its whole
+// connection does - a hung encoder on an otherwise-healthy connection is invisible to a connection-level
+// timeout. staleStreams() is the router's half of the fix: judging a stream's own liveness independently
+// of the connection it rides on.
+
+void TestVideoRouter::staleStreamsIgnoresAStreamWithNoSubscribers() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+
+	ROUTER(perms);
+	QVERIFY(router.announceStream(1, 0, true));
+
+	// Unwatched is a normal, indefinitely-lasting state (see m_streams's own comment) - never stale no
+	// matter how far "now" is pushed out, since nothing was ever supposed to be flowing.
+	QVERIFY(router.staleStreams(1'000'000, 1'000).empty());
+}
+
+void TestVideoRouter::staleStreamsIgnoresAStreamWithNoBaselineYet() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+	perms.mayWatch.insert({ 2, 1 });
+
+	ROUTER(perms);
+	QVERIFY(router.announceStream(1, 0, true));
+	QVERIFY(router.subscribe(2, 1, 0, true));
+
+	// Has a subscriber, but the owner has not called noteRelayed() for it yet (the caller is expected to
+	// do so right after a subscribe succeeds - this test deliberately skips that, to prove the router
+	// itself does not assume it happened). Nothing to judge staleness against yet, so it must not be
+	// reported no matter how far "now" is pushed out either.
+	QVERIFY(router.staleStreams(1'000'000, 1'000).empty());
+}
+
+void TestVideoRouter::staleStreamsFlagsAWatchedStreamThatWentQuiet() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+	perms.mayWatch.insert({ 2, 1 });
+
+	ROUTER(perms);
+	QVERIFY(router.announceStream(1, 0, true));
+	QVERIFY(router.subscribe(2, 1, 0, true));
+
+	router.noteRelayed(1, 0, 1000);
+
+	// Well inside the timeout - not stale yet.
+	QVERIFY(router.staleStreams(1500, 1000).empty());
+
+	// Past it.
+	const std::vector< VideoRouter::StreamKey > stale = router.staleStreams(3000, 1000);
+	QCOMPARE(stale.size(), static_cast< std::size_t >(1));
+	QCOMPARE(stale[0].sender, 1u);
+	QCOMPARE(stale[0].streamID, 0u);
+
+	// A fresh unit puts it back to healthy immediately - staleness is judged against the most recent
+	// activity, not anything cumulative.
+	router.noteRelayed(1, 0, 2900);
+	QVERIFY(router.staleStreams(3000, 1000).empty());
+}
+
+void TestVideoRouter::noteRelayedIsIgnoredForAStreamThatDoesNotExist() {
+	FakePermissions perms;
+	ROUTER(perms);
+
+	// Nothing to crash or misbehave on - a unit racing against the very stream it belongs to having just
+	// ended is an ordinary occurrence, not a bug.
+	router.noteRelayed(1, 0, 1000);
+	QVERIFY(router.staleStreams(1'000'000, 1'000).empty());
 }
 
 QTEST_MAIN(TestVideoRouter)

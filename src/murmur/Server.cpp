@@ -1472,6 +1472,12 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		return;
 	}
 
+	// The liveness signal endStaleVideoStreams() judges silence against - see there and
+	// VideoRouter::noteRelayed(). Recorded only once there is actually somewhere to relay to, matching
+	// noteRelayed()'s own contract.
+	m_videoRouter.noteRelayed(sender->uiSession, m_relayedVideo.stream_id(),
+							  tUptime.elapsed< std::chrono::milliseconds >().count());
+
 	// Stamp the sender by appending field 1. Cheaper than reserialising, and the fragment budget already
 	// reserves room for it.
 	if (m_relayedVideo.sender_session() == 0) {
@@ -2100,6 +2106,8 @@ void Server::checkTimeout() {
 	for (ServerUser *u : qlClose) {
 		u->disconnectSocket(true);
 	}
+
+	endStaleVideoStreams();
 }
 
 void Server::tcpTransmitData(QByteArray a, unsigned int id) {
@@ -2462,6 +2470,50 @@ void Server::revalidateVideoSubscriptions() {
 		mpvs.set_subscribe(false);
 
 		sendMessage(subscriber, mpvs);
+	}
+}
+
+void Server::endStaleVideoStreams() {
+	// 30 seconds, matching this server's own default connection timeout (iTimeout): the same order of
+	// magnitude a client is already willing to wait before giving up on the connection itself, applied to
+	// one stream on it instead of the whole thing. Generous enough that a genuinely alive, entirely
+	// static screen share still produces some traffic well inside this window at any ordinary framerate
+	// (see the client's own periodic per-tile refresh, VideoEncoder.h), so the real risk being guarded
+	// against is a false end of a legitimately quiet stream, not a slow reaction to a dead one.
+	constexpr std::int64_t STALE_VIDEO_TIMEOUT_MSEC = 30000;
+
+	const std::int64_t now = tUptime.elapsed< std::chrono::milliseconds >().count();
+
+	for (const VideoRouter::StreamKey &key : m_videoRouter.staleStreams(now, STALE_VIDEO_TIMEOUT_MSEC)) {
+		// The userless overload, deliberately: staleStreams() reporting a sender at all already implies
+		// VideoRouter still holds live state for them, but qhUsers is this class's own bookkeeping, not
+		// something to assume is in lockstep with it - log(ServerUser*, ...) dereferences unconditionally,
+		// and a null sender here should be a log line, not a crash.
+		log(QString("Video stream %1/%2 went silent with an active subscriber and was ended")
+			   .arg(key.sender)
+			   .arg(key.streamID));
+
+		m_videoRouter.announceStream(key.sender, key.streamID, false);
+		m_videoAnnouncements.erase(std::make_pair(key.sender, key.streamID));
+
+		// Ends the stream for everyone who could see it, exactly as msgVideoState's own active=false
+		// handling would - not only current subscribers, matching the class comment on VideoRouter about
+		// re-checking permission on every delivery rather than trusting a subscription that was correct a
+		// minute ago.
+		MumbleProto::VideoState end;
+		end.set_session(key.sender);
+		end.set_stream_id(key.streamID);
+		end.set_active(false);
+
+		for (ServerUser *user : qhUsers) {
+			if (user->uiSession == key.sender || user->sState != ServerUser::Authenticated) {
+				continue;
+			}
+
+			if (mayReceiveVideo(user->uiSession, key.sender)) {
+				sendMessage(user, end);
+			}
+		}
 	}
 }
 

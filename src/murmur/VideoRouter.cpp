@@ -59,6 +59,7 @@ bool VideoRouter::announceStream(std::uint32_t sender, std::uint32_t streamID, b
 		}
 
 		m_streams.erase(it);
+		m_lastRelayedMsec.erase(key);
 
 		return true;
 	}
@@ -192,6 +193,7 @@ std::vector< VideoRouter::DroppedSubscription > VideoRouter::revalidate() {
 				}
 			}
 
+			m_lastRelayedMsec.erase(key);
 			streamIt = m_streams.erase(streamIt);
 
 			continue;
@@ -264,6 +266,44 @@ void VideoRouter::removeUser(std::uint32_t session) {
 			}
 		}
 
+		m_lastRelayedMsec.erase(key);
 		it = m_streams.erase(it);
 	}
+}
+
+void VideoRouter::noteRelayed(std::uint32_t sender, std::uint32_t streamID, std::int64_t nowMsec) {
+	const StreamKey key{ sender, streamID };
+
+	if (m_streams.find(key) == m_streams.end()) {
+		return;
+	}
+
+	m_lastRelayedMsec[key] = nowMsec;
+}
+
+std::vector< VideoRouter::StreamKey > VideoRouter::staleStreams(std::int64_t nowMsec, std::int64_t timeoutMsec) const {
+	std::vector< StreamKey > stale;
+
+	for (const auto &entry : m_streams) {
+		if (entry.second.empty()) {
+			// Unwatched is a normal, indefinitely-lasting state - see m_streams's own comment - not
+			// evidence of anything wrong.
+			continue;
+		}
+
+		const auto lastIt = m_lastRelayedMsec.find(entry.first);
+
+		if (lastIt == m_lastRelayedMsec.end()) {
+			// Has a subscriber but noteRelayed() has never once been called for it - the caller has not
+			// yet had a chance to establish a baseline (a subscribe this same tick, say). Nothing to judge
+			// staleness against yet, so nothing to report; the next call, once a baseline exists, will.
+			continue;
+		}
+
+		if (nowMsec - lastIt->second > timeoutMsec) {
+			stale.push_back(entry.first);
+		}
+	}
+
+	return stale;
 }

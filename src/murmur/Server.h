@@ -203,6 +203,15 @@ public:
 	/// that its subscription ended.
 	void revalidateVideoSubscriptions();
 
+	/// Ends any video stream that has a subscriber but has not actually relayed anything in too long -
+	/// see VideoRouter::staleStreams() for why nothing else here can catch this specific failure. Unlike
+	/// revalidateVideoSubscriptions(), which only drops the one subscription a permission change no
+	/// longer covers, this ends the stream itself for everyone, exactly as if the sender's own client had
+	/// announced VideoState(active=false) - because for the case this exists to catch, that message is
+	/// never coming. Called from checkTimeout(), on the same cadence as this server's own connection-level
+	/// timeout.
+	void endStaleVideoStreams();
+
 	/// The most recent announcement for every stream currently active, keyed by (sender, stream).
 	///
 	/// Kept because a stream is announced when it starts and not again. Without this a client that
