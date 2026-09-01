@@ -24,6 +24,7 @@ class QKeyEvent;
 class QMouseEvent;
 class QResizeEvent;
 class QSlider;
+class QTimer;
 class QToolButton;
 
 /**
@@ -85,7 +86,28 @@ public:
 	/// at 30 fps) in case the first request was lost. The server rate-limits relays regardless.
 	static constexpr int KEYFRAME_REREQUEST_AFTER_UNITS = 30;
 
+	/// Default for m_staleStreamTimeoutMsec (see there) - generous deliberately: TiledImageEncoder's own
+	/// periodic per-tile refresh (see VideoEncoder.h) means a genuinely alive, entirely static screen
+	/// share still produces some traffic well inside this window at any ordinary framerate, so the real
+	/// risk being guarded against is a false drop of a legitimately quiet stream, not a slow reaction to a
+	/// dead one.
+	static constexpr int DEFAULT_STALE_STREAM_TIMEOUT_MSEC = 45000;
+
 	explicit VideoGrid(QWidget *parent = nullptr);
+
+	/// Shrinks the stale-stream watchdog's timeout (see checkForStaleStreams()) and restarts its poll
+	/// timer to match - exposed purely so a test can exercise the real timer-driven path with
+	/// QTest::qWait() in a reasonable amount of wall-clock time, rather than either waiting out the real
+	/// 45-second default or calling checkForStaleStreams() directly and never actually exercising the
+	/// timer wiring it normally runs from. Not meant to be called outside a test.
+	void setStaleStreamTimeoutMsecForTesting(int msec);
+
+	/// How many times relayoutControls() has actually run - real per-tile widget work (setGeometry(),
+	/// raise(), sometimes creating a QWidget), unlike the update() a routine tile content change now uses
+	/// instead. Exposed purely so a test can prove that a tile updating within an already-laid-out surface
+	/// does not pay this cost, rather than trusting a comment that it does not. Not meant to be called
+	/// outside a test.
+	int relayoutControlsCallCountForTesting() const { return m_relayoutControlsCallCount; }
 
 	/// Number of other participants' tiles currently drawable - one per stream, not one per person, since
 	/// a sender may hold more than one stream (a camera and a screen, say). A stream not being watched
@@ -201,6 +223,12 @@ signals:
 	/// buffer is actually playing that sender's screen-share audio.
 	void volumeChanged(unsigned int senderSession, float multiplier);
 
+	/// A watched stream stopped producing units for long enough to be treated as dead and dropped - see
+	/// checkForStaleStreams(). The grid has already removed its own surface by the time this fires; this
+	/// is what lets the owner also withdraw the now-pointless subscription, the same VideoSubscribe(false)
+	/// a normal unwatch sends, so the server stops relaying a stream nothing is looking at any more.
+	void streamWentStale(unsigned int senderSession, unsigned int streamID);
+
 protected:
 	struct Surface {
 		QImage canvas;
@@ -238,6 +266,16 @@ protected:
 		/// right now and because the server is expected to stop sending them shortly after
 		/// watchToggled(false) goes out; this is the defensive side of that, not the mechanism itself.
 		bool watching = false;
+
+		/// QDateTime::currentMSecsSinceEpoch() the last time a unit arrived for this stream - including
+		/// one dropped because the surface was not being watched at the time, and reset again the instant
+		/// watching starts, so a stream that sat unwatched for a long time does not look stale the moment
+		/// someone finally clicks its eyeball. Read by the stale-stream watchdog in relayout()'s timer -
+		/// see checkForStaleStreams() - which exists because a sender whose disconnect the server never
+		/// gets to relay (its own crash left the connection in a state nothing here notices) otherwise
+		/// leaves its last frame on screen forever: nothing about VideoState(active=false) ever arrives to
+		/// remove it, and there is no other signal that the stream is actually gone.
+		qint64 lastUnitMsec = 0;
 
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
@@ -373,6 +411,32 @@ protected:
 	/// caused two access violations earlier in this class's history. The in-progress pass already reflects
 	/// whatever state change asked for the nested one, so skipping the nested call loses nothing.
 	bool m_relayoutInProgress = false;
+
+	/// Polls for streams that have gone quiet - see checkForStaleStreams(). A plain periodic timer rather
+	/// than something scheduled per-stream: the check itself is cheap (a linear scan of a map capped at
+	/// MAX_SENDERS entries), and a single shared timer needs no bookkeeping to add or remove as streams
+	/// come and go.
+	QTimer *m_staleCheckTimer = nullptr;
+
+	/// See DEFAULT_STALE_STREAM_TIMEOUT_MSEC and setStaleStreamTimeoutMsecForTesting(). A runtime value
+	/// rather than a compile-time constant purely for that testability - nothing in ordinary use ever
+	/// changes it from the default.
+	int m_staleStreamTimeoutMsec = DEFAULT_STALE_STREAM_TIMEOUT_MSEC;
+
+	/// See relayoutControlsCallCountForTesting(). Incremented at the top of relayoutControls() itself, so
+	/// it counts every real call regardless of which of relayout()'s several call sites reached it.
+	int m_relayoutControlsCallCount = 0;
+
+	/// Drops a watched stream nothing has arrived for in m_staleStreamTimeoutMsec, exactly as if its
+	/// sender's VideoState(active=false) had arrived - because for the case this exists to catch, no such
+	/// message ever will. A sender's own client crashing does not, by itself, guarantee the server notices
+	/// promptly: TCP teardown depends on the OS actually closing the socket, which a crash that leaves the
+	/// process in a non-terminating state (still generating a crash dump, say, or stuck behind a debugger
+	/// prompt nobody is there to dismiss) can leave undone indefinitely - and until the server notices, it
+	/// has nothing to relay to anyone else, so no client-side fix downstream of that message can help
+	/// either. This is the belt-and-suspenders alternative: judge staleness from silence on the stream
+	/// itself, not from being told it ended.
+	void checkForStaleStreams();
 
 	/// Builds a bar with just a fullscreen button - what every own tile gets.
 	std::unique_ptr< TileControlBar > makeOwnControlBar(FocusTarget target);

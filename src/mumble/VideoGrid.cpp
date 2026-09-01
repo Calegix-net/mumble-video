@@ -7,6 +7,8 @@
 
 #include "Mumble.pb.h"
 
+#include <QtCore/QDateTime>
+#include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -110,6 +113,18 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	// Without this, mouseMoveEvent() only fires while a button is held down, which would make hover-reveal
 	// controls require a click-and-hold to even discover. updateHoveredBar() is what actually uses it.
 	setMouseTracking(true);
+
+	// See checkForStaleStreams(). A tenth of the timeout: frequent enough that a genuinely dead stream is
+	// not left hanging noticeably past the timeout itself, cheap enough that running it this often is not
+	// worth thinking about further.
+	m_staleCheckTimer = new QTimer(this);
+	connect(m_staleCheckTimer, &QTimer::timeout, this, &VideoGrid::checkForStaleStreams);
+	m_staleCheckTimer->start(m_staleStreamTimeoutMsec / 10);
+}
+
+void VideoGrid::setStaleStreamTimeoutMsecForTesting(int msec) {
+	m_staleStreamTimeoutMsec = msec;
+	m_staleCheckTimer->start(std::max(1, msec / 10));
 }
 
 QSize VideoGrid::sizeHint() const {
@@ -320,6 +335,13 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 
 	it->second.watching = watching;
 
+	if (watching) {
+		// A fresh grace period: whatever it was doing while unwatched - possibly nothing, for a long time
+		// - must not count against it the instant someone actually starts watching. See
+		// checkForStaleStreams().
+		it->second.lastUnitMsec = QDateTime::currentMSecsSinceEpoch();
+	}
+
 	if (!watching && m_focus == FocusTarget::Surface && m_focusedSurfaceKey == it->first) {
 		// Un-fullscreen whatever was just told to stop being watched, rather than leaving a placeholder
 		// filling the whole grid.
@@ -342,6 +364,9 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	}
 
 	Surface &surface = existing->second;
+
+	// Recorded regardless of watching state, deliberately - see setWatching() and checkForStaleStreams().
+	surface.lastUnitMsec = QDateTime::currentMSecsSinceEpoch();
 
 	if (!surface.watching) {
 		// Unwatched: the owner has already sent (or is about to send) a VideoSubscribe withdrawing this,
@@ -433,11 +458,28 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		painter.drawImage(static_cast< int >(x), static_cast< int >(y), tile);
 	}
 
+	// A brand new picture changes which cells are occupied and what every control bar's geometry should
+	// be, so it needs the full relayout(). A tile updating within a surface that already had a picture
+	// changes none of that - only the pixels themselves, and, if this happens to be the surface currently
+	// shown full-screen, that window's content too. relayoutControls() does real per-tile widget work
+	// (setGeometry(), raise(), sometimes creating a QWidget) every time it runs; paying that cost for
+	// every other participant's tile on every single incoming unit - which for a busy screen share or a
+	// moving camera can be dozens a second - was a real, measurable source of lag for anyone watching more
+	// than a tile or two, without the sender who never triggers this path ever seeing it. update() alone
+	// is enough for the picture itself: Qt coalesces any number of update() calls made before the next
+	// paint into one repaint, unlike relayoutControls()'s immediate, uncoalesced widget work.
 	if (wasBlank) {
 		emit senderCountChanged(tileCount());
+		relayout();
+
+		return;
 	}
 
-	relayout();
+	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == existing->first) {
+		updateFullscreenWindow();
+	}
+
+	update();
 }
 
 void VideoGrid::setSelfCameraFrame(const QImage &frame) {
@@ -445,11 +487,20 @@ void VideoGrid::setSelfCameraFrame(const QImage &frame) {
 
 	m_selfCameraFrame = frame;
 
+	// See the equivalent comment in onVideoUnitReceived(): a continuing preview updating its picture does
+	// not change the layout, only appearing or disappearing does.
 	if (wasEmpty != frame.isNull()) {
 		emit senderCountChanged(tileCount());
+		relayout();
+
+		return;
 	}
 
-	relayout();
+	if (m_focus == FocusTarget::SelfCamera) {
+		updateFullscreenWindow();
+	}
+
+	update();
 }
 
 void VideoGrid::clearSelfCameraFrame() {
@@ -470,9 +521,16 @@ void VideoGrid::setSelfScreenFrame(const QImage &frame) {
 
 	if (wasEmpty != frame.isNull()) {
 		emit senderCountChanged(tileCount());
+		relayout();
+
+		return;
 	}
 
-	relayout();
+	if (m_focus == FocusTarget::SelfScreen) {
+		updateFullscreenWindow();
+	}
+
+	update();
 }
 
 void VideoGrid::clearSelfScreenFrame() {
@@ -510,6 +568,31 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 	if (removedAny) {
 		emit senderCountChanged(senderCount());
 		relayout();
+	}
+}
+
+void VideoGrid::checkForStaleStreams() {
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+	// Collected first, rather than erased while walking m_surfaces directly: removeSender() below mutates
+	// the very map this loop would otherwise still be iterating.
+	std::vector< std::pair< unsigned int, unsigned int > > stale;
+
+	for (const auto &entry : m_surfaces) {
+		const Surface &surface = entry.second;
+
+		if (surface.watching && now - surface.lastUnitMsec > m_staleStreamTimeoutMsec) {
+			stale.emplace_back(surface.senderSession, surface.streamID);
+		}
+	}
+
+	for (const auto &[senderSession, streamID] : stale) {
+		removeSender(senderSession, streamID);
+
+		// After removal, not before: the doc comment on this signal promises the surface is already gone
+		// by the time anything sees it, and the owner's response (withdrawing the subscription) has
+		// nothing useful left to race against on this side either way.
+		emit streamWentStale(senderSession, streamID);
 	}
 }
 
@@ -693,6 +776,8 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 }
 
 void VideoGrid::relayoutControls(const Layout &layout) {
+	++m_relayoutControlsCallCount;
+
 	constexpr int BAR_HEIGHT = 28;
 
 	// The grid always shows its normal multi-tile layout now, fullscreen or not - see the class comment

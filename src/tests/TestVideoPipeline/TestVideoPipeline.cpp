@@ -93,6 +93,7 @@ private slots:
 	void frameEndMarksTheLastUnit();
 	void oversizeTilesAreRequantisedNotDropped();
 	void every128PxTileFitsOneTransportUnit();
+	void periodicRefreshIsStaggeredNotBurst();
 };
 
 void TestVideoPipeline::syntheticSourceProducesDistinctFrames() {
@@ -345,6 +346,61 @@ void TestVideoPipeline::every128PxTileFitsOneTransportUnit() {
 	for (const EncodedVideoUnit &unit : units) {
 		QVERIFY(unit.payload.size() <= VideoFragmenter::maxUnitSize());
 	}
+}
+
+// Regression test for a real report: a viewer's screen share showed persistent splotchy corruption -
+// tiles lost to real network loss have no per-tile ack or sequence for a receiver to even notice one is
+// missing, and the periodic full-repaint that used to be the only recovery path sent every tile of the
+// grid on the very same frame, once every FULL_REFRESH_INTERVAL_FRAMES calls - a burst substantial enough
+// on real content to risk itself contributing to loss, compounding the very problem it exists to fix.
+// Refreshing is now staggered by tile index instead of landing on one frame all at once; this is what
+// actually proves that, rather than merely asserting it by re-reading the implementation.
+void TestVideoPipeline::periodicRefreshIsStaggeredNotBurst() {
+	SyntheticVideoSource source(640, 480);
+	TiledImageEncoder encoder;
+
+	const QImage frame = source.render(0);
+
+	const std::vector< EncodedVideoUnit > baseline = encoder.encode(frame, STREAM, 1, 1);
+	QVERIFY(!baseline.empty());
+
+	const unsigned int tileCount = encoder.lastStats().tilesConsidered;
+	QVERIFY(tileCount > 1);
+
+	// One full staggered cycle, feeding back the identical frame throughout - anything at all emitted
+	// after the baseline is the periodic refresh, not a genuine content change.
+	constexpr int CYCLE_FRAMES = 150;
+
+	int framesWithOutput            = 0;
+	std::size_t maxUnitsInOneFrame = 0;
+	unsigned int totalTilesRefreshed = 0;
+
+	for (int i = 0; i < CYCLE_FRAMES; ++i) {
+		const std::vector< EncodedVideoUnit > units =
+			encoder.encode(frame, STREAM, static_cast< std::uint64_t >(2 + i), static_cast< std::uint64_t >(2 + i));
+
+		if (units.empty()) {
+			continue;
+		}
+
+		++framesWithOutput;
+		maxUnitsInOneFrame = std::max(maxUnitsInOneFrame, units.size());
+		totalTilesRefreshed += static_cast< unsigned int >(units.size());
+	}
+
+	// Spread across many frames, not concentrated into one - a single frame carrying the whole grid at
+	// once is exactly the bursty behaviour being replaced.
+	QVERIFY2(framesWithOutput > 1, "the periodic refresh landed on only one frame - it is bursting again");
+
+	// Every tile refreshed exactly once over one full cycle - the same total recovery guarantee as
+	// before, just no longer paid for all at once.
+	QCOMPARE(totalTilesRefreshed, tileCount);
+
+	// No single frame emits anywhere near the whole grid. A loose bound rather than "exactly one tile
+	// per frame": more than one tile can legitimately land on the same frame by coincidence of the index
+	// arithmetic, especially for a small grid - what actually matters is that it is nothing like the old
+	// all-tiles-at-once burst.
+	QVERIFY(maxUnitsInOneFrame < tileCount / 2);
 }
 
 QTEST_MAIN(TestVideoPipeline)

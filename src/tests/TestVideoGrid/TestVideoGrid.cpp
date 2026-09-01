@@ -104,6 +104,9 @@ private slots:
 	void itPaintsWithoutCrashing();
 	void rapidWatchToggleWhileFramesArriveDoesNotCrash();
 	void firstFrameShowingTheDockDoesNotReenterUnsafely();
+	void watchedStreamGoingSilentIsDroppedAsStale();
+	void watchedStreamStillActiveIsNotDroppedAsStale();
+	void routineTileUpdatesDoNotReflowEveryTilesControls();
 };
 
 void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
@@ -833,6 +836,131 @@ void TestVideoGrid::firstFrameShowingTheDockDoesNotReenterUnsafely() {
 
 	QVERIFY(sawReentrantResize);
 	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+}
+
+// Regression test for a real report: when someone's client crashed mid-share, their frozen last frame
+// stayed on every remaining viewer's screen indefinitely - not merely for a few seconds, but never
+// clearing on its own. msgUserRemove already exists to clean up a departed sender's video (added before
+// this session, confirmed present and correct), but it depends entirely on the server actually noticing
+// the disconnect and relaying that notice - and a crash that leaves the process in a non-terminating
+// state (still writing a crash dump, say) can leave that noticing undone indefinitely, with nothing
+// downstream able to help. This exercises the watchdog that exists for exactly that case: judging
+// staleness from silence on the stream itself, needing no notification at all.
+void TestVideoGrid::watchedStreamGoingSilentIsDroppedAsStale() {
+	VideoGrid grid;
+	grid.setStaleStreamTimeoutMsecForTesting(100);
+
+	QSignalSpy staleSpy(&grid, &VideoGrid::streamWentStale);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// Real silence, past the (shrunk, for this test) timeout - the actual timer firing is what drops it,
+	// not a direct call to the check it drives.
+	QTest::qWait(500);
+
+	QCOMPARE(staleSpy.count(), 1);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+}
+
+// The other half of the same property: a stream that keeps producing units, even slowly, must never be
+// mistaken for a dead one just because some real wall-clock time has passed in total.
+void TestVideoGrid::watchedStreamStillActiveIsNotDroppedAsStale() {
+	VideoGrid grid;
+	grid.setStaleStreamTimeoutMsecForTesting(300);
+
+	QSignalSpy staleSpy(&grid, &VideoGrid::streamWentStale);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	// Each gap alone stays comfortably under the timeout, even though the total elapsed time by the end
+	// exceeds it several times over - what matters is the gap since the last unit, not the running total.
+	for (int i = 0; i < 5; ++i) {
+		grid.onVideoUnitReceived(SENDER, STREAM, static_cast< quint64 >(i), true, 0, 0, encoded);
+		QTest::qWait(100);
+	}
+
+	QCOMPARE(staleSpy.count(), 0);
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+}
+
+// Regression test for a real report: viewers watching an active screen share or camera - never the person
+// sharing, whose own preview never goes through this path at all - saw real, sustained lag.
+// onVideoUnitReceived() used to call the full relayout() on every single incoming unit, and
+// relayoutControls() - the expensive part of that - does real per-tile widget work for every tile in the
+// grid, not just the one that changed. This proves a routine tile update, within a surface that already
+// has a picture, no longer pays that cost.
+void TestVideoGrid::routineTileUpdatesDoNotReflowEveryTilesControls() {
+	SyntheticVideoSource source(640, 480);
+	source.setChangeRatio(100);
+
+	TiledImageEncoder encoderA;
+	TiledImageEncoder encoderB;
+
+	VideoGrid grid;
+	grid.resize(800, 600);
+
+	// A second, unrelated sender in the grid too - relayoutControls(), if it ran, would touch this one's
+	// control bar as well, exactly the wasted work being tested against.
+	grid.setStreamCodec(2, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(2, STREAM, true);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN,
+						MumbleProto::VideoState_Codec_TiledImage);
+	grid.setWatching(SENDER, STREAM, true);
+
+	const auto deliver = [&](unsigned int sender, TiledImageEncoder &encoder, quint64 frameNumber) {
+		const std::vector< EncodedVideoUnit > units =
+			encoder.encode(source.render(frameNumber), STREAM, frameNumber, frameNumber);
+
+		for (const EncodedVideoUnit &unit : units) {
+			grid.onVideoUnitReceived(
+				sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+				QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+						  static_cast< int >(unit.payload.size())));
+		}
+	};
+
+	// The first frame for each surface is the wasBlank transition - the one case that legitimately still
+	// needs the full relayout(), since it is what makes the tile occupy a cell at all.
+	deliver(2, encoderB, 0);
+	deliver(SENDER, encoderA, 0);
+
+	const int countAfterFirstFrames = grid.relayoutControlsCallCountForTesting();
+	QVERIFY(countAfterFirstFrames > 0);
+
+	// Many more frames of ordinary content change, on an already-populated surface - the case this fix is
+	// actually about.
+	for (quint64 i = 1; i <= 20; ++i) {
+		deliver(SENDER, encoderA, i);
+	}
+
+	QCOMPARE(grid.relayoutControlsCallCountForTesting(), countAfterFirstFrames);
 }
 
 QTEST_MAIN(TestVideoGrid)

@@ -104,8 +104,21 @@ protected:
 	// Hash per tile of the previous frame, in row-major tile order, used to skip unchanged tiles.
 	std::vector< std::uint64_t > m_tileHashes;
 
-	/// Frames since every tile was last sent; see encode().
-	unsigned int m_framesSinceFullRefresh                     = 0;
+	/// Counts encode() calls, used only to stagger the periodic per-tile refresh below - see encode(). Not
+	/// reset by an explicit forceKeyframe (a resize, a genuine keyframe request): those need every tile
+	/// sent immediately regardless of where the staggered cycle happens to be, and letting the cycle run
+	/// on undisturbed means an explicit refresh never has to fight the staggered one for which tiles get
+	/// sent this frame.
+	unsigned int m_frameCounter = 0;
+
+	/// A tile whose content has not changed is still re-sent once every this many frames, on a schedule
+	/// staggered by tile index rather than all at once - see encode(). Recovers a tile lost to real network
+	/// loss without a receiver-side mechanism to even notice one is missing (TiledImage units carry no
+	/// per-tile sequence or ack, unlike VP8's frame-continuity tracking), without concentrating that
+	/// recovery traffic into one all-tiles-at-once burst large enough to risk congesting the connection it
+	/// is trying to repair - a single burst of every tile in a 1080p frame is well over a hundred JPEG units
+	/// landing in one frame interval, and if some of that burst is itself lost, the compounding cost is a
+	/// human-visible stretch of corruption well past the nominal recovery window, not a single lost tile.
 	static constexpr unsigned int FULL_REFRESH_INTERVAL_FRAMES = 150;
 
 	Stats m_lastStats;

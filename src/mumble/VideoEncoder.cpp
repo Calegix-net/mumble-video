@@ -186,17 +186,7 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 		forceKeyframe = true;
 	}
 
-	// A periodic full repaint, so that a viewer whose keyframe request was lost - or who joined while
-	// the sender was running a build that ignored it - still ends up with the whole picture rather
-	// than only the tiles that have changed since they subscribed. Cheap: a screen share runs at a
-	// handful of frames a second, and between refreshes unchanged tiles still cost nothing.
-	if (++m_framesSinceFullRefresh >= FULL_REFRESH_INTERVAL_FRAMES) {
-		forceKeyframe = true;
-	}
-
-	if (forceKeyframe) {
-		m_framesSinceFullRefresh = 0;
-	}
+	++m_frameCounter;
 
 	units.reserve(tileCount);
 
@@ -222,7 +212,14 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 
 			const std::uint64_t hash = hashImage(tile);
 
-			if (!forceKeyframe && m_tileHashes[index] == hash) {
+			// Every tile gets its periodic re-send on a different frame from every other tile - see
+			// FULL_REFRESH_INTERVAL_FRAMES - a index-staggered schedule rather than the whole grid
+			// landing on the same frame every 150th call. An unchanged tile whose turn has not come up
+			// yet is skipped exactly as before.
+			const bool tileDueForPeriodicRefresh =
+				(static_cast< unsigned int >(index) + m_frameCounter) % FULL_REFRESH_INTERVAL_FRAMES == 0;
+
+			if (!forceKeyframe && !tileDueForPeriodicRefresh && m_tileHashes[index] == hash) {
 				m_lastStats.tilesUnchanged++;
 				continue;
 			}

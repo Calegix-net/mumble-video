@@ -595,6 +595,30 @@ void MainWindow::setupVideoGrid() {
 			[this](unsigned int senderSession, float multiplier) {
 				setScreenShareVolumeForSender(senderSession, multiplier);
 			});
+
+	// A stream the grid gave up on for having gone silent too long - see VideoGrid's stale-stream
+	// watchdog. Ordinarily msgUserRemove is what withdraws a departed sender's subscription (see
+	// Messages.cpp); this exists specifically for the case that message never arrives at all - the
+	// sender's own client crashed in a way that also stopped the server from ever noticing it
+	// disconnected, so nothing tells this client to stop asking for a stream nobody is sending any more.
+	// Same unsubscribe watchToggled(false) sends; the difference is only who initiated it.
+	connect(m_videoGrid, &VideoGrid::streamWentStale, this,
+			[this](unsigned int senderSession, unsigned int streamID) {
+				Global::get().l->log(Log::Warning,
+									 tr("A shared stream from session %1 went silent and was dropped.")
+										 .arg(senderSession));
+
+				if (!Global::get().sh) {
+					return;
+				}
+
+				MumbleProto::VideoSubscribe mpvs;
+				mpvs.set_session(senderSession);
+				mpvs.set_stream_id(streamID);
+				mpvs.set_subscribe(false);
+
+				Global::get().sh->sendMessage(mpvs);
+			});
 }
 
 void MainWindow::setupVideoBroadcast() {
