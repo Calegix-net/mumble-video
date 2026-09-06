@@ -21,6 +21,11 @@ public:
 	using PipeWireScreenVideoSource::publishFrame;
 	using PipeWireScreenVideoSource::reportPersistentDrop;
 	void begin() { m_running = true; }
+	void consume(const spa_buffer *buffer) {
+		m_size      = QSize(2, 2);
+		m_spaFormat = SPA_VIDEO_FORMAT_BGRA;
+		processBuffer(buffer);
+	}
 	bool published() const { return m_everPublished; }
 	bool deliveryQueued() const { return m_deliveryQueued; }
 	int drops() const { return m_consecutiveDrops; }
@@ -234,6 +239,62 @@ private slots:
 		buffer.datas     = &data;
 		const auto frame = SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA);
 		QCOMPARE(frame.pixel(0, 0), qRgb(0, 0, 0));
+	}
+	void metadataOnlyBuffersDoNotStopCapture() {
+		SourceProbe source;
+		source.begin();
+		QSignalSpy errors(&source, &VideoSource::failed);
+		QSignalSpy frames(&source, &VideoSource::frameReady);
+		spa_chunk chunk{};
+		spa_data data{};
+		data.type  = SPA_DATA_MemPtr;
+		data.chunk = &chunk;
+		spa_buffer buffer{};
+		buffer.n_datas = 1;
+		buffer.datas   = &data;
+		for (int i = 0; i < 100; ++i)
+			source.consume(&buffer);
+		QCoreApplication::processEvents();
+		QCOMPARE(errors.count(), 0);
+		QCOMPARE(frames.count(), 0);
+		QCOMPARE(source.drops(), 0);
+		QVERIFY(!source.published());
+		unsigned char bytes[16] = {};
+		data.data               = bytes;
+		data.maxsize            = sizeof(bytes);
+		chunk.size              = sizeof(bytes);
+		chunk.stride            = 8;
+		source.consume(&buffer);
+		QTRY_COMPARE(frames.count(), 1);
+		QVERIFY(source.published());
+		chunk.size = 0;
+		for (int i = 0; i < 100; ++i)
+			source.consume(&buffer);
+		QCoreApplication::processEvents();
+		QCOMPARE(errors.count(), 0);
+		QCOMPARE(frames.count(), 1);
+		QVERIFY(source.isRunning());
+		// Corrupt empty chunks must still be rejected, never treated as idle.
+		chunk.flags = SPA_CHUNK_FLAG_CORRUPTED;
+		for (int i = 0; i < 30; ++i)
+			source.consume(&buffer);
+		QTRY_COMPARE(errors.count(), 1);
+		QVERIFY(!source.isRunning());
+	}
+	void neutralFrameDoesNotRequirePixelStorage() {
+		spa_chunk chunk{};
+		chunk.flags = SPA_CHUNK_FLAG_EMPTY;
+		spa_data data{};
+		data.chunk = &chunk;
+		spa_buffer buffer{};
+		buffer.n_datas   = 1;
+		buffer.datas     = &data;
+		const auto frame = SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA);
+		QCOMPARE(frame.size(), QSize(2, 2));
+		QCOMPARE(frame.pixel(0, 0), qRgb(0, 0, 0));
+		QCOMPARE(frame.pixel(1, 1), qRgb(0, 0, 0));
+		chunk.flags = SPA_CHUNK_FLAG_EMPTY | SPA_CHUNK_FLAG_CORRUPTED;
+		QVERIFY(SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA).isNull());
 	}
 	void restartDiscardsOldFramesAndErrors() {
 		SourceProbe source;
