@@ -58,6 +58,9 @@ public:
 	 */
 	bool requestAccess(SourceType sourceType, bool allowCursor);
 
+	/// Most recent D-Bus / portal failure string, for UI logging when requestAccess returns false.
+	QString lastError() const { return m_lastError; }
+
 	/// Closes the portal session. The compositor stops capturing as soon as this returns.
 	void close();
 
@@ -113,6 +116,7 @@ protected:
 
 	/// Token unique to this session, so concurrent requests from the same client do not collide.
 	QString m_token;
+	QString m_lastError;
 
 	QDBusObjectPath m_sessionHandle;
 	bool m_sessionOpen = false;

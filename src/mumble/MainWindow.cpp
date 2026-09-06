@@ -31,6 +31,7 @@
 #include "AudioLoopbackSource.h"
 #include "AudioOutputScreenShare.h"
 #include "CameraVideoSource.h"
+#include "VideoSource.h"
 #include "ChannelListenerManager.h"
 #include "FailedConnectionDialog.h"
 #include "ListenerVolumeSlider.h"
@@ -896,7 +897,12 @@ void MainWindow::toggleCameraShare(bool share) {
 		camera = CameraVideoSource::defaultCamera();
 	}
 
-	if (camera.isNull()) {
+	const bool forceMockCamera = !qEnvironmentVariableIsEmpty("MUMBLE_MOCK_CAMERA");
+	const bool mockCameraFallback =
+		camera.isNull() && !qEnvironmentVariableIsEmpty("MUMBLE_MOCK_CAMERA_FALLBACK");
+	const bool useMockCamera = forceMockCamera || mockCameraFallback;
+
+	if (camera.isNull() && !useMockCamera) {
 		Global::get().l->log(Log::Warning, tr("No camera is available."));
 		m_shareCameraAction->setChecked(false);
 
@@ -907,7 +913,20 @@ void MainWindow::toggleCameraShare(bool share) {
 								  static_cast< unsigned int >(settings.iVideoFramerate), settings.iVideoTileQuality,
 								  settings.iVideoTileSize);
 
-	if (!m_videoBroadcaster->start(std::make_unique< CameraVideoSource >(camera))) {
+	std::unique_ptr< VideoSource > source;
+	if (useMockCamera) {
+		// Software frames for headless / battle hosts with no V4L2 device. Gated by env so
+		// production never silently substitutes a fake camera.
+		auto mock = std::make_unique< SyntheticVideoSource >(640, 360);
+		const int intervalMs =
+			settings.iVideoFramerate > 0 ? std::max(1, 1000 / settings.iVideoFramerate) : 66;
+		mock->setInterval(intervalMs);
+		source = std::move(mock);
+	} else {
+		source = std::make_unique< CameraVideoSource >(camera);
+	}
+
+	if (!m_videoBroadcaster->start(std::move(source))) {
 		Global::get().l->log(Log::Warning, tr("Could not start the camera."));
 		m_shareCameraAction->setChecked(false);
 
