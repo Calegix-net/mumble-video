@@ -44,93 +44,106 @@
 
 namespace ABI {
 namespace Windows {
-namespace Graphics {
-struct SizeInt32 {
-	INT32 Width;
-	INT32 Height;
-};
-namespace Capture {
+	namespace Graphics {
+		struct SizeInt32 {
+			INT32 Width;
+			INT32 Height;
+		};
+		namespace Capture {
 
-// Placeholders for event-handler and dispatcher-queue parameter types this project never constructs or
-// dereferences - see the class comment above.
-struct WgcFrameArrivedHandlerPlaceholder;
-struct WgcClosedHandlerPlaceholder;
-struct WgcDispatcherQueuePlaceholder;
+			// Placeholders for event-handler and dispatcher-queue parameter types this project never constructs or
+			// dereferences - see the class comment above.
+			struct WgcFrameArrivedHandlerPlaceholder;
+			struct WgcClosedHandlerPlaceholder;
+			struct WgcDispatcherQueuePlaceholder;
 
-MIDL_INTERFACE("fa50c623-38da-4b32-acf3-fa9734ad800e")
-IDirect3D11CaptureFrame : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE get_Surface(
-		::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface **value) = 0;
-	virtual HRESULT STDMETHODCALLTYPE get_SystemRelativeTime(::ABI::Windows::Foundation::TimeSpan *value) = 0;
-	virtual HRESULT STDMETHODCALLTYPE get_ContentSize(SizeInt32 *value) = 0;
-};
+			MIDL_INTERFACE("fa50c623-38da-4b32-acf3-fa9734ad800e")
+			IDirect3D11CaptureFrame : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE get_Surface(
+					::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface * *value) = 0;
+				virtual HRESULT STDMETHODCALLTYPE get_SystemRelativeTime(::ABI::Windows::Foundation::TimeSpan
+																		 * value)             = 0;
+				virtual HRESULT STDMETHODCALLTYPE get_ContentSize(SizeInt32 * value)          = 0;
+			};
 
-MIDL_INTERFACE("79c3f95b-31f7-4ec2-a464-632ef5d30760")
-IGraphicsCaptureItem : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE get_DisplayName(HSTRING *value)                     = 0;
-	virtual HRESULT STDMETHODCALLTYPE get_Size(SizeInt32 *value)                          = 0;
-	virtual HRESULT STDMETHODCALLTYPE add_Closed(WgcClosedHandlerPlaceholder *handler,
-												 EventRegistrationToken *token)            = 0;
-	virtual HRESULT STDMETHODCALLTYPE remove_Closed(EventRegistrationToken token)          = 0;
-};
+			MIDL_INTERFACE("79c3f95b-31f7-4ec2-a464-632ef5d30760")
+			IGraphicsCaptureItem : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE get_DisplayName(HSTRING * value)            = 0;
+				virtual HRESULT STDMETHODCALLTYPE get_Size(SizeInt32 * value)                 = 0;
+				virtual HRESULT STDMETHODCALLTYPE add_Closed(WgcClosedHandlerPlaceholder * handler,
+															 EventRegistrationToken * token)  = 0;
+				virtual HRESULT STDMETHODCALLTYPE remove_Closed(EventRegistrationToken token) = 0;
+			};
 
-MIDL_INTERFACE("814e42a9-f70f-4ad7-939b-fddcc6eb880d")
-IGraphicsCaptureSession : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE StartCapture() = 0;
-};
+			MIDL_INTERFACE("814e42a9-f70f-4ad7-939b-fddcc6eb880d")
+			IGraphicsCaptureSession : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE StartCapture() = 0;
+			};
 
-MIDL_INTERFACE("2c39ae40-7d2e-5044-804e-8b6799d4cf9e")
-IGraphicsCaptureSession2 : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE get_IsCursorCaptureEnabled(boolean *value) = 0;
-	virtual HRESULT STDMETHODCALLTYPE put_IsCursorCaptureEnabled(boolean value)  = 0;
-};
+			MIDL_INTERFACE("2c39ae40-7d2e-5044-804e-8b6799d4cf9e")
+			IGraphicsCaptureSession2 : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE get_IsCursorCaptureEnabled(boolean * value) = 0;
+				virtual HRESULT STDMETHODCALLTYPE put_IsCursorCaptureEnabled(boolean value)   = 0;
+			};
 
-MIDL_INTERFACE("24eb6d22-1975-422e-82e7-780dbd8ddf24")
-IDirect3D11CaptureFramePool : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE Recreate(::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice *device,
-											   ::ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixel_format,
-											   INT32 number_of_buffers, SizeInt32 size)                    = 0;
-	virtual HRESULT STDMETHODCALLTYPE TryGetNextFrame(IDirect3D11CaptureFrame **result)                    = 0;
-	virtual HRESULT STDMETHODCALLTYPE add_FrameArrived(WgcFrameArrivedHandlerPlaceholder *handler,
-													   EventRegistrationToken *token)                       = 0;
-	virtual HRESULT STDMETHODCALLTYPE remove_FrameArrived(EventRegistrationToken token)                     = 0;
-	virtual HRESULT STDMETHODCALLTYPE CreateCaptureSession(IGraphicsCaptureItem *item,
-														    IGraphicsCaptureSession **result)                = 0;
-	virtual HRESULT STDMETHODCALLTYPE get_DispatcherQueue(WgcDispatcherQueuePlaceholder **value)             = 0;
-};
+			MIDL_INTERFACE("24eb6d22-1975-422e-82e7-780dbd8ddf24")
+			IDirect3D11CaptureFramePool : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE Recreate(
+					::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice * device,
+					::ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixel_format, INT32 number_of_buffers,
+					SizeInt32 size)                                                                           = 0;
+				virtual HRESULT STDMETHODCALLTYPE TryGetNextFrame(IDirect3D11CaptureFrame * *result)          = 0;
+				virtual HRESULT STDMETHODCALLTYPE add_FrameArrived(WgcFrameArrivedHandlerPlaceholder * handler,
+																   EventRegistrationToken * token)            = 0;
+				virtual HRESULT STDMETHODCALLTYPE remove_FrameArrived(EventRegistrationToken token)           = 0;
+				virtual HRESULT STDMETHODCALLTYPE CreateCaptureSession(IGraphicsCaptureItem * item,
+																	   IGraphicsCaptureSession * *result)     = 0;
+				virtual HRESULT STDMETHODCALLTYPE get_DispatcherQueue(WgcDispatcherQueuePlaceholder * *value) = 0;
+			};
 
-MIDL_INTERFACE("7784056a-67aa-4d53-ae54-1088d5a8ca21")
-IDirect3D11CaptureFramePoolStatics : public IInspectable {
-public:
-	virtual HRESULT STDMETHODCALLTYPE Create(::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice *device,
-											 ::ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixel_format,
-											 INT32 number_of_buffers, SizeInt32 size,
-											 IDirect3D11CaptureFramePool **result) = 0;
-};
+			MIDL_INTERFACE("7784056a-67aa-4d53-ae54-1088d5a8ca21")
+			IDirect3D11CaptureFramePoolStatics : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE Create(
+					::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice * device,
+					::ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixel_format, INT32 number_of_buffers,
+					SizeInt32 size, IDirect3D11CaptureFramePool * *result) = 0;
+			};
 
-} // namespace Capture
-} // namespace Graphics
+			MIDL_INTERFACE("589b103f-6bbc-5df5-a991-02e28b3b66d5")
+			IDirect3D11CaptureFramePoolStatics2 : public IInspectable {
+			public:
+				virtual HRESULT STDMETHODCALLTYPE CreateFreeThreaded(
+					::ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice * device,
+					::ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixel_format, INT32 number_of_buffers,
+					SizeInt32 size, IDirect3D11CaptureFramePool * *result) = 0;
+			};
+
+		} // namespace Capture
+	} // namespace Graphics
 } // namespace Windows
 } // namespace ABI
 
 #ifdef __CRT_UUID_DECL
-__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame, 0xfa50c623, 0x38da, 0x4b32, 0xac, 0xf3,
-				0xfa, 0x97, 0x34, 0xad, 0x80, 0x0e)
+__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame, 0xfa50c623, 0x38da, 0x4b32, 0xac, 0xf3, 0xfa,
+				0x97, 0x34, 0xad, 0x80, 0x0e)
 __CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IGraphicsCaptureItem, 0x79c3f95b, 0x31f7, 0x4ec2, 0xa4, 0x64, 0x63,
 				0x2e, 0xf5, 0xd3, 0x07, 0x60)
-__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IGraphicsCaptureSession, 0x814e42a9, 0xf70f, 0x4ad7, 0x93, 0x9b,
-				0xfd, 0xdc, 0xc6, 0xeb, 0x88, 0x0d)
-__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IGraphicsCaptureSession2, 0x2c39ae40, 0x7d2e, 0x5044, 0x80, 0x4e,
-				0x8b, 0x67, 0x99, 0xd4, 0xcf, 0x9e)
+__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IGraphicsCaptureSession, 0x814e42a9, 0xf70f, 0x4ad7, 0x93, 0x9b, 0xfd,
+				0xdc, 0xc6, 0xeb, 0x88, 0x0d)
+__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IGraphicsCaptureSession2, 0x2c39ae40, 0x7d2e, 0x5044, 0x80, 0x4e, 0x8b,
+				0x67, 0x99, 0xd4, 0xcf, 0x9e)
 __CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool, 0x24eb6d22, 0x1975, 0x422e, 0x82, 0xe7,
 				0x78, 0x0d, 0xbd, 0x8d, 0xdf, 0x24)
-__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics, 0x7784056a, 0x67aa, 0x4d53,
-				0xae, 0x54, 0x10, 0x88, 0xd5, 0xa8, 0xca, 0x21)
+__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics, 0x7784056a, 0x67aa, 0x4d53, 0xae,
+				0x54, 0x10, 0x88, 0xd5, 0xa8, 0xca, 0x21)
+__CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2, 0x589b103f, 0x6bbc, 0x5df5, 0xa9,
+				0x91, 0x02, 0xe2, 0x8b, 0x3b, 0x66, 0xd5)
 #endif // __CRT_UUID_DECL
 
 // IGraphicsCaptureItemInterop is declared outside the ABI::Windows::... tree in the real header too - not
@@ -139,13 +152,12 @@ __CRT_UUID_DECL(ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStat
 MIDL_INTERFACE("3628e81b-3cac-4c60-b7f4-23ce0e0c3356")
 IGraphicsCaptureItemInterop : public IUnknown {
 public:
-	virtual HRESULT STDMETHODCALLTYPE CreateForWindow(HWND window, REFIID iid, void **result)   = 0;
+	virtual HRESULT STDMETHODCALLTYPE CreateForWindow(HWND window, REFIID iid, void **result)       = 0;
 	virtual HRESULT STDMETHODCALLTYPE CreateForMonitor(HMONITOR monitor, REFIID iid, void **result) = 0;
 };
 
 #ifdef __CRT_UUID_DECL
-__CRT_UUID_DECL(IGraphicsCaptureItemInterop, 0x3628e81b, 0x3cac, 0x4c60, 0xb7, 0xf4, 0x23, 0xce, 0x0e, 0x0c, 0x33,
-				0x56)
+__CRT_UUID_DECL(IGraphicsCaptureItemInterop, 0x3628e81b, 0x3cac, 0x4c60, 0xb7, 0xf4, 0x23, 0xce, 0x0e, 0x0c, 0x33, 0x56)
 #endif // __CRT_UUID_DECL
 
 #endif // MUMBLE_MUMBLE_WGCCAPTURECOMPAT_H_

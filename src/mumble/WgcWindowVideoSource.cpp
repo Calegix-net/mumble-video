@@ -8,6 +8,7 @@
 #include <roapi.h>
 #include <winstring.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace ABI::Windows::Graphics;
@@ -16,6 +17,17 @@ using namespace ABI::Windows::Graphics::DirectX;
 using namespace ABI::Windows::Graphics::DirectX::Direct3D11;
 
 namespace {
+
+void closeCaptureObject(IInspectable *object) {
+	if (!object)
+		return;
+	ABI::Windows::Foundation::IClosable *closable = nullptr;
+	if (SUCCEEDED(object->QueryInterface(__uuidof(ABI::Windows::Foundation::IClosable),
+										 reinterpret_cast< void ** >(&closable)))) {
+		closable->Close();
+		closable->Release();
+	}
+}
 
 const D3D_FEATURE_LEVEL FEATURE_LEVELS[] = {
 	D3D_FEATURE_LEVEL_11_1,
@@ -99,11 +111,13 @@ void WgcWindowVideoSource::releaseSession() {
 	m_stagingHeight = 0;
 
 	if (m_session) {
+		closeCaptureObject(m_session);
 		m_session->Release();
 		m_session = nullptr;
 	}
 
 	if (m_framePool) {
+		closeCaptureObject(m_framePool);
 		m_framePool->Release();
 		m_framePool = nullptr;
 	}
@@ -112,6 +126,12 @@ void WgcWindowVideoSource::releaseSession() {
 		m_item->Release();
 		m_item = nullptr;
 	}
+
+	if (m_captureDevice) {
+		m_captureDevice->Release();
+		m_captureDevice = nullptr;
+	}
+	m_poolSize = {};
 
 	if (m_context) {
 		m_context->Release();
@@ -152,7 +172,7 @@ bool WgcWindowVideoSource::acquireSession() {
 		return false;
 	}
 
-	HSTRING itemClassId = nullptr;
+	HSTRING itemClassId           = nullptr;
 	const wchar_t itemClassName[] = L"Windows.Graphics.Capture.GraphicsCaptureItem";
 	HRESULT hr = WindowsCreateString(itemClassName, static_cast< UINT32 >(wcslen(itemClassName)), &itemClassId);
 
@@ -164,8 +184,8 @@ bool WgcWindowVideoSource::acquireSession() {
 	}
 
 	IGraphicsCaptureItemInterop *interop = nullptr;
-	hr = RoGetActivationFactory(itemClassId, __uuidof(IGraphicsCaptureItemInterop),
-								reinterpret_cast< void ** >(&interop));
+	hr                                   = RoGetActivationFactory(itemClassId, __uuidof(IGraphicsCaptureItemInterop),
+																  reinterpret_cast< void ** >(&interop));
 	WindowsDeleteString(itemClassId);
 
 	if (FAILED(hr) || !interop) {
@@ -175,8 +195,8 @@ bool WgcWindowVideoSource::acquireSession() {
 		return false;
 	}
 
-	hr = interop->CreateForWindow(m_window.handle, __uuidof(IGraphicsCaptureItem),
-								  reinterpret_cast< void ** >(&m_item));
+	hr =
+		interop->CreateForWindow(m_window.handle, __uuidof(IGraphicsCaptureItem), reinterpret_cast< void ** >(&m_item));
 	interop->Release();
 
 	if (FAILED(hr) || !m_item) {
@@ -202,9 +222,9 @@ bool WgcWindowVideoSource::acquireSession() {
 	// (someone sharing their camera's window alongside their screen, however unlikely) and sharing one
 	// device across two independent capture lifetimes would tangle their teardown.
 	D3D_FEATURE_LEVEL obtainedLevel;
-	hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-						   FEATURE_LEVELS, static_cast< UINT >(sizeof(FEATURE_LEVELS) / sizeof(FEATURE_LEVELS[0])),
-						   D3D11_SDK_VERSION, &m_device, &obtainedLevel, &m_context);
+	hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, FEATURE_LEVELS,
+						   static_cast< UINT >(sizeof(FEATURE_LEVELS) / sizeof(FEATURE_LEVELS[0])), D3D11_SDK_VERSION,
+						   &m_device, &obtainedLevel, &m_context);
 
 	if (FAILED(hr) || !m_device) {
 		releaseSession();
@@ -214,7 +234,7 @@ bool WgcWindowVideoSource::acquireSession() {
 	}
 
 	IDXGIDevice *dxgiDevice = nullptr;
-	hr = m_device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast< void ** >(&dxgiDevice));
+	hr                      = m_device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast< void ** >(&dxgiDevice));
 
 	if (FAILED(hr) || !dxgiDevice) {
 		releaseSession();
@@ -224,7 +244,7 @@ bool WgcWindowVideoSource::acquireSession() {
 	}
 
 	IInspectable *inspectableDevice = nullptr;
-	hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, &inspectableDevice);
+	hr                              = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, &inspectableDevice);
 	dxgiDevice->Release();
 
 	if (FAILED(hr) || !inspectableDevice) {
@@ -245,7 +265,7 @@ bool WgcWindowVideoSource::acquireSession() {
 		return false;
 	}
 
-	HSTRING poolClassId = nullptr;
+	HSTRING poolClassId           = nullptr;
 	const wchar_t poolClassName[] = L"Windows.Graphics.Capture.Direct3D11CaptureFramePool";
 	hr = WindowsCreateString(poolClassName, static_cast< UINT32 >(wcslen(poolClassName)), &poolClassId);
 
@@ -257,8 +277,8 @@ bool WgcWindowVideoSource::acquireSession() {
 		return false;
 	}
 
-	IDirect3D11CaptureFramePoolStatics *poolStatics = nullptr;
-	hr = RoGetActivationFactory(poolClassId, __uuidof(IDirect3D11CaptureFramePoolStatics),
+	IDirect3D11CaptureFramePoolStatics2 *poolStatics = nullptr;
+	hr = RoGetActivationFactory(poolClassId, __uuidof(IDirect3D11CaptureFramePoolStatics2),
 								reinterpret_cast< void ** >(&poolStatics));
 	WindowsDeleteString(poolClassId);
 
@@ -272,9 +292,11 @@ bool WgcWindowVideoSource::acquireSession() {
 
 	// Two buffers: enough that a slow consumer does not force the producer to stall, without holding
 	// more frames than this poll-driven source could ever plausibly need at once.
-	hr = poolStatics->Create(direct3dDevice, DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, itemSize, &m_framePool);
+	hr = poolStatics->CreateFreeThreaded(direct3dDevice, DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, itemSize,
+										 &m_framePool);
 	poolStatics->Release();
-	direct3dDevice->Release();
+	m_captureDevice = direct3dDevice;
+	m_poolSize      = itemSize;
 
 	if (FAILED(hr) || !m_framePool) {
 		releaseSession();
@@ -283,39 +305,40 @@ bool WgcWindowVideoSource::acquireSession() {
 		return false;
 	}
 
-	hr = m_framePool->CreateCaptureSession(m_item, &m_session);
-
-	if (FAILED(hr) || !m_session) {
+	hr = restartCaptureSession();
+	if (FAILED(hr)) {
 		releaseSession();
-		emit failed(tr("Could not start a capture session for this window"));
-
+		emit failed(tr("Could not start capturing this window"));
 		return false;
 	}
 
+	return true;
+}
+
+HRESULT WgcWindowVideoSource::restartCaptureSession() {
+	if (m_session) {
+		closeCaptureObject(m_session);
+		m_session->Release();
+		m_session = nullptr;
+	}
+	HRESULT hr = m_framePool->CreateCaptureSession(m_item, &m_session);
+	if (FAILED(hr) || !m_session)
+		return FAILED(hr) ? hr : E_FAIL;
 	// Best-effort: cursor toggling needs IGraphicsCaptureSession2 (Windows 10 2004+). Its absence is not
 	// a failure - capture still works, just always including the cursor, which is what every OS version
 	// before that one did regardless.
 	{
 		IGraphicsCaptureSession2 *session2 = nullptr;
 
-		if (SUCCEEDED(m_session->QueryInterface(__uuidof(IGraphicsCaptureSession2),
-												reinterpret_cast< void ** >(&session2)))
+		if (SUCCEEDED(
+				m_session->QueryInterface(__uuidof(IGraphicsCaptureSession2), reinterpret_cast< void ** >(&session2)))
 			&& session2) {
 			session2->put_IsCursorCaptureEnabled(m_captureCursor ? TRUE : FALSE);
 			session2->Release();
 		}
 	}
 
-	hr = m_session->StartCapture();
-
-	if (FAILED(hr)) {
-		releaseSession();
-		emit failed(tr("Could not start capturing this window"));
-
-		return false;
-	}
-
-	return true;
+	return m_session->StartCapture();
 }
 
 bool WgcWindowVideoSource::start() {
@@ -371,9 +394,34 @@ void WgcWindowVideoSource::pollFrame() {
 	IDirect3D11CaptureFrame *frame = nullptr;
 	HRESULT hr                     = m_framePool->TryGetNextFrame(&frame);
 
-	if (FAILED(hr) || !frame) {
-		// Nothing new since the last poll - the common case for a mostly-static window, same reasoning
-		// as DXGI_ERROR_WAIT_TIMEOUT in DxgiDisplayVideoSource.
+	if (FAILED(hr)) {
+		stop();
+		emit failed(tr("Lost the window capture unexpectedly"));
+		return;
+	}
+	if (!frame) {
+		emit captureIdle(static_cast< std::uint64_t >(m_clock.elapsed().count()));
+		return;
+	}
+	SizeInt32 contentSize = {};
+	hr                    = frame->get_ContentSize(&contentSize);
+	if (FAILED(hr) || contentSize.Width <= 0 || contentSize.Height <= 0) {
+		closeCaptureObject(frame);
+		frame->Release();
+		return;
+	}
+	if (contentSize.Width != m_poolSize.Width || contentSize.Height != m_poolSize.Height) {
+		qInfo("Window capture resizing from %dx%d to %dx%d", m_poolSize.Width, m_poolSize.Height, contentSize.Width,
+			  contentSize.Height);
+		closeCaptureObject(frame);
+		frame->Release();
+		// Rebuild the pool and session together. Recreate can discard the only
+		// update from a static resized window, and a closed session cannot reliably
+		// be replaced on the same pool on every Windows capture implementation.
+		if (!acquireSession()) {
+			m_pollTimer.stop();
+			m_running = false;
+		}
 		return;
 	}
 
@@ -381,7 +429,10 @@ void WgcWindowVideoSource::pollFrame() {
 	hr                        = frame->get_Surface(&surface);
 
 	if (FAILED(hr) || !surface) {
+		closeCaptureObject(frame);
 		frame->Release();
+		stop();
+		emit failed(tr("Could not read the captured window"));
 
 		return;
 	}
@@ -396,7 +447,10 @@ void WgcWindowVideoSource::pollFrame() {
 	surface->Release();
 
 	if (FAILED(hr) || !access) {
+		closeCaptureObject(frame);
 		frame->Release();
+		stop();
+		emit failed(tr("Could not read the captured window"));
 
 		return;
 	}
@@ -406,7 +460,10 @@ void WgcWindowVideoSource::pollFrame() {
 	access->Release();
 
 	if (FAILED(hr) || !texture) {
+		closeCaptureObject(frame);
 		frame->Release();
+		stop();
+		emit failed(tr("Could not read the captured window"));
 
 		return;
 	}
@@ -421,20 +478,23 @@ void WgcWindowVideoSource::pollFrame() {
 		}
 
 		D3D11_TEXTURE2D_DESC stagingDesc = desc;
-		stagingDesc.Usage               = D3D11_USAGE_STAGING;
-		stagingDesc.BindFlags           = 0;
-		stagingDesc.CPUAccessFlags      = D3D11_CPU_ACCESS_READ;
-		stagingDesc.MiscFlags           = 0;
-		stagingDesc.MipLevels           = 1;
-		stagingDesc.ArraySize           = 1;
-		stagingDesc.SampleDesc.Count    = 1;
-		stagingDesc.SampleDesc.Quality  = 0;
+		stagingDesc.Usage                = D3D11_USAGE_STAGING;
+		stagingDesc.BindFlags            = 0;
+		stagingDesc.CPUAccessFlags       = D3D11_CPU_ACCESS_READ;
+		stagingDesc.MiscFlags            = 0;
+		stagingDesc.MipLevels            = 1;
+		stagingDesc.ArraySize            = 1;
+		stagingDesc.SampleDesc.Count     = 1;
+		stagingDesc.SampleDesc.Quality   = 0;
 
 		const HRESULT stagingResult = m_device->CreateTexture2D(&stagingDesc, nullptr, &m_stagingTexture);
 
 		if (FAILED(stagingResult) || !m_stagingTexture) {
 			texture->Release();
+			closeCaptureObject(frame);
 			frame->Release();
+			stop();
+			emit failed(tr("Could not allocate a window capture buffer"));
 
 			return;
 		}
@@ -445,28 +505,42 @@ void WgcWindowVideoSource::pollFrame() {
 
 	m_context->CopyResource(m_stagingTexture, texture);
 	texture->Release();
-	frame->Release();
 
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	hr = m_context->Map(m_stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
 
 	if (FAILED(hr)) {
+		closeCaptureObject(frame);
+		frame->Release();
+		stop();
+		emit failed(tr("Could not read the captured window"));
 		return;
 	}
 
 	// Same B8G8R8A8 -> Format_ARGB32 reasoning as DxgiDisplayVideoSource: the pixel format requested at
 	// frame pool creation makes this a row-by-row byte copy, not a per-pixel conversion.
-	QImage image(static_cast< int >(desc.Width), static_cast< int >(desc.Height), QImage::Format_ARGB32);
+	const UINT width  = std::min(desc.Width, static_cast< UINT >(contentSize.Width));
+	const UINT height = std::min(desc.Height, static_cast< UINT >(contentSize.Height));
+	QImage image(static_cast< int >(width), static_cast< int >(height), QImage::Format_ARGB32);
 
+	if (image.isNull()) {
+		m_context->Unmap(m_stagingTexture, 0);
+		closeCaptureObject(frame);
+		frame->Release();
+		stop();
+		emit failed(tr("Could not allocate a window capture image"));
+		return;
+	}
 	const auto *src = static_cast< const unsigned char * >(mapped.pData);
 
-	for (UINT row = 0; row < desc.Height; ++row) {
-		std::memcpy(image.scanLine(static_cast< int >(row)),
-					src + static_cast< std::size_t >(row) * mapped.RowPitch,
-					static_cast< std::size_t >(desc.Width) * 4);
+	for (UINT row = 0; row < height; ++row) {
+		std::memcpy(image.scanLine(static_cast< int >(row)), src + static_cast< std::size_t >(row) * mapped.RowPitch,
+					static_cast< std::size_t >(width) * 4);
 	}
 
 	m_context->Unmap(m_stagingTexture, 0);
+	closeCaptureObject(frame);
+	frame->Release();
 
 	emit frameReady(image, static_cast< std::uint64_t >(m_clock.elapsed().count()));
 }

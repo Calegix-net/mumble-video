@@ -50,8 +50,8 @@ bool PortalScreenCast::isAvailable() {
 		return false;
 	}
 
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
+	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH), QLatin1String(SCREENCAST_IFACE),
+						 QDBusConnection::sessionBus());
 
 	// isValid() only means the proxy was constructed. Reading a property is what actually round-trips
 	// to the portal and proves an implementation is running and answering.
@@ -85,14 +85,13 @@ QString PortalScreenCast::senderPathElement() {
 
 bool PortalScreenCast::connectRequest(const QDBusObjectPath &path, const char *slot) {
 	return QDBusConnection::sessionBus().connect(QLatin1String(PORTAL_SERVICE), path.path(),
-												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
-												 slot);
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this, slot);
 }
 
 bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > arguments, QVariantMap options,
 									   const char *slot) {
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
+	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH), QLatin1String(SCREENCAST_IFACE),
+						 QDBusConnection::sessionBus());
 
 	if (!iface.isValid()) {
 		return false;
@@ -107,17 +106,19 @@ bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > 
 	// even on its way back - and a subscription made after the reply arrives has already missed it.
 	// Missing it looks like the portal never answering, or (with the old single shared token) like a
 	// stale response from the previous request landing on the next.
-	const QDBusObjectPath expected(QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2")
-									   .arg(senderPathElement(), token));
+	const QDBusObjectPath expected(
+		QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(senderPathElement(), token));
 
-	connectRequest(expected, slot);
+	if (!connectRequest(expected, slot))
+		return false;
+	m_requestPath = expected.path();
+	m_requestSlot = slot;
 
 	const QDBusReply< QDBusObjectPath > reply = iface.callWithArgumentList(QDBus::Block, method, arguments);
 
 	if (!reply.isValid()) {
 		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), expected.path(),
-												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
-												 slot);
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this, slot);
 
 		return false;
 	}
@@ -125,9 +126,9 @@ bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > 
 	// An older portal may hand back a path other than the predicted one; the reply is authoritative.
 	if (reply.value().path() != expected.path()) {
 		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), expected.path(),
-												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
-												 slot);
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this, slot);
 
+		m_requestPath = reply.value().path();
 		return connectRequest(reply.value(), slot);
 	}
 
@@ -135,6 +136,11 @@ bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > 
 }
 
 bool PortalScreenCast::requestAccess(SourceType sourceType, bool allowCursor) {
+	close();
+	m_token         = newToken();
+	m_phase         = Phase::Creating;
+	m_sessionHandle = QDBusObjectPath(
+		QStringLiteral("/org/freedesktop/portal/desktop/session/%1/%2").arg(senderPathElement(), m_token));
 	m_sourceType  = sourceType;
 	m_allowCursor = allowCursor;
 
@@ -150,6 +156,8 @@ bool PortalScreenCast::requestAccess(SourceType sourceType, bool allowCursor) {
 }
 
 void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVariantMap &results) {
+	if (!consumeResponse(Phase::Creating))
+		return;
 	if (response != PORTAL_RESPONSE_SUCCESS) {
 		fail(tr("The desktop portal refused to start a screen sharing session."));
 
@@ -178,6 +186,8 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 
 	m_sessionHandle = QDBusObjectPath(path);
 	m_sessionOpen   = true;
+	QDBusConnection::sessionBus().connect(QLatin1String(PORTAL_SERVICE), path, QLatin1String(SESSION_IFACE),
+										  QStringLiteral("Closed"), this, SLOT(onSessionClosed(QVariantMap)));
 
 	std::uint32_t types = PORTAL_SOURCE_MONITOR | PORTAL_SOURCE_WINDOW;
 
@@ -192,14 +202,40 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 			break;
 	}
 
+	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH), QLatin1String(SCREENCAST_IFACE),
+						 QDBusConnection::sessionBus());
+	const QVariant availableTypes = iface.property("AvailableSourceTypes");
+	if (availableTypes.isValid())
+		types &= availableTypes.toUInt();
+	if (!types) {
+		fail(tr("The desktop portal does not support this capture source."));
+		return;
+	}
 	QVariantMap options;
 	options.insert(QStringLiteral("types"), types);
 	// One source at a time: the encoder produces a single stream, and a second PipeWire node would have
 	// nowhere to go.
 	options.insert(QStringLiteral("multiple"), false);
-	// 0 hides the pointer, 1 composites it into the frames. Embedded-in-stream is the only mode that
+	// 1 hides the pointer, 2 composites it into the frames. Embedded-in-stream is the only mode that
 	// needs no separate metadata handling, which suits a source that just hands out QImages.
-	options.insert(QStringLiteral("cursor_mode"), m_allowCursor ? 2u : 1u);
+	const QVariant cursorModes = iface.property("AvailableCursorModes");
+	const auto desiredCursor   = m_allowCursor ? 2u : 1u;
+	// Older portals without cursor modes use their default. Never request a mode
+	// absent from a newer portal's advertised mask (metadata is not implemented).
+	if (cursorModes.isValid()) {
+		const auto modes = cursorModes.toUInt();
+		if (modes & desiredCursor)
+			options.insert(QStringLiteral("cursor_mode"), desiredCursor);
+		else if (modes & 1u)
+			options.insert(QStringLiteral("cursor_mode"), 1u);
+		else if (modes & 2u)
+			options.insert(QStringLiteral("cursor_mode"), 2u);
+		else {
+			fail(tr("The desktop portal does not offer a supported cursor mode."));
+			return;
+		}
+	}
+	m_phase = Phase::Selecting;
 
 	if (!callWithRequest(QStringLiteral("SelectSources"), { QVariant::fromValue(m_sessionHandle) }, options,
 						 SLOT(onSelectSourcesResponse(uint, QVariantMap)))) {
@@ -208,6 +244,8 @@ void PortalScreenCast::onCreateSessionResponse(std::uint32_t response, const QVa
 }
 
 void PortalScreenCast::onSelectSourcesResponse(std::uint32_t response, const QVariantMap &) {
+	if (!consumeResponse(Phase::Selecting))
+		return;
 	if (response != PORTAL_RESPONSE_SUCCESS) {
 		// Cancelling is a decision, not a fault - reported plainly so the caller can distinguish it
 		// from the portal being broken.
@@ -217,6 +255,7 @@ void PortalScreenCast::onSelectSourcesResponse(std::uint32_t response, const QVa
 		return;
 	}
 
+	m_phase = Phase::Starting;
 	// Empty parent window: the portal dialog is not parented to ours. Passing a real handle needs the
 	// xdg-foreign protocol on Wayland, which is more machinery than an unparented prompt is worth.
 	if (!callWithRequest(QStringLiteral("Start"), { QVariant::fromValue(m_sessionHandle), QString() }, QVariantMap(),
@@ -226,6 +265,8 @@ void PortalScreenCast::onSelectSourcesResponse(std::uint32_t response, const QVa
 }
 
 void PortalScreenCast::onStartResponse(std::uint32_t response, const QVariantMap &results) {
+	if (!consumeResponse(Phase::Starting))
+		return;
 	if (response != PORTAL_RESPONSE_SUCCESS) {
 		fail(response == PORTAL_RESPONSE_CANCELLED ? tr("Screen sharing was cancelled.")
 												   : tr("The desktop portal refused to share the screen."));
@@ -235,6 +276,10 @@ void PortalScreenCast::onStartResponse(std::uint32_t response, const QVariantMap
 
 	// streams is a(ua{sv}): a list of (node id, properties). multiple=false was requested, so there is
 	// at most one, but a portal is free to return none if the user deselected everything.
+	if (!results.contains(QStringLiteral("streams"))) {
+		fail(tr("The desktop portal returned nothing to capture."));
+		return;
+	}
 	const QDBusArgument streams = results.value(QStringLiteral("streams")).value< QDBusArgument >();
 
 	std::uint32_t nodeId = 0;
@@ -264,10 +309,10 @@ void PortalScreenCast::onStartResponse(std::uint32_t response, const QVariantMap
 
 	// The portal knows what the user picked; asking it is better than guessing from the node id.
 	const QString portalDescription = streamProperties.value(QStringLiteral("id")).toString();
-	m_description = portalDescription.isEmpty() ? tr("Shared screen") : portalDescription;
+	m_description                   = portalDescription.isEmpty() ? tr("Shared screen") : portalDescription;
 
-	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH),
-						 QLatin1String(SCREENCAST_IFACE), QDBusConnection::sessionBus());
+	QDBusInterface iface(QLatin1String(PORTAL_SERVICE), QLatin1String(PORTAL_PATH), QLatin1String(SCREENCAST_IFACE),
+						 QDBusConnection::sessionBus());
 
 	const QDBusReply< QDBusUnixFileDescriptor > fdReply =
 		iface.call(QStringLiteral("OpenPipeWireRemote"), QVariant::fromValue(m_sessionHandle), QVariantMap());
@@ -288,25 +333,58 @@ void PortalScreenCast::onStartResponse(std::uint32_t response, const QVariantMap
 		return;
 	}
 
+	m_phase = Phase::Capturing;
 	emit ready();
 }
 
+void PortalScreenCast::disconnectRequest() {
+	if (!m_requestPath.isEmpty())
+		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), m_requestPath,
+												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this,
+												 m_requestSlot.constData());
+	m_requestPath.clear();
+	m_requestSlot.clear();
+}
+
+bool PortalScreenCast::consumeResponse(Phase expected) {
+	if (m_phase != expected || (calledFromDBus() && message().path() != m_requestPath))
+		return false;
+	disconnectRequest();
+	return true;
+}
+
+void PortalScreenCast::onSessionClosed(const QVariantMap &) {
+	if (!m_sessionOpen || (calledFromDBus() && message().path() != m_sessionHandle.path()))
+		return;
+	m_sessionOpen = false;
+	fail(tr("Screen sharing was stopped by the desktop."));
+}
+
 void PortalScreenCast::close() {
+	const auto previousPhase = m_phase;
+	m_phase                  = Phase::Closed;
+	// Avoid introspection/blocking proxy construction during cancellation/destruction.
+	auto closeRemote = [](const QString &path, const char *interface) {
+		auto message = QDBusMessage::createMethodCall(QLatin1String(PORTAL_SERVICE), path, QLatin1String(interface),
+													  QStringLiteral("Close"));
+		QDBusConnection::sessionBus().asyncCall(message);
+	};
+	if (!m_requestPath.isEmpty())
+		closeRemote(m_requestPath, REQUEST_IFACE);
+	disconnectRequest();
+	if (!m_sessionHandle.path().isEmpty()) {
+		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), m_sessionHandle.path(),
+												 QLatin1String(SESSION_IFACE), QStringLiteral("Closed"), this,
+												 SLOT(onSessionClosed(QVariantMap)));
+		if (previousPhase != Phase::Closed)
+			closeRemote(m_sessionHandle.path(), SESSION_IFACE);
+	}
 	if (m_pipeWireFd >= 0) {
 		::close(m_pipeWireFd);
 		m_pipeWireFd = -1;
 	}
-
-	if (m_sessionOpen && !m_sessionHandle.path().isEmpty()) {
-		QDBusInterface session(QLatin1String(PORTAL_SERVICE), m_sessionHandle.path(), QLatin1String(SESSION_IFACE),
-							   QDBusConnection::sessionBus());
-
-		// Asynchronous: this runs from the destructor as well, and a blocking call there would stall
-		// shutdown if the portal is slow or already gone.
-		session.asyncCall(QStringLiteral("Close"));
-
-		m_sessionOpen = false;
-	}
-
-	m_nodeId = 0;
+	m_sessionOpen   = false;
+	m_sessionHandle = QDBusObjectPath();
+	m_nodeId        = 0;
+	m_description.clear();
 }

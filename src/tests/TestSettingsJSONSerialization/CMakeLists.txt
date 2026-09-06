@@ -40,3 +40,8 @@ add_test(
 	# Specifying the working directory is necessary, to make sure the dependent DLLs are found (on Windows)
 	WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+
+add_executable(TestSettingsLoad TestSettingsLoad.cpp)
+target_link_libraries(TestSettingsLoad PRIVATE mumble_client_object_lib Qt6::Test)
+set_target_properties(TestSettingsLoad PROPERTIES AUTOMOC ON)
+add_test(NAME TestSettingsLoad COMMAND $<TARGET_FILE:TestSettingsLoad> WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")

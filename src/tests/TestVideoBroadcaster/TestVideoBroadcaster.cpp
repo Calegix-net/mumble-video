@@ -27,6 +27,11 @@ private slots:
 	void frameNumbersNeverRepeat();
 	void requestingAKeyframeResendsEverything();
 	void startingWithNoSourceFails();
+	void idleCaptureRefreshesWithoutNewPixels();
+	void lowRateUnchangedFramesStillRefresh();
+	void cachedFramesDoNotKeepFailedCaptureAlive();
+	void restartingDiscardsCachedFrames();
+	void resizedFramesUseFreshStreamIDs();
 	void vp8SendsOneWholeFrameUnit();
 	void theCodecCanBeSwitched();
 };
@@ -195,10 +200,73 @@ void TestVideoBroadcaster::requestingAKeyframeResendsEverything() {
 	// A new subscriber has nothing to build on, so it has to be sent the whole picture again even though
 	// nothing changed.
 	broadcaster.requestKeyframe();
-
+	QCOMPARE(spy.count(), fullFrame);
 	spy.clear();
 	source->pump(3);
-	QCOMPARE(spy.count(), fullFrame);
+	QCOMPARE(spy.count(), 0);
+}
+
+void TestVideoBroadcaster::idleCaptureRefreshesWithoutNewPixels() {
+	VideoBroadcaster broadcaster;
+	broadcaster.setCodec(1);
+	auto owned   = std::make_unique< SyntheticVideoSource >(320, 240);
+	auto *source = owned.get();
+	QVERIFY(broadcaster.start(std::move(owned)));
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+	source->captureIdle(100);
+	QCOMPARE(spy.count(), 0);
+	source->pump(1000);
+	spy.clear();
+	source->captureIdle(1000000);
+	QCOMPARE(spy.count(), 0);
+	source->captureIdle(2001000);
+	QCOMPARE(spy.count(), 6);
+	for (const auto &entry : spy)
+		QVERIFY(entry[0].value< Mumble::Protocol::VideoUnitHeader >().isKeyframe);
+	spy.clear();
+	// Continue for longer than the server timeout without generating another image.
+	for (std::uint64_t timestamp = 4001000; timestamp <= 40001000; timestamp += 2000000) {
+		source->captureIdle(timestamp);
+		QCOMPARE(spy.count(), 6);
+		spy.clear();
+	}
+}
+
+void TestVideoBroadcaster::cachedFramesDoNotKeepFailedCaptureAlive() {
+	VideoBroadcaster broadcaster;
+	broadcaster.setCodec(1);
+	auto owned   = std::make_unique< SyntheticVideoSource >(160, 120);
+	auto *source = owned.get();
+	QVERIFY(broadcaster.start(std::move(owned)));
+	source->pump(1);
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+	// Repeated receiver requests must not extend the cache's capture-health deadline.
+	for (int i = 0; i < 3; ++i) {
+		QTest::qWait(750);
+		broadcaster.requestKeyframe();
+	}
+	spy.clear();
+	broadcaster.requestKeyframe();
+	QCOMPARE(spy.count(), 0);
+	source->captureIdle(3000000);
+	QVERIFY(spy.count() > 0);
+	spy.clear();
+	source->stop();
+	broadcaster.requestKeyframe();
+	source->captureIdle(6000000);
+	QCOMPARE(spy.count(), 0);
+}
+
+void TestVideoBroadcaster::restartingDiscardsCachedFrames() {
+	VideoBroadcaster broadcaster;
+	auto owned   = std::make_unique< SyntheticVideoSource >(160, 120);
+	auto *source = owned.get();
+	QVERIFY(broadcaster.start(std::move(owned)));
+	source->pump(1);
+	QVERIFY(broadcaster.start(std::make_unique< SyntheticVideoSource >(320, 240)));
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+	broadcaster.requestKeyframe();
+	QCOMPARE(spy.count(), 0);
 }
 
 void TestVideoBroadcaster::startingWithNoSourceFails() {
@@ -247,6 +315,45 @@ void TestVideoBroadcaster::theCodecCanBeSwitched() {
 	// selecting nothing.
 	broadcaster.setCodec(99);
 	QCOMPARE(broadcaster.codec(), 0);
+}
+
+void TestVideoBroadcaster::resizedFramesUseFreshStreamIDs() {
+	VideoBroadcaster broadcaster;
+	broadcaster.setCodec(1);
+	std::uint32_t next = 50;
+	broadcaster.setStreamIDAllocator([&next]() { return next++; });
+	auto owned   = std::make_unique< SyntheticVideoSource >(320, 240);
+	auto *source = owned.get();
+	QVERIFY(broadcaster.start(std::move(owned)));
+	source->pump(1);
+	QSignalSpy resized(&broadcaster, &VideoBroadcaster::streamResized);
+	QSignalSpy units(&broadcaster, &VideoBroadcaster::unitReady);
+	QImage small(64, 32, QImage::Format_RGB32);
+	small.fill(Qt::blue);
+	source->frameReady(small, 2);
+	QCOMPARE(resized.count(), 1);
+	QCOMPARE(broadcaster.streamID(), 50u);
+	QCOMPARE(resized.at(0).at(2).toSize(), small.size());
+	QVERIFY(!units.isEmpty());
+	const auto header = units.at(0).at(0).value< Mumble::Protocol::VideoUnitHeader >();
+	QCOMPARE(header.streamID, 50u);
+	QVERIFY(header.isKeyframe);
+	QCOMPARE(header.width, 64u);
+}
+
+void TestVideoBroadcaster::lowRateUnchangedFramesStillRefresh() {
+	VideoBroadcaster broadcaster;
+	broadcaster.setCodec(1);
+	auto owned   = std::make_unique< SyntheticVideoSource >(160, 120);
+	auto *source = owned.get();
+	source->setChangeRatio(0);
+	QVERIFY(broadcaster.start(std::move(owned)));
+	source->pump(0);
+	QSignalSpy units(&broadcaster, &VideoBroadcaster::unitReady);
+	source->pump(1000000);
+	QCOMPARE(units.count(), 0);
+	source->pump(2000000);
+	QVERIFY(!units.isEmpty());
 }
 
 QTEST_MAIN(TestVideoBroadcaster)

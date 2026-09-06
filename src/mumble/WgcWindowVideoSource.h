@@ -78,19 +78,22 @@ protected slots:
 
 protected:
 	bool acquireSession();
+	HRESULT restartCaptureSession();
 	void releaseSession();
 
 	WindowInfo m_window;
 	bool m_captureCursor;
 
-	ID3D11Device *m_device         = nullptr;
-	ID3D11DeviceContext *m_context = nullptr;
+	ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice *m_captureDevice = nullptr;
+	ABI::Windows::Graphics::SizeInt32 m_poolSize                                  = {};
+	ID3D11Device *m_device                                                        = nullptr;
+	ID3D11DeviceContext *m_context                                                = nullptr;
 
 	// WinRT objects, held through their ABI (IInspectable-derived) interfaces rather than C++/WinRT
 	// wrapper types, since no C++/WinRT projection is available under this MinGW toolchain.
 	ABI::Windows::Graphics::Capture::IGraphicsCaptureItem *m_item             = nullptr;
 	ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool *m_framePool = nullptr;
-	ABI::Windows::Graphics::Capture::IGraphicsCaptureSession *m_session      = nullptr;
+	ABI::Windows::Graphics::Capture::IGraphicsCaptureSession *m_session       = nullptr;
 
 	ID3D11Texture2D *m_stagingTexture = nullptr;
 	UINT m_stagingWidth               = 0;
@@ -99,8 +102,8 @@ protected:
 	QTimer m_pollTimer;
 	Timer m_clock;
 
-	bool m_running        = false;
-	bool m_roInitialized  = false;
+	bool m_running       = false;
+	bool m_roInitialized = false;
 };
 
 #endif // MUMBLE_MUMBLE_WGCWINDOWVIDEOSOURCE_H_

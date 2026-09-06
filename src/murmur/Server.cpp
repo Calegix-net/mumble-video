@@ -140,8 +140,8 @@ Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &conne
 		int tcpsock   = static_cast< int >(ss->socketDescriptor());
 		socklen_t len = sizeof(addr);
 #else
-		SOCKET tcpsock        = ss->socketDescriptor();
-		int len               = sizeof(addr);
+		SOCKET tcpsock = ss->socketDescriptor();
+		int len        = sizeof(addr);
 #endif
 		memset(&addr, 0, sizeof(addr));
 		getsockname(tcpsock, reinterpret_cast< struct sockaddr * >(&addr), &len);
@@ -738,8 +738,8 @@ void Server::udpActivated(int socket) {
 	int fromlen = static_cast< int >(sizeof(from));
 	SOCKET sock = static_cast< SOCKET >(socket);
 	len         = ::recvfrom(sock, reinterpret_cast< char * >(m_udpDecoder.getBuffer().data()),
-                     static_cast< int >(m_udpDecoder.getBuffer().size()), 0,
-                     reinterpret_cast< struct sockaddr * >(&from), &fromlen);
+							 static_cast< int >(m_udpDecoder.getBuffer().size()), 0,
+							 reinterpret_cast< struct sockaddr * >(&from), &fromlen);
 #endif
 
 	if (len < 0) {
@@ -762,13 +762,13 @@ void Server::udpActivated(int socket) {
 			::sendmsg(sock, &msg, 0);
 #else
 #	ifdef Q_OS_WIN
-            using size_type = int;
+			using size_type = int;
 #	else
 			using size_type = std::size_t;
 #	endif
-            ::sendto(sock, reinterpret_cast< const char * >(encodedPing.data()),
-                     static_cast< size_type >(encodedPing.size()), 0, reinterpret_cast< struct sockaddr * >(&from),
-                     fromlen);
+			::sendto(sock, reinterpret_cast< const char * >(encodedPing.data()),
+					 static_cast< size_type >(encodedPing.size()), 0, reinterpret_cast< struct sockaddr * >(&from),
+					 fromlen);
 #endif
 		}
 	}
@@ -869,8 +869,8 @@ void Server::run() {
 
 				fromlen = sizeof(from);
 #ifdef Q_OS_WIN
-				len = ::recvfrom(sock, reinterpret_cast< char * >(encrypt), Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE, 0,
-								 reinterpret_cast< struct sockaddr * >(&from), &fromlen);
+				len = ::recvfrom(sock, reinterpret_cast< char * >(encrypt), Mumble::Protocol::MAX_MEDIA_DATAGRAM_SIZE,
+								 0, reinterpret_cast< struct sockaddr * >(&from), &fromlen);
 #else
 #	ifdef Q_OS_LINUX
 				struct msghdr msg;
@@ -1536,10 +1536,10 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		memset(controldata, 0, sizeof(controldata));
 
 		memset(&msg, 0, sizeof(msg));
-		msg.msg_name    = reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress);
-		msg.msg_namelen = static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6)
-													   ? sizeof(struct sockaddr_in6)
-													   : sizeof(struct sockaddr_in));
+		msg.msg_name = reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress);
+		msg.msg_namelen =
+			static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
+																					  : sizeof(struct sockaddr_in));
 		msg.msg_iov        = iov;
 		msg.msg_iovlen     = 1;
 		msg.msg_control    = controldata;
@@ -1592,7 +1592,7 @@ bool Server::mayShareVideo(unsigned int senderSession) {
 		return false;
 	}
 
-	return ChanACL::hasPermission(sender, sender->cChannel, ChanACL::ShareVideo, &acCache);
+	return hasPermission(sender, sender->cChannel, ChanACL::ShareVideo);
 }
 
 bool Server::mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession) {
@@ -1609,8 +1609,8 @@ bool Server::mayReceiveVideo(unsigned int subscriberSession, unsigned int sender
 	//
 	// Enter is required as well as ReceiveVideo, so that video can never reach somewhere its recipient
 	// could not go and simply listen.
-	return ChanACL::hasPermission(subscriber, sender->cChannel, ChanACL::Enter, &acCache)
-		   && ChanACL::hasPermission(subscriber, sender->cChannel, ChanACL::ReceiveVideo, &acCache);
+	return hasPermission(subscriber, sender->cChannel, ChanACL::Enter)
+		   && hasPermission(subscriber, sender->cChannel, ChanACL::ReceiveVideo);
 }
 
 void Server::log(ServerUser *u, const QString &str) const {
@@ -1917,6 +1917,8 @@ void Server::connectionClosed(QAbstractSocket::SocketError err, const QString &r
 		QWriteLocker wl(&qrwlVoiceThread);
 
 		qhUsers.remove(u->uiSession);
+		// The UDP relay reads the router while holding the voice-thread read lock.
+		m_videoRouter.removeUser(u->uiSession);
 		qhHostUsers[u->haAddress].remove(u);
 
 		quint16 port = (u->saiUdpAddress.ss_family == AF_INET6)
@@ -1936,7 +1938,6 @@ void Server::connectionClosed(QAbstractSocket::SocketError err, const QString &r
 
 	// Drop their streams and their subscriptions. Sessions are recycled from qqIds below, so leaving
 	// stale entries behind would attach them to whoever inherits the number next.
-	m_videoRouter.removeUser(u->uiSession);
 
 	for (auto it = m_videoAnnouncements.begin(); it != m_videoAnnouncements.end();) {
 		it = it->first.first == u->uiSession ? m_videoAnnouncements.erase(it) : std::next(it);
@@ -2457,6 +2458,7 @@ void Server::sendActiveVideoStreams(ServerUser *user) {
 }
 
 void Server::revalidateVideoSubscriptions() {
+	QWriteLocker videoLock(&qrwlVoiceThread);
 	for (const VideoRouter::DroppedSubscription &dropped : m_videoRouter.revalidate()) {
 		ServerUser *subscriber = qhUsers.value(dropped.subscriber);
 
@@ -2474,6 +2476,7 @@ void Server::revalidateVideoSubscriptions() {
 }
 
 void Server::endStaleVideoStreams() {
+	QWriteLocker videoLock(&qrwlVoiceThread);
 	// 30 seconds, matching this server's own default connection timeout (iTimeout): the same order of
 	// magnitude a client is already willing to wait before giving up on the connection itself, applied to
 	// one stream on it instead of the whole thing. Generous enough that a genuinely alive, entirely
@@ -2490,8 +2493,8 @@ void Server::endStaleVideoStreams() {
 		// something to assume is in lockstep with it - log(ServerUser*, ...) dereferences unconditionally,
 		// and a null sender here should be a log line, not a crash.
 		log(QString("Video stream %1/%2 went silent with an active subscriber and was ended")
-			   .arg(key.sender)
-			   .arg(key.streamID));
+				.arg(key.sender)
+				.arg(key.streamID));
 
 		m_videoRouter.announceStream(key.sender, key.streamID, false);
 		m_videoAnnouncements.erase(std::make_pair(key.sender, key.streamID));
@@ -2519,11 +2522,6 @@ void Server::endStaleVideoStreams() {
 
 void Server::clearACLCache(User *p) {
 	MumbleProto::PermissionQuery mppq;
-
-	// Subscriptions are authorised against the ACLs, so an ACL change can invalidate them. Delivery
-	// re-checks anyway, which is what actually stops the video, but dropping them here means a client is
-	// told its subscription ended instead of being left watching a frozen picture.
-	revalidateVideoSubscriptions();
 
 	{
 		QMutexLocker qml(&qmCache);
@@ -2571,6 +2569,9 @@ void Server::clearACLCache(User *p) {
 			}
 		}
 	}
+
+	// Use fresh ACL results and release qmCache before acquiring the voice-thread lock.
+	revalidateVideoSubscriptions();
 
 	// A change in ACLs means that the user might be able to whisper
 	// to users it didn't have permission to do before (or vice versa)

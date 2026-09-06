@@ -30,14 +30,14 @@
 #include "ServerHandler.h"
 #include "TalkingUI.h"
 #include "User.h"
-#include "VideoStreamDispatcher.h"
 #include "UserEdit.h"
 #include "UserInformation.h"
 #include "UserModel.h"
 #include "Utils.h"
 #include "VersionCheck.h"
-#include "VideoGrid.h"
 #include "VideoBroadcaster.h"
+#include "VideoGrid.h"
+#include "VideoStreamDispatcher.h"
 #include "ViewCert.h"
 #include "crypto/CryptState.h"
 #include "crypto/CryptStateOCB2.h"
@@ -1428,6 +1428,10 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	}
 
 	if (msg.subscribe() || !msg.has_session()) {
+		return;
+	}
+
+	if (m_videoGrid && m_videoGrid->consumeUnsubscribeAcknowledgement(msg.session(), msg.stream_id())) {
 		return;
 	}
 

@@ -50,6 +50,9 @@ public:
 	virtual QString describe() const = 0;
 
 signals:
+	/// A successful capture poll found no changed pixels. Errors must emit failed() instead.
+	void captureIdle(std::uint64_t captureTimestampUsec);
+
 	/**
 	 * @param frame The captured image. Always a valid, non-null image.
 	 * @param captureTimestampUsec Microseconds on a monotonic clock, taken as close to capture as the

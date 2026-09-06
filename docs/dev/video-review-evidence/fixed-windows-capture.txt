@@ -1,0 +1,23 @@
+STDOUT
+PASS window starts and returns pixels
+INITIAL 322x272
+PASS window grows
+GROWN 642x452
+PASS window shrinks
+SHRUNK 202x152
+PASS window capture stays healthy through resizing
+PASS display enumeration
+PASS display capture returns pixels
+PASS separate application plays test tone
+PASS application audio activation
+PASS application audio delivers non-silent PCM
+PASS system audio activation excluding own process tree
+FAILURES 0
+
+STDERR
+Window capture resizing from 322x272 to 642x452
+Window capture resizing from 642x452 to 202x152
+WasapiProcessLoopbackSource: capture started (target pid 8880, include tree only, requested 44100 Hz)
+WasapiProcessLoopbackSource: capture stopped after 17 packets (59976 bytes, 0 silent)
+WasapiProcessLoopbackSource: capture started (target pid 5600, exclude tree, requested 44100 Hz)
+WasapiProcessLoopbackSource: capture stopped after 1 packets (3528 bytes, 0 silent)

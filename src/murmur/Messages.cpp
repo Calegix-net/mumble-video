@@ -2588,11 +2588,12 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	MSG_SETUP(ServerUser::Authenticated);
 	RATELIMIT(uSource);
+	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
 
-	const auto streamKey = std::make_pair(static_cast< unsigned int >(uSource->uiSession),
-										 static_cast< unsigned int >(msg.stream_id()));
+	const auto streamKey =
+		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
 
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are
@@ -2642,8 +2643,10 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 	// their own schedule regardless, so a conforming client stays well under the bucket.
 	MSG_SETUP(ServerUser::Authenticated);
 	RATELIMIT(uSource);
+	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	const unsigned int sender = msg.session();
+	const bool wasUnwatched   = m_videoRouter.subscribersOf(sender, msg.stream_id()).empty();
 
 	if (!m_videoRouter.subscribe(uSource->uiSession, sender, msg.stream_id(), msg.subscribe())) {
 		ServerUser *senderUser = qhUsers.value(sender);
@@ -2655,14 +2658,15 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 		Channel *deniedIn = (senderUser && senderUser->cChannel) ? senderUser->cChannel : uSource->cChannel;
 
 		PERM_DENIED(uSource, deniedIn, ChanACL::ReceiveVideo);
+		msg.set_subscribe(false);
+		msg.set_request_keyframe(false);
+		sendMessage(uSource, msg);
 
 		return;
 	}
 
-	if (msg.subscribe()) {
-		// A fresh baseline for endStaleVideoStreams() to judge future silence against - see
-		// VideoRouter::noteRelayed(). This subscriber has not received anything yet, so there is nothing
-		// to hold against the stream until some time has actually passed without it.
+	if (msg.subscribe() && wasUnwatched) {
+		// Recovery requests use the same message. Resetting on repeats keeps dead streams alive.
 		m_videoRouter.noteRelayed(sender, msg.stream_id(), tUptime.elapsed< std::chrono::milliseconds >().count());
 	}
 
@@ -2675,9 +2679,10 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 
 		constexpr quint64 KEYFRAME_RELAY_INTERVAL_USEC = 1000 * 1000;
 
-		const quint64 now  = static_cast< quint64 >(tUptime.elapsed().count());
-		const auto lastIt  = m_lastKeyframeRelayUsec.find(sender);
-		const bool allowed = lastIt == m_lastKeyframeRelayUsec.end() || now - lastIt->second >= KEYFRAME_RELAY_INTERVAL_USEC;
+		const quint64 now = static_cast< quint64 >(tUptime.elapsed().count());
+		const auto lastIt = m_lastKeyframeRelayUsec.find(sender);
+		const bool allowed =
+			lastIt == m_lastKeyframeRelayUsec.end() || now - lastIt->second >= KEYFRAME_RELAY_INTERVAL_USEC;
 
 		if (senderUser && allowed) {
 			m_lastKeyframeRelayUsec[sender] = now;

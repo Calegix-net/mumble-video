@@ -281,6 +281,7 @@ QString VideoGrid::senderName(unsigned int senderSession) const {
 void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID, int sourceKind, int codec) {
 	const std::uint64_t key = surfaceKey(senderSession, streamID);
 	const bool isNewSurface = m_surfaces.find(key) == m_surfaces.end();
+	bool resumeWatching     = false;
 
 	if (isNewSurface) {
 		bool senderAlreadyPresent = false;
@@ -291,7 +292,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 				// and if the end of the old one never reached us - the control message was dropped, or
 				// the sender's client died - the old surface would sit there as a stuck last frame next
 				// to the live one, forever. The newer announcement wins.
-				it = m_surfaces.erase(it);
+				resumeWatching       = resumeWatching || it->second.watching;
+				it                   = m_surfaces.erase(it);
 				senderAlreadyPresent = true;
 				continue;
 			}
@@ -317,6 +319,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	// id changes whenever the codec, source or dimensions do, so nothing about the old content carries
 	// over - least of all a decoder holding reference frames from different content.
 	if (surface.streamID != streamID || surface.codec != codec) {
+		surface.pendingTiles.clear();
 		surface.canvas = QImage();
 		surface.vp8.reset();
 		surface.lastFrameNumber    = 0;
@@ -331,13 +334,23 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		// new stream id (its sender's resolution or codec changed mid-share) leaves watching exactly as
 		// the user last set it instead: someone already watching stays watching through the change,
 		// and someone who opted out stays out.
-		surface.watching = false;
+		surface.watching = resumeWatching;
+		if (resumeWatching)
+			surface.lastUnitMsec = QDateTime::currentMSecsSinceEpoch();
 	}
 
 	surface.senderSession = senderSession;
 	surface.streamID      = streamID;
 	surface.codec         = codec;
 	surface.sourceKind    = sourceKind;
+
+	if (isNewSurface) {
+		// The watch button must be available before the first frame: an unwatched stream receives none.
+		emit senderCountChanged(tileCount());
+		relayout();
+		if (resumeWatching)
+			emit watchToggled(senderSession, streamID, true);
+	}
 }
 
 void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, bool watching) {
@@ -348,12 +361,18 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 	}
 
 	it->second.watching = watching;
+	if (!watching) {
+		++it->second.pendingUnsubscriptions;
+		it->second.pendingTiles.clear();
+		it->second.hasDecodedFrame = false;
+		it->second.lastFrameNumber = 0;
+	}
 
 	if (watching) {
 		// A fresh grace period: whatever it was doing while unwatched - possibly nothing, for a long time
 		// - must not count against it the instant someone actually starts watching. See
 		// checkForStaleStreams().
-		it->second.lastUnitMsec         = QDateTime::currentMSecsSinceEpoch();
+		it->second.lastUnitMsec          = QDateTime::currentMSecsSinceEpoch();
 		it->second.stallRefreshRequested = false;
 	}
 
@@ -367,9 +386,17 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 	relayout();
 }
 
+bool VideoGrid::consumeUnsubscribeAcknowledgement(unsigned int senderSession, unsigned int streamID) {
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+	if (it == m_surfaces.end() || it->second.pendingUnsubscriptions == 0) {
+		return false;
+	}
+	--it->second.pendingUnsubscriptions;
+	return true;
+}
+
 void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
-									bool isKeyframe, unsigned int x, unsigned int y,
-									const QByteArray &encodedTile) {
+									bool isKeyframe, unsigned int x, unsigned int y, const QByteArray &encodedTile) {
 	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
 	// no codec, and are dropped rather than assumed to be anything.
 	const auto existing = m_surfaces.find(surfaceKey(senderSession, streamID));
@@ -381,7 +408,7 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	Surface &surface = existing->second;
 
 	// Recorded regardless of watching state, deliberately - see setWatching() and checkForStaleStreams().
-	surface.lastUnitMsec         = QDateTime::currentMSecsSinceEpoch();
+	surface.lastUnitMsec          = QDateTime::currentMSecsSinceEpoch();
 	surface.stallRefreshRequested = false;
 
 	if (!surface.watching) {
@@ -445,11 +472,25 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		// VP8 below stays fully synchronous: its decoder carries reference-frame state that must only
 		// ever be touched from one thread, in strict frame order, which a background task queue cannot
 		// promise the way a stateless JPEG tile can.
+		if (m_pendingTileDecodes >= MAX_PENDING_TILE_DECODES
+			|| surface.pendingTiles.size() >= MAX_PENDING_TILE_DECODES) {
+			emit keyframeNeeded(senderSession, streamID);
+			return;
+		}
+		auto pending         = std::make_shared< PendingTile >();
+		pending->frameNumber = frameNumber;
+		pending->x           = x;
+		pending->y           = y;
+		surface.pendingTiles.push_back(pending);
+		++m_pendingTileDecodes;
 		auto *watcher = new QFutureWatcher< QImage >(this);
 
 		connect(watcher, &QFutureWatcher< QImage >::finished, this,
-				[this, watcher, senderSession, streamID, x, y]() {
-					onTiledImageTileDecoded(senderSession, streamID, x, y, watcher->result());
+				[this, watcher, pending, senderSession, streamID]() {
+					pending->image = watcher->result();
+					pending->ready = true;
+					--m_pendingTileDecodes;
+					applyReadyTiles(senderSession, streamID);
 					watcher->deleteLater();
 				});
 
@@ -488,8 +529,22 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	applyDecodedTile(existing->first, surface, x, y, tile);
 }
 
+void VideoGrid::applyReadyTiles(unsigned int senderSession, unsigned int streamID) {
+	// Workers may finish in any order. Paint in arrival order, or an old JPEG can overwrite a newer
+	// one. Re-look up after each paint because UI signals may remove or replace this surface.
+	for (;;) {
+		const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+		if (it == m_surfaces.end() || it->second.pendingTiles.empty() || !it->second.pendingTiles.front()->ready) {
+			return;
+		}
+		const std::shared_ptr< PendingTile > tile = it->second.pendingTiles.front();
+		it->second.pendingTiles.pop_front();
+		onTiledImageTileDecoded(senderSession, streamID, tile->x, tile->y, tile->image, tile->frameNumber);
+	}
+}
+
 void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int streamID, unsigned int x,
-										unsigned int y, QImage tile) {
+										unsigned int y, QImage tile, quint64 frameNumber) {
 	// Re-looked-up rather than captured by reference at dispatch time: this decode ran on a background
 	// thread, so by the time it finishes, the stream may have ended, or the surface holding it destroyed
 	// entirely, while it was in flight.
@@ -521,6 +576,13 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 		return;
 	}
 
+	// Reassembly order can differ from network frame order. Dropping a late tile may
+	// leave a gap until refresh, but it must never overwrite newer pixels. Apply the
+	// watermark after decoding so invalid JPEGs cannot move it forward.
+	if (surface.hasDecodedFrame && frameNumber < surface.lastFrameNumber)
+		return;
+	surface.hasDecodedFrame     = true;
+	surface.lastFrameNumber     = frameNumber;
 	surface.consecutiveFailures = 0;
 
 	applyDecodedTile(existing->first, surface, x, y, tile);
@@ -629,7 +691,7 @@ void VideoGrid::clearSelfScreenFrame() {
 
 void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) {
 	if (m_surfaces.erase(surfaceKey(senderSession, streamID)) > 0) {
-		emit senderCountChanged(senderCount());
+		emit senderCountChanged(tileCount());
 		relayout();
 	}
 }
@@ -639,7 +701,7 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 
 	for (auto it = m_surfaces.begin(); it != m_surfaces.end();) {
 		if (it->second.senderSession == senderSession) {
-			it          = m_surfaces.erase(it);
+			it         = m_surfaces.erase(it);
 			removedAny = true;
 		} else {
 			++it;
@@ -649,7 +711,7 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 	m_senderNames.erase(senderSession);
 
 	if (removedAny) {
-		emit senderCountChanged(senderCount());
+		emit senderCountChanged(tileCount());
 		relayout();
 	}
 }
@@ -757,7 +819,7 @@ QRect VideoGrid::cellRect(const Layout &layout, int slot) {
 	}
 
 	const int column = slot % layout.columns;
-	const int row     = slot / layout.columns;
+	const int row    = slot / layout.columns;
 
 	return QRect(column * layout.cellWidth, row * layout.cellHeight, layout.cellWidth, layout.cellHeight);
 }
@@ -768,7 +830,7 @@ int VideoGrid::slotAt(const QPoint &point, const Layout &layout) const {
 	}
 
 	const int column = point.x() / layout.cellWidth;
-	const int row     = point.y() / layout.cellHeight;
+	const int row    = point.y() / layout.cellHeight;
 
 	if (column < 0 || column >= layout.columns || row < 0 || row >= layout.rows) {
 		return -1;
@@ -979,7 +1041,7 @@ void VideoGrid::updateHoveredBar() {
 	}
 
 	const Layout layout = currentLayout();
-	const int slot       = slotAt(m_lastMousePos, layout);
+	const int slot      = slotAt(m_lastMousePos, layout);
 
 	m_hoveredSlot = slot;
 
@@ -1078,7 +1140,7 @@ void VideoGrid::updateFullscreenWindow() {
 
 QString VideoGrid::labelForSurface(const Surface &surface) const {
 	const auto nameIt = m_senderNames.find(surface.senderSession);
-	QString label      = nameIt == m_senderNames.end() ? QString() : nameIt->second;
+	QString label     = nameIt == m_senderNames.end() ? QString() : nameIt->second;
 
 	// A camera tile is unlabelled beyond the name, matching today's behaviour. Anything else - a
 	// screen or a window - is called out, since a sender showing a camera and a screen at once
@@ -1223,7 +1285,7 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 
 void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 	const Layout layout = currentLayout();
-	const int slot       = slotAt(event->pos(), layout);
+	const int slot      = slotAt(event->pos(), layout);
 
 	if (slot < 0) {
 		event->ignore();

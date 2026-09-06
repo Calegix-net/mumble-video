@@ -17,6 +17,7 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <vector>
 
 /**
  * Captures a whole display via DXGI Desktop Duplication.
@@ -85,8 +86,8 @@ protected:
 
 	DisplayInfo m_display;
 
-	ID3D11Device *m_device               = nullptr;
-	ID3D11DeviceContext *m_context       = nullptr;
+	ID3D11Device *m_device                = nullptr;
+	ID3D11DeviceContext *m_context        = nullptr;
 	IDXGIOutputDuplication *m_duplication = nullptr;
 
 	// Re-created only when the frame size changes, which for a single output is only ever on the first
@@ -96,6 +97,10 @@ protected:
 	UINT m_stagingWidth               = 0;
 	UINT m_stagingHeight              = 0;
 
+	DXGI_MODE_ROTATION m_rotation                   = DXGI_MODE_ROTATION_IDENTITY;
+	DXGI_OUTDUPL_POINTER_POSITION m_pointerPosition = {};
+	DXGI_OUTDUPL_POINTER_SHAPE_INFO m_pointerShape  = {};
+	std::vector< unsigned char > m_pointerBytes;
 	QTimer m_pollTimer;
 	Timer m_clock;
 

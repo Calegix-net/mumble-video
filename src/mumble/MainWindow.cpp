@@ -591,10 +591,9 @@ void MainWindow::setupVideoGrid() {
 				Global::get().sh->sendMessage(mpvs);
 			});
 
-	connect(m_videoGrid, &VideoGrid::volumeChanged, this,
-			[this](unsigned int senderSession, float multiplier) {
-				setScreenShareVolumeForSender(senderSession, multiplier);
-			});
+	connect(m_videoGrid, &VideoGrid::volumeChanged, this, [this](unsigned int senderSession, float multiplier) {
+		setScreenShareVolumeForSender(senderSession, multiplier);
+	});
 
 	// A stream the grid gave up on for having gone silent too long - see VideoGrid's stale-stream
 	// watchdog. Ordinarily msgUserRemove is what withdraws a departed sender's subscription (see
@@ -602,28 +601,32 @@ void MainWindow::setupVideoGrid() {
 	// sender's own client crashed in a way that also stopped the server from ever noticing it
 	// disconnected, so nothing tells this client to stop asking for a stream nobody is sending any more.
 	// Same unsubscribe watchToggled(false) sends; the difference is only who initiated it.
-	connect(m_videoGrid, &VideoGrid::streamWentStale, this,
-			[this](unsigned int senderSession, unsigned int streamID) {
-				Global::get().l->log(Log::Warning,
-									 tr("A shared stream from session %1 went silent and was dropped.")
-										 .arg(senderSession));
+	connect(m_videoGrid, &VideoGrid::streamWentStale, this, [this](unsigned int senderSession, unsigned int streamID) {
+		Global::get().l->log(Log::Warning,
+							 tr("A shared stream from session %1 went silent and was dropped.").arg(senderSession));
 
-				if (!Global::get().sh) {
-					return;
-				}
+		if (!Global::get().sh) {
+			return;
+		}
 
-				MumbleProto::VideoSubscribe mpvs;
-				mpvs.set_session(senderSession);
-				mpvs.set_stream_id(streamID);
-				mpvs.set_subscribe(false);
+		MumbleProto::VideoSubscribe mpvs;
+		mpvs.set_session(senderSession);
+		mpvs.set_stream_id(streamID);
+		mpvs.set_subscribe(false);
 
-				Global::get().sh->sendMessage(mpvs);
-			});
+		Global::get().sh->sendMessage(mpvs);
+	});
 }
 
 void MainWindow::setupVideoBroadcast() {
 	m_videoBroadcaster = new VideoBroadcaster(this);
 	m_videoBroadcaster->setNextStreamID(allocateStreamID());
+	m_videoBroadcaster->setStreamIDAllocator([this]() { return allocateStreamID(); });
+	connect(m_videoBroadcaster, &VideoBroadcaster::streamResized, this,
+			[this](unsigned int previousID, unsigned int streamID, QSize size) {
+				announceVideoResize(m_videoBroadcaster, MumbleProto::VideoState_SourceKind_Camera, previousID, streamID,
+									size);
+			});
 
 	m_shareCameraAction = new QAction(tr("Share &Camera"), this);
 	m_shareCameraAction->setCheckable(true);
@@ -698,9 +701,35 @@ void MainWindow::setupVideoBroadcast() {
 			});
 }
 
+void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
+									 unsigned int streamID, QSize size) {
+	if (!Global::get().sh || !Global::get().sh->isRunning())
+		return;
+	MumbleProto::VideoState state;
+	state.set_stream_id(streamID);
+	state.set_active(true);
+	state.set_codec(broadcaster->codec() == 1 ? MumbleProto::VideoState_Codec_TiledImage
+											  : MumbleProto::VideoState_Codec_VP8);
+	state.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
+	state.set_source_name(u8(broadcaster->describe()));
+	state.set_width(static_cast< unsigned int >(size.width()));
+	state.set_height(static_cast< unsigned int >(size.height()));
+	// Announce the replacement first so viewers can carry their watch choice across.
+	Global::get().sh->sendMessage(state);
+	MumbleProto::VideoState end;
+	end.set_stream_id(previousID);
+	end.set_active(false);
+	Global::get().sh->sendMessage(end);
+}
+
 void MainWindow::setupScreenShare() {
 	m_screenVideoBroadcaster = new VideoBroadcaster(this);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
+	m_screenVideoBroadcaster->setStreamIDAllocator([this]() { return allocateStreamID(); });
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::streamResized, this,
+			[this](unsigned int previousID, unsigned int streamID, QSize size) {
+				announceVideoResize(m_screenVideoBroadcaster, m_screenSourceKind, previousID, streamID, size);
+			});
 
 	m_screenAudioBroadcaster = new ScreenAudioBroadcaster(this);
 
@@ -735,21 +764,22 @@ void MainWindow::setupScreenShare() {
 	// Directly after the camera action, so the two toggles that do the same kind of thing sit together.
 	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
 	const qsizetype afterCamera             = toolbarActions.indexOf(m_shareCameraAction) + 1;
-	qtIconToolbar->insertAction(
-		afterCamera > 0 && afterCamera < toolbarActions.size() ? toolbarActions.at(afterCamera) : nullptr,
-		m_shareScreenAction);
+	qtIconToolbar->insertAction(afterCamera > 0 && afterCamera < toolbarActions.size() ? toolbarActions.at(afterCamera)
+																					   : nullptr,
+								m_shareScreenAction);
 
 	connect(m_shareScreenAction, &QAction::triggered, this, &MainWindow::toggleScreenShare);
 
-	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, this,
-			[this](bool active) { m_shareScreenAction->setChecked(active); });
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, this, [this](bool active) {
+		m_shareScreenAction->setChecked(active);
+		if (!active)
+			m_screenAwaitingFrame = false;
+	});
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Screen sharing stopped: %1").arg(reason));
 
-		// On Linux the stream is announced before the portal has answered, so a refused portal - the
-		// most ordinary failure there is - would otherwise leave a permanently dead stream announced
-		// to everyone in the channel.
+		// End any stream that was announced before the backend failed.
 		if (Global::get().sh && Global::get().sh->isRunning()) {
 			MumbleProto::VideoState end;
 			end.set_stream_id(m_screenVideoBroadcaster->streamID());
@@ -762,6 +792,23 @@ void MainWindow::setupScreenShare() {
 	// slots are what fire senderCountChanged and make the dock visible, and nothing else does. Its own
 	// reserved cell, separate from the camera's - see the connect() for m_videoBroadcaster above.
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfScreenFrame);
+#ifdef USE_SCREEN_SHARE_PIPEWIRE
+	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, this, [this](const QImage &frame) {
+		if (!m_screenAwaitingFrame || !Global::get().sh || !Global::get().sh->isRunning())
+			return;
+		m_screenAwaitingFrame = false;
+		MumbleProto::VideoState state;
+		state.set_stream_id(m_screenVideoBroadcaster->streamID());
+		state.set_active(true);
+		state.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
+		state.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		state.set_width(static_cast< unsigned int >(frame.width()));
+		state.set_height(static_cast< unsigned int >(frame.height()));
+		Global::get().sh->sendMessage(state);
+	});
+#endif
+
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::activeChanged, m_videoGrid, [this](bool active) {
 		if (!active) {
@@ -930,18 +977,10 @@ void MainWindow::toggleScreenShare(bool share) {
 		return;
 	}
 
-	// Announced immediately even though the portal has not answered yet: the broadcaster is running,
-	// and the stream is announced the same way the Windows path announces its own. Frames begin when
-	// the user accepts; if they refuse, the source fails and the broadcaster stops, which ends the
-	// stream through the ordinary failure path.
-	MumbleProto::VideoState pwState;
-	pwState.set_stream_id(m_screenVideoBroadcaster->streamID());
-	pwState.set_active(true);
-	pwState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
-	pwState.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
-	pwState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
-
-	Global::get().sh->sendMessage(pwState);
+	// Wait for actual capture before announcing. The portal picker can remain open
+	// beyond the server's silence timeout; advertising while waiting would expire
+	// the stream before the user ever chooses a source.
+	m_screenAwaitingFrame = true;
 
 	// The dock only appears when the grid has something to show, and the first real frame is gated on
 	// the user answering the portal's dialog - which can sit open for as long as they like. Until then
@@ -953,8 +992,7 @@ void MainWindow::toggleScreenShare(bool share) {
 
 		QPainter pendingPainter(&pending);
 		pendingPainter.setPen(Qt::white);
-		pendingPainter.drawText(pending.rect(), Qt::AlignCenter,
-								tr("Waiting for the screen picker…"));
+		pendingPainter.drawText(pending.rect(), Qt::AlignCenter, tr("Waiting for the screen picker…"));
 		pendingPainter.end();
 
 		m_videoGrid->setSelfScreenFrame(pending);
@@ -982,7 +1020,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	}
 
 	const ScreenShareTargetKind targetKind = picker.targetKind();
-	const Settings &settings                = Global::get().s;
+	const Settings &settings               = Global::get().s;
 
 	// Always TiledImage, never VP8: screen content is mostly static and often text-heavy, exactly what
 	// the tiled codec is built for, matching the guidance VideoWizard already gives for its own "screen"
@@ -993,6 +1031,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
 	MumbleProto::VideoState_SourceKind sourceKind = MumbleProto::VideoState_SourceKind_Display;
+	m_screenSourceKind                            = sourceKind;
 
 	// Only set when targetKind == Window: the owning process of the shared window, needed if the user
 	// also asked to scope audio to just that application rather than all system sound.
@@ -1012,10 +1051,10 @@ void MainWindow::toggleScreenShare(bool share) {
 		GetWindowThreadProcessId(window.handle, &ownerProcessId);
 		windowOwnerProcessId = ownerProcessId;
 
-		sourceKind = MumbleProto::VideoState_SourceKind_Window;
+		sourceKind         = MumbleProto::VideoState_SourceKind_Window;
+		m_screenSourceKind = sourceKind;
 
-		if (!m_screenVideoBroadcaster->start(
-				std::make_unique< WgcWindowVideoSource >(window, picker.showCursor()))) {
+		if (!m_screenVideoBroadcaster->start(std::make_unique< WgcWindowVideoSource >(window, picker.showCursor()))) {
 			Global::get().l->log(Log::Warning, tr("Could not start capturing this window."));
 			m_shareScreenAction->setChecked(false);
 
@@ -1059,7 +1098,7 @@ void MainWindow::toggleScreenShare(bool share) {
 
 		if (picker.windowAudioOnly()) {
 			audioSource = std::make_unique< WasapiProcessLoopbackSource >(windowOwnerProcessId,
-																		   m_screenVideoBroadcaster->describe());
+																		  m_screenVideoBroadcaster->describe());
 		} else {
 			// Whole-system audio, but with our own process tree excluded: a plain default-device loopback
 			// would also capture the other Mumble users' voices coming out of the same speakers and send
@@ -1082,8 +1121,7 @@ void MainWindow::toggleScreenShare(bool share) {
 		} else {
 			// The picture keeps going without it - a screen share that silently failed to start at all
 			// would be a worse outcome than one missing audio.
-			Global::get().l->log(Log::Warning,
-								 tr("Could not capture system audio; sharing the screen without it."));
+			Global::get().l->log(Log::Warning, tr("Could not capture system audio; sharing the screen without it."));
 		}
 	}
 

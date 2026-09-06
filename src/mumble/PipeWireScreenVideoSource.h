@@ -12,6 +12,7 @@
 
 #include <QtCore/QMutex>
 #include <QtCore/QSize>
+#include <QtCore/QTimer>
 #include <QtGui/QImage>
 
 #include <atomic>
@@ -28,6 +29,7 @@ struct pw_context;
 struct pw_core;
 struct pw_stream;
 struct spa_hook;
+struct spa_buffer;
 
 /**
  * Captures the screen on Linux: permission from the XDG desktop portal, frames from PipeWire.
@@ -43,7 +45,7 @@ struct spa_hook;
  * reason to have one.
  *
  * PipeWire runs its own thread. Buffers arrive on it, are converted to QImage there, and are handed
- * over under a mutex; frameReady is emitted on the owning thread by a zero-interval timer, so nothing
+ * over under a mutex; frameReady is emitted on the owning thread by a coalesced queued invocation, so nothing
  * downstream of VideoSource ever runs on a PipeWire callback.
  */
 class PipeWireScreenVideoSource : public VideoSource {
@@ -75,6 +77,9 @@ public:
 	// are free functions, not members.
 	void onStreamParamChanged(std::uint32_t id, const struct spa_pod *param);
 	void onStreamProcess();
+	static QImage imageFromBuffer(const spa_buffer *buffer, QSize size, std::uint32_t format);
+	void onCoreDone(std::uint32_t id, int sequence);
+	void onCoreError(const char *message);
 	/// @param state A pw_stream_state, passed as int so this header needs no PipeWire types.
 	void onStreamStateChanged(int state, const char *error);
 
@@ -90,6 +95,8 @@ protected:
 	void reportPersistentDrop(const QString &reason);
 
 	void teardown();
+	void queueFailure(const QString &reason);
+	void pollHealth();
 
 	std::unique_ptr< PortalScreenCast > m_portal;
 
@@ -103,7 +110,13 @@ protected:
 	/// Listener storage for m_stream. pw_stream_add_listener does not own or free this, so it is kept
 	/// for the stream's lifetime and deleted in teardown() - previously it was allocated and leaked on
 	/// every start(). A pointer (not a by-value member) so the header needs no spa headers.
-	spa_hook *m_streamListener = nullptr;
+	spa_hook *m_streamListener          = nullptr;
+	spa_hook *m_coreListener            = nullptr;
+	int m_healthSequence                = -1;
+	std::uint64_t m_healthStartedAtUsec = 0;
+	QTimer m_healthTimer;
+	QTimer m_firstFrameTimer;
+	std::atomic< std::uint64_t > m_generation{ 0 };
 
 	/// Negotiated format. Written on the PipeWire thread during param negotiation, read there too.
 	QSize m_size;
@@ -112,7 +125,7 @@ protected:
 	/// Unreadable buffers in a row (PipeWire thread only). A solid second of them is reported through
 	/// failed() instead of being dropped in silence - the shipped bug was precisely a healthy-looking
 	/// stream whose every frame was quietly unusable.
-	int m_consecutiveDrops = 0;
+	int m_consecutiveDrops                                = 0;
 	static constexpr int CONSECUTIVE_DROPS_BEFORE_FAILURE = 30;
 
 	/// Whether any frame has ever been handed to the Qt side, for the first-frame watchdog.
@@ -127,6 +140,7 @@ protected:
 	QImage m_pendingFrame;
 	std::uint64_t m_pendingTimestampUsec = 0;
 	bool m_hasPendingFrame               = false;
+	bool m_deliveryQueued                = false;
 
 	Timer m_clock;
 

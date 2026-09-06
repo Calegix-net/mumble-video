@@ -5,7 +5,8 @@ Run it:
 
     ./mumble
 
-Everything it needs is in this folder. There is no installer; unzip it anywhere and run it.
+The application libraries are bundled. See REQUIREMENTS below for host and desktop services.
+There is no installer; unzip it anywhere and run it.
 
 BUILD-INFO.txt records the commit this was built from and the checksum of the binary inside, so you can
 tell two downloads apart without unpacking and diffing them.
@@ -47,9 +48,9 @@ cameras, or a virtual one.
 REQUIREMENTS
 ------------
 Linux x86_64, glibc 2.41 or newer (built on Fedora 42). The bundle includes Qt 6, its multimedia
-backend, libvpx, protobuf and OpenSSL, so nothing needs to be installed first. Windows builds (wizard
-installer, MSI, portable zip) and a flatpak are published alongside this one, all from the same
-commit. There is no macOS build.
+backend, libvpx, protobuf and OpenSSL. Screen capture also requires host PipeWire and a working
+XDG desktop portal with ScreenCast support. See BUILD-INFO.txt for this build's source revision.
+See the download page for the available Windows packages. There is no macOS build.
 
 WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
 --------------------------------------
@@ -65,7 +66,10 @@ WHAT IS DIFFERENT FROM UPSTREAM MUMBLE
 
 Screen sharing: the button next to the camera one asks your desktop (via the XDG portal) what to
 share - the dialog you see is your compositor's own, and its answer decides what is captured. Needs a
-desktop portal, which every mainstream Wayland desktop ships; the button hides itself if none answers.
+desktop portal with ScreenCast support; the button hides itself if none answers.
+The local preview waits for the picker, and viewers see the stream after capture starts.
+Stopping the share closes the pending picker or active portal session. Linux screen-share audio
+capture is not implemented; ordinary Mumble voice remains available.
 
 This client CANNOT talk to a stock Mumble server, and stock clients cannot use video with this one.
 It is a clean-break fork: the UDP media framing carries an extra channel byte.
