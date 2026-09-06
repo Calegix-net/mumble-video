@@ -257,6 +257,10 @@ protected:
 	/// centralised rather than left to each broadcaster to pick its own.
 	std::uint32_t m_nextVideoStreamID = 0;
 	std::uint32_t allocateStreamID() { return m_nextVideoStreamID++; }
+	void announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
+							 unsigned int streamID, QSize size);
+	bool m_screenAwaitingFrame = false;
+	int m_screenSourceKind     = 2; // VideoState::Display
 
 	QAction *m_videoWizardAction = nullptr;
 

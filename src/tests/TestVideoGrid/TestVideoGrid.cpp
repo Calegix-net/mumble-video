@@ -34,7 +34,7 @@ constexpr unsigned int STREAM = 1;
 /// Surface::watching - so this additionally opts it in, matching what every test in this file other than
 /// the ones about the preview state itself actually wants: units delivered right after this decode.
 void announce(VideoGrid &grid, unsigned int sender, unsigned int stream,
-			  int codec = MumbleProto::VideoState_Codec_TiledImage,
+			  int codec      = MumbleProto::VideoState_Codec_TiledImage,
 			  int sourceKind = MumbleProto::VideoState_SourceKind_SOURCE_UNKNOWN) {
 	grid.setStreamCodec(sender, stream, sourceKind, codec);
 	grid.setWatching(sender, stream, true);
@@ -96,6 +96,13 @@ double meanDifference(const QImage &a, const QImage &b) {
 class TestVideoGrid : public QObject {
 	Q_OBJECT
 private slots:
+	void backgroundTilesPaintInArrivalOrder();
+	void lateNetworkTilesCannotOverwriteNewPixels();
+	void resizingPreservesWatchingAndDiscardsOldPixels();
+	void unwatchDiscardsPendingTiles();
+	void announcementMakesTheDockVisible();
+	void unsubscribeRepliesPreserveTheTileAndSubsequentWatch();
+	void removingRemoteVideoKeepsLocalPreviewVisible();
 	void anEncodedFrameIsReassembledIntoThePicture();
 	void aPartialFrameShowsWhatArrived();
 	void surfaceGrowthKeepsWhatWasAlreadyDrawn();
@@ -125,6 +132,87 @@ private slots:
 	void tiledImageDecodeDoesNotBlockTheCallingThread();
 	void stalledStreamGetsOneKeyframeRequest();
 };
+
+namespace {
+class ControlledDecodeGrid : public VideoGrid {
+public:
+	std::shared_ptr< PendingTile > queueTile(const QColor &color) {
+		auto tile   = std::make_shared< PendingTile >();
+		tile->image = QImage(32, 32, QImage::Format_RGB32);
+		tile->image.fill(color);
+		m_surfaces.at(surfaceKey(SENDER, STREAM)).pendingTiles.push_back(tile);
+		return tile;
+	}
+
+	void finish(const std::shared_ptr< PendingTile > &tile) {
+		tile->ready = true;
+		applyReadyTiles(SENDER, STREAM);
+	}
+};
+} // namespace
+
+void TestVideoGrid::backgroundTilesPaintInArrivalOrder() {
+	ControlledDecodeGrid grid;
+	announce(grid, SENDER, STREAM);
+	const auto older = grid.queueTile(Qt::red);
+	const auto newer = grid.queueTile(Qt::green);
+	grid.finish(newer);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+	grid.finish(older);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).pixelColor(0, 0), QColor(Qt::green));
+}
+
+void TestVideoGrid::unwatchDiscardsPendingTiles() {
+	ControlledDecodeGrid grid;
+	announce(grid, SENDER, STREAM);
+	const auto old = grid.queueTile(Qt::red);
+	grid.setWatching(SENDER, STREAM, false);
+	grid.setWatching(SENDER, STREAM, true);
+	grid.finish(old);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+	const auto current = grid.queueTile(Qt::green);
+	grid.finish(current);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).pixelColor(0, 0), QColor(Qt::green));
+}
+
+void TestVideoGrid::announcementMakesTheDockVisible() {
+	VideoGrid grid;
+	grid.hide();
+	connect(&grid, &VideoGrid::senderCountChanged, &grid, [&](int count) { grid.setVisible(count > 0); });
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+	QVERIFY(grid.isVisible());
+	QCOMPARE(grid.senderCount(), 1);
+}
+
+void TestVideoGrid::unsubscribeRepliesPreserveTheTileAndSubsequentWatch() {
+	VideoGrid grid;
+	announce(grid, SENDER, STREAM);
+	grid.setWatching(SENDER, STREAM, false);
+	QVERIFY(grid.consumeUnsubscribeAcknowledgement(SENDER, STREAM));
+	QCOMPARE(grid.senderCount(), 1);
+	QVERIFY(!grid.consumeUnsubscribeAcknowledgement(SENDER, STREAM));
+
+	grid.setWatching(SENDER, STREAM, true);
+	grid.setWatching(SENDER, STREAM, false);
+	grid.setWatching(SENDER, STREAM, true);
+	QVERIFY(grid.consumeUnsubscribeAcknowledgement(SENDER, STREAM));
+	QSignalSpy toggles(&grid, &VideoGrid::watchToggled);
+	grid.setWatching(SENDER, STREAM, true);
+	QCOMPARE(toggles.count(), 0);
+	// An unsolicited withdrawal must still reach the caller's permission-revocation handling.
+	QVERIFY(!grid.consumeUnsubscribeAcknowledgement(SENDER, STREAM));
+}
+
+void TestVideoGrid::removingRemoteVideoKeepsLocalPreviewVisible() {
+	VideoGrid grid;
+	connect(&grid, &VideoGrid::senderCountChanged, &grid, [&](int count) { grid.setVisible(count > 0); });
+	QImage preview(32, 32, QImage::Format_RGB32);
+	preview.fill(Qt::red);
+	grid.setSelfCameraFrame(preview);
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+	grid.removeSender(SENDER, STREAM);
+	QVERIFY(grid.isVisible());
+}
 
 void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
 	SyntheticVideoSource source(640, 480);
@@ -308,6 +396,9 @@ void TestVideoGrid::sendersAppearAndDisappear() {
 
 	announce(grid, 1, STREAM);
 	announce(grid, 2, STREAM);
+	// Announcements expose the watch controls before any media can arrive.
+	QCOMPARE(spy.count(), 2);
+	spy.clear();
 	grid.onVideoUnitReceived(1, STREAM, 0, true, 0, 0, encoded);
 	grid.onVideoUnitReceived(2, STREAM, 0, true, 0, 0, encoded);
 	waitForAsyncDecode();
@@ -803,10 +894,10 @@ void TestVideoGrid::rapidWatchToggleWhileFramesArriveDoesNotCrash() {
 		auto units = encoder.encode(source.render(sender), STREAM, 1, 1);
 
 		for (const EncodedVideoUnit &unit : units) {
-			grid.onVideoUnitReceived(
-				sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
-				QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
-						  static_cast< int >(unit.payload.size())));
+			grid.onVideoUnitReceived(sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x,
+									 unit.header.y,
+									 QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+												static_cast< int >(unit.payload.size())));
 		}
 
 		encoder.reset();
@@ -868,8 +959,7 @@ void TestVideoGrid::firstFrameShowingTheDockDoesNotReenterUnsafely() {
 	for (const EncodedVideoUnit &unit : units) {
 		grid.onVideoUnitReceived(
 			SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
-			QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
-					  static_cast< int >(unit.payload.size())));
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
 	}
 
 	waitForAsyncDecode();
@@ -984,10 +1074,10 @@ void TestVideoGrid::routineTileUpdatesDoNotReflowEveryTilesControls() {
 			encoder.encode(source.render(frameNumber), STREAM, frameNumber, frameNumber);
 
 		for (const EncodedVideoUnit &unit : units) {
-			grid.onVideoUnitReceived(
-				sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
-				QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
-						  static_cast< int >(unit.payload.size())));
+			grid.onVideoUnitReceived(sender, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x,
+									 unit.header.y,
+									 QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+												static_cast< int >(unit.payload.size())));
 		}
 
 		waitForAsyncDecode();
@@ -1035,8 +1125,7 @@ void TestVideoGrid::tiledImageDecodeDoesNotBlockTheCallingThread() {
 	for (const EncodedVideoUnit &unit : units) {
 		grid.onVideoUnitReceived(
 			SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
-			QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
-					  static_cast< int >(unit.payload.size())));
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
 	}
 
 	// Every one of those calls has already returned, but nothing has actually been painted into the
@@ -1112,6 +1201,47 @@ void TestVideoGrid::stalledStreamGetsOneKeyframeRequest() {
 
 	QTest::qWait(400);
 	QCOMPARE(needed.count(), 2);
+}
+
+void TestVideoGrid::lateNetworkTilesCannotOverwriteNewPixels() {
+	VideoGrid grid;
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_TiledImage);
+	QImage blue(32, 32, QImage::Format_RGB32);
+	blue.fill(Qt::blue);
+	QImage red(32, 32, QImage::Format_RGB32);
+	red.fill(Qt::red);
+	auto jpeg = [](const QImage &image) {
+		QByteArray bytes;
+		QBuffer buffer(&bytes);
+		buffer.open(QIODevice::WriteOnly);
+		image.save(&buffer, "JPEG");
+		return bytes;
+	};
+	grid.onVideoUnitReceived(SENDER, STREAM, 20, true, 0, 0, jpeg(blue));
+	grid.onVideoUnitReceived(SENDER, STREAM, 19, true, 0, 0, jpeg(red));
+	waitForAsyncDecode();
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).pixelColor(0, 0).blue() > 200);
+}
+
+void TestVideoGrid::resizingPreservesWatchingAndDiscardsOldPixels() {
+	VideoGrid grid;
+	announce(grid, SENDER, 10, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Window);
+	QSignalSpy subscriptions(&grid, &VideoGrid::watchToggled);
+	grid.setStreamCodec(SENDER, 11, MumbleProto::VideoState_SourceKind_Window,
+						MumbleProto::VideoState_Codec_TiledImage);
+	QCOMPARE(subscriptions.count(), 1);
+	QCOMPARE(subscriptions.at(0).at(1).toUInt(), 11u);
+	QVERIFY(subscriptions.at(0).at(2).toBool());
+	QVERIFY(grid.surfaceFor(SENDER, 10).isNull());
+	QImage small(32, 16, QImage::Format_RGB32);
+	small.fill(Qt::red);
+	QByteArray bytes;
+	QBuffer buffer(&bytes);
+	buffer.open(QIODevice::WriteOnly);
+	small.save(&buffer, "JPEG");
+	grid.onVideoUnitReceived(SENDER, 11, 0, true, 0, 0, bytes);
+	waitForAsyncDecode();
+	QCOMPARE(grid.surfaceFor(SENDER, 11).size(), QSize(32, 16));
 }
 
 QTEST_MAIN(TestVideoGrid)

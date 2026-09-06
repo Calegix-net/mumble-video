@@ -17,7 +17,7 @@ ARG BASE_IMAGE=fedora:42
 FROM ${BASE_IMAGE}
 
 RUN dnf install -y --setopt=install_weak_deps=False \
-        gcc-c++ make cmake pkgconf git \
+        gcc-c++ make cmake pkgconf git dbus-daemon \
         qt6-qtbase-devel qt6-qttools-devel qt6-qtsvg-devel qt6-qtmultimedia-devel \
         pipewire-devel \
         mesa-libGL-devel boost-devel openssl-devel \

@@ -8,6 +8,7 @@
 
 #include <QtCore/QObject>
 #include <QtCore/QString>
+#include <QtDBus/QDBusContext>
 #include <QtDBus/QDBusObjectPath>
 
 #include <cstdint>
@@ -30,7 +31,7 @@
  * captured until the user has accepted, so a portal session cannot be established without a visible
  * prompt.
  */
-class PortalScreenCast : public QObject {
+class PortalScreenCast : public QObject, protected QDBusContext {
 	Q_OBJECT
 
 public:
@@ -87,19 +88,13 @@ signals:
 	void failed(const QString &reason);
 
 protected slots:
+	void onSessionClosed(const QVariantMap &details);
 	void onCreateSessionResponse(std::uint32_t response, const QVariantMap &results);
 	void onSelectSourcesResponse(std::uint32_t response, const QVariantMap &results);
 	void onStartResponse(std::uint32_t response, const QVariantMap &results);
 
 protected:
-	/**
-	 * Subscribes to the Response signal of a portal Request object.
-	 *
-	 * The portal returns a Request path from each call and answers on that object. The path is
-	 * predictable from the caller's unique bus name and the handle token, but the documented approach
-	 * is to subscribe to whatever path the call returned, which is what this does - subscribing to a
-	 * guessed path races with the portal replying before the subscription lands.
-	 */
+	/// Subscribe before sending the request, to avoid losing an immediate response.
 	bool connectRequest(const QDBusObjectPath &path, const char *slot);
 
 	/// Calls a ScreenCast method that answers through a Request object, with the Response signal
@@ -107,6 +102,12 @@ protected:
 	/// handle_token. Returns false if the call itself failed.
 	bool callWithRequest(const QString &method, QList< QVariant > arguments, QVariantMap options, const char *slot);
 
+	enum class Phase { Closed, Creating, Selecting, Starting, Capturing };
+	Phase m_phase = Phase::Closed;
+	QString m_requestPath;
+	QByteArray m_requestSlot;
+	bool consumeResponse(Phase expected);
+	void disconnectRequest();
 	static QString newToken();
 	static QString senderPathElement();
 

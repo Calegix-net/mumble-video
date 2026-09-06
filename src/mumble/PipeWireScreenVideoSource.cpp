@@ -6,7 +6,9 @@
 #include "PipeWireScreenVideoSource.h"
 
 #include <QtCore/QMutexLocker>
+#include <QtCore/QPointer>
 #include <QtCore/QTimer>
+#include <algorithm>
 
 // CMake adds PipeWire's include directories with SYSTEM, which is what makes these compile at all:
 // they are C headers built on GNU statement expressions and implicit conversions that this project's
@@ -23,12 +25,11 @@ namespace {
 
 /// PipeWire has to be initialised once per process before anything else in the library is called.
 void ensurePipeWireInitialised() {
-	static bool initialised = false;
-
-	if (!initialised) {
+	static const bool initialised = [] {
 		pw_init(nullptr, nullptr);
-		initialised = true;
-	}
+		return true;
+	}();
+	(void) initialised;
 }
 
 /**
@@ -79,6 +80,13 @@ void streamProcessTrampoline(void *data) {
 	static_cast< PipeWireScreenVideoSource * >(data)->onStreamProcess();
 }
 
+void coreDone(void *data, std::uint32_t id, int seq) {
+	static_cast< PipeWireScreenVideoSource * >(data)->onCoreDone(id, seq);
+}
+void coreError(void *data, std::uint32_t, int, int, const char *message) {
+	static_cast< PipeWireScreenVideoSource * >(data)->onCoreError(message);
+}
+
 } // namespace
 
 bool PipeWireScreenVideoSource::isAvailable() {
@@ -89,6 +97,14 @@ PipeWireScreenVideoSource::PipeWireScreenVideoSource(PortalScreenCast::SourceTyp
 													 QObject *parent)
 	: VideoSource(parent), m_sourceType(sourceType), m_captureCursor(captureCursor) {
 	ensurePipeWireInitialised();
+	m_healthTimer.setInterval(1000);
+	connect(&m_healthTimer, &QTimer::timeout, this, &PipeWireScreenVideoSource::pollHealth);
+	m_firstFrameTimer.setSingleShot(true);
+	m_firstFrameTimer.setInterval(FIRST_FRAME_TIMEOUT_MSEC);
+	connect(&m_firstFrameTimer, &QTimer::timeout, this, [this] {
+		if (m_running && !m_everPublished)
+			queueFailure(tr("The screen share started but no frames arrived from the compositor."));
+	});
 }
 
 PipeWireScreenVideoSource::~PipeWireScreenVideoSource() {
@@ -100,7 +116,7 @@ QString PipeWireScreenVideoSource::describe() const {
 }
 
 bool PipeWireScreenVideoSource::start() {
-	if (m_running) {
+	if (m_running || m_portal) {
 		return true;
 	}
 
@@ -112,12 +128,15 @@ bool PipeWireScreenVideoSource::start() {
 
 	m_portal = std::make_unique< PortalScreenCast >(this);
 
+	const QPointer< PortalScreenCast > portal(m_portal.get());
 	// Queued on purpose: the handler tears the portal down, and PortalScreenCast emits failed() from
 	// inside its own methods - destroying the sender mid-emit is the same use-after-free the camera
 	// error path once had.
 	connect(
 		m_portal.get(), &PortalScreenCast::failed, this,
-		[this](const QString &reason) {
+		[this, portal](const QString &reason) {
+			if (!portal || m_portal.get() != portal.data())
+				return;
 			teardown();
 			emit failed(reason);
 		},
@@ -155,6 +174,16 @@ bool PipeWireScreenVideoSource::start() {
 			return;
 		}
 
+		static const pw_core_events coreEvents = [] {
+			pw_core_events events{};
+			events.version = PW_VERSION_CORE_EVENTS;
+			events.done    = &coreDone;
+			events.error   = &coreError;
+			return events;
+		}();
+		m_coreListener = new spa_hook{};
+		pw_core_add_listener(m_core, m_coreListener, &coreEvents, this);
+
 		// Zero-initialised and then assigned rather than written as a designated initialiser: the
 		// struct has members this code does not use, and naming only some of them is a warning here
 		// and a hazard whenever PipeWire adds more.
@@ -176,13 +205,13 @@ bool PipeWireScreenVideoSource::start() {
 			return;
 		}
 
-	if (!m_streamListener) {
-		m_streamListener = new spa_hook{};
-	} else {
-		spa_hook_remove(m_streamListener);
-	}
+		if (!m_streamListener) {
+			m_streamListener = new spa_hook{};
+		} else {
+			spa_hook_remove(m_streamListener);
+		}
 
-	pw_stream_add_listener(m_stream, m_streamListener, &streamEvents, this);
+		pw_stream_add_listener(m_stream, m_streamListener, &streamEvents, this);
 
 		std::uint8_t paramBuffer[1024];
 		spa_pod_builder builder = SPA_POD_BUILDER_INIT(paramBuffer, sizeof(paramBuffer));
@@ -207,13 +236,11 @@ bool PipeWireScreenVideoSource::start() {
 			SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
 								   SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx),
 			SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&preferredSize, &minSize, &maxSize),
-			SPA_FORMAT_VIDEO_framerate,
-			SPA_POD_CHOICE_RANGE_Fraction(&preferredRate, &minRate, &maxRate)));
+			SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&preferredRate, &minRate, &maxRate)));
 
-		const int connected =
-			pw_stream_connect(m_stream, PW_DIRECTION_INPUT, m_portal->nodeId(),
-							  static_cast< pw_stream_flags >(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-							  params, 1);
+		const int connected = pw_stream_connect(
+			m_stream, PW_DIRECTION_INPUT, m_portal->nodeId(),
+			static_cast< pw_stream_flags >(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
 		// Written while the loop is still locked, so no process callback can observe them mid-write:
 		// the callbacks read both, and the loop starts the moment it is unlocked and started.
@@ -240,11 +267,8 @@ bool PipeWireScreenVideoSource::start() {
 		// bug - nothing else in this file would ever notice, because every other failure report is
 		// driven by a callback that needs the stream to be doing *something*. The watchdog turns
 		// "silently nothing" into a message.
-		QTimer::singleShot(FIRST_FRAME_TIMEOUT_MSEC, this, [this]() {
-			if (m_running && !m_everPublished) {
-				emit failed(tr("The screen share started but no frames arrived from the compositor."));
-			}
-		});
+		m_firstFrameTimer.start();
+		m_healthTimer.start();
 	});
 
 	if (!m_portal->requestAccess(m_sourceType, m_captureCursor)) {
@@ -263,22 +287,29 @@ void PipeWireScreenVideoSource::stop() {
 
 void PipeWireScreenVideoSource::teardown() {
 	m_running = false;
+	m_firstFrameTimer.stop();
+	m_healthTimer.stop();
 
 	if (m_loop) {
 		// Stopped before anything it might be using is destroyed, so no callback can run against a
 		// half-torn-down object.
 		pw_thread_loop_stop(m_loop);
 	}
-
-	if (m_stream) {
-		pw_stream_destroy(m_stream);
-		m_stream = nullptr;
-	}
+	++m_generation;
 
 	if (m_streamListener) {
 		spa_hook_remove(m_streamListener);
 		delete m_streamListener;
 		m_streamListener = nullptr;
+	}
+	if (m_stream) {
+		pw_stream_destroy(m_stream);
+		m_stream = nullptr;
+	}
+	if (m_coreListener) {
+		spa_hook_remove(m_coreListener);
+		delete m_coreListener;
+		m_coreListener = nullptr;
 	}
 
 	if (m_core) {
@@ -297,23 +328,81 @@ void PipeWireScreenVideoSource::teardown() {
 	}
 
 	m_portal.reset();
+	m_size             = QSize();
+	m_spaFormat        = 0;
+	m_everPublished    = false;
+	m_consecutiveDrops = 0;
+	m_healthSequence   = -1;
+	m_description.clear();
 
 	QMutexLocker lock(&m_frameMutex);
 	m_pendingFrame    = QImage();
 	m_hasPendingFrame = false;
+	m_deliveryQueued  = false;
 }
 
 void PipeWireScreenVideoSource::onStreamStateChanged(int state, const char *error) {
-	if (state != PW_STREAM_STATE_ERROR) {
+	if (!m_running || (state != PW_STREAM_STATE_ERROR && state != PW_STREAM_STATE_UNCONNECTED))
 		return;
-	}
+	queueFailure(
+		tr("Screen sharing stopped: %1").arg(error ? QString::fromUtf8(error) : tr("the capture stream disconnected")));
+}
 
-	const QString reason = error ? QString::fromUtf8(error) : tr("the screen capture stream stopped");
-
-	// Queued rather than emitted directly: this runs on the PipeWire thread, and failed() handlers tear
-	// this object down.
+void PipeWireScreenVideoSource::queueFailure(const QString &reason) {
+	const auto generation = m_generation.load();
 	QMetaObject::invokeMethod(
-		this, [this, reason]() { emit failed(tr("Screen sharing stopped: %1").arg(reason)); }, Qt::QueuedConnection);
+		this,
+		[this, generation, reason] {
+			if (generation != m_generation)
+				return;
+			teardown();
+			emit failed(reason);
+		},
+		Qt::QueuedConnection);
+}
+
+void PipeWireScreenVideoSource::pollHealth() {
+	if (!m_running || !m_loop)
+		return;
+	const auto now = static_cast< std::uint64_t >(m_clock.elapsed().count());
+	bool timedOut  = false;
+	pw_thread_loop_lock(m_loop);
+	if (m_healthSequence != -1 && now - m_healthStartedAtUsec >= 5000000)
+		timedOut = true;
+	if (m_core && m_stream && m_everPublished && m_size.isValid() && !m_consecutiveDrops && m_healthSequence == -1
+		&& pw_stream_get_state(m_stream, nullptr) == PW_STREAM_STATE_STREAMING) {
+		m_healthSequence      = pw_core_sync(m_core, PW_ID_CORE, 0);
+		m_healthStartedAtUsec = now;
+		if (m_healthSequence < 0)
+			timedOut = true;
+	}
+	pw_thread_loop_unlock(m_loop);
+	if (timedOut)
+		queueFailure(tr("PipeWire stopped responding to screen capture requests."));
+}
+
+void PipeWireScreenVideoSource::onCoreDone(std::uint32_t id, int sequence) {
+	if (id != PW_ID_CORE || sequence != m_healthSequence || m_healthSequence == -1)
+		return;
+	m_healthSequence = -1;
+	if (!m_running || !m_stream || !m_size.isValid() || m_consecutiveDrops
+		|| pw_stream_get_state(m_stream, nullptr) != PW_STREAM_STATE_STREAMING)
+		return;
+	const auto generation = m_generation.load();
+	const auto timestamp  = static_cast< std::uint64_t >(m_clock.elapsed().count());
+	QMetaObject::invokeMethod(
+		this,
+		[this, generation, timestamp] {
+			if (m_running && generation == m_generation)
+				emit captureIdle(timestamp);
+		},
+		Qt::QueuedConnection);
+}
+
+void PipeWireScreenVideoSource::onCoreError(const char *message) {
+	if (m_running)
+		queueFailure(
+			tr("Screen sharing stopped: %1").arg(message ? QString::fromUtf8(message) : tr("PipeWire disconnected")));
 }
 
 void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa_pod *param) {
@@ -321,6 +410,8 @@ void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa
 		return;
 	}
 
+	m_size      = QSize();
+	m_spaFormat = 0;
 	// A null param is PipeWire clearing the format for renegotiation. Stale geometry must not survive
 	// it: frames after a renegotiation to another size or layout would be converted with the old one.
 	if (!param) {
@@ -335,12 +426,14 @@ void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa
 
 	if (spa_format_parse(param, &mediaType, &mediaSubtype) < 0 || mediaType != SPA_MEDIA_TYPE_video
 		|| mediaSubtype != SPA_MEDIA_SUBTYPE_raw) {
+		queueFailure(tr("The compositor selected an unsupported screen capture format."));
 		return;
 	}
 
 	spa_video_info_raw info{};
 
 	if (spa_format_video_raw_parse(param, &info) < 0) {
+		queueFailure(tr("Could not read the screen capture format."));
 		return;
 	}
 
@@ -351,13 +444,16 @@ void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa
 	// absurd, but nothing here should depend on that - and rejecting it silently would leave the
 	// stream "running" with every frame dropped, so the user is told.
 	if (width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
-		QMetaObject::invokeMethod(
-			this, [this]() { emit failed(tr("The shared screen is too large to capture.")); },
-			Qt::QueuedConnection);
+		queueFailure(tr("The shared screen is too large to capture."));
 
 		return;
 	}
 
+	if (info.format != SPA_VIDEO_FORMAT_BGRA && info.format != SPA_VIDEO_FORMAT_BGRx
+		&& info.format != SPA_VIDEO_FORMAT_RGBA && info.format != SPA_VIDEO_FORMAT_RGBx) {
+		queueFailure(tr("The compositor selected an unsupported screen capture format."));
+		return;
+	}
 	m_size      = QSize(width, height);
 	m_spaFormat = info.format;
 
@@ -376,7 +472,8 @@ void PipeWireScreenVideoSource::onStreamParamChanged(std::uint32_t id, const spa
 		&builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
 		SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr))));
 
-	pw_stream_update_params(m_stream, params, 1);
+	if (m_stream && pw_stream_update_params(m_stream, params, 1) < 0)
+		queueFailure(tr("Could not negotiate readable screen capture buffers."));
 }
 
 void PipeWireScreenVideoSource::onStreamProcess() {
@@ -390,58 +487,51 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 		return;
 	}
 
-	spa_buffer *spaBuffer = buffer->buffer;
-
-	// The buffers param sent during negotiation restricts the compositor to mappable memory, so a
-	// null pointer here should no longer happen - but a compositor that ignores the restriction would
-	// otherwise reproduce the original silent-black-panel bug, so persistent unreadable buffers are
-	// reported rather than dropped forever.
-	if (spaBuffer->n_datas < 1 || !spaBuffer->datas[0].data) {
-		pw_stream_queue_buffer(m_stream, buffer);
-		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
-
-		return;
-	}
-
-	const spa_data &data = spaBuffer->datas[0];
-	const int width      = m_size.width();
-	const int height     = m_size.height();
-
-	// A producer marking the chunk corrupted is telling us not to show it.
-	if (data.chunk && (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED)) {
-		pw_stream_queue_buffer(m_stream, buffer);
-
-		return;
-	}
-
-	// stride and offset are what the producer actually used; neither is necessarily width * 4 / zero.
-	const std::int32_t stride        = data.chunk ? data.chunk->stride : static_cast< std::int32_t >(width) * 4;
-	const std::uint32_t chunkOffset  = data.chunk ? data.chunk->offset : 0;
-	const std::uint32_t chunkSize    = data.chunk ? data.chunk->size : data.maxsize;
-	const std::uint32_t bytesNeeded  = static_cast< std::uint32_t >(stride) * static_cast< std::uint32_t >(height);
-
-	if (stride < static_cast< std::int32_t >(width) * 4 || chunkSize < bytesNeeded
-		|| data.maxsize < chunkOffset + bytesNeeded) {
-		pw_stream_queue_buffer(m_stream, buffer);
-		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
-
-		return;
-	}
-
-	QImage frame(width, height, QImage::Format_ARGB32);
-
-	const auto *base = static_cast< const std::uint8_t * >(data.data) + chunkOffset;
-
-	for (int y = 0; y < height; ++y) {
-		convertRow(m_spaFormat, base + static_cast< std::size_t >(y) * static_cast< std::size_t >(stride),
-				   reinterpret_cast< QRgb * >(frame.scanLine(y)), width);
-	}
-
+	QImage frame = imageFromBuffer(buffer->buffer, m_size, m_spaFormat);
 	pw_stream_queue_buffer(m_stream, buffer);
-
+	if (frame.isNull()) {
+		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
+		return;
+	}
 	m_consecutiveDrops = 0;
-
 	publishFrame(frame, static_cast< std::uint64_t >(m_clock.elapsed().count()));
+}
+
+QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSize size, std::uint32_t format) {
+	if (!buffer || !buffer->n_datas || !buffer->datas || !size.isValid() || size.width() <= 0 || size.height() <= 0
+		|| size.width() > MAX_DIMENSION || size.height() > MAX_DIMENSION)
+		return {};
+	if (format != SPA_VIDEO_FORMAT_BGRA && format != SPA_VIDEO_FORMAT_BGRx && format != SPA_VIDEO_FORMAT_RGBA
+		&& format != SPA_VIDEO_FORMAT_RGBx)
+		return {};
+	const spa_data &data = buffer->datas[0];
+	if (!data.data || !data.maxsize || !data.chunk
+		|| (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED))
+		return {};
+	const auto rowBytes = static_cast< std::uint64_t >(size.width()) * 4;
+	const auto stride   = data.chunk->stride;
+	if (stride < 0 || static_cast< std::uint64_t >(stride) < rowBytes)
+		return {};
+	// Chunk offsets wrap at maxsize. Use wide arithmetic and validate the actual last
+	// pixel, not padding after the final row, before touching producer-owned memory.
+	const auto offset    = data.chunk->offset % data.maxsize;
+	const auto available = std::min(data.chunk->size, data.maxsize);
+	const auto needed =
+		static_cast< std::uint64_t >(stride) * static_cast< std::uint64_t >(size.height() - 1) + rowBytes;
+	if (needed > available || needed > data.maxsize - offset)
+		return {};
+	QImage frame(size, QImage::Format_ARGB32);
+	if (frame.isNull())
+		return {};
+	if (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_EMPTY) {
+		frame.fill(Qt::black);
+		return frame;
+	}
+	const auto *base = static_cast< const std::uint8_t * >(data.data) + offset;
+	for (int y = 0; y < size.height(); ++y)
+		convertRow(format, base + static_cast< std::size_t >(y) * static_cast< std::size_t >(stride),
+				   reinterpret_cast< QRgb * >(frame.scanLine(y)), size.width());
+	return frame;
 }
 
 void PipeWireScreenVideoSource::reportPersistentDrop(const QString &reason) {
@@ -452,12 +542,14 @@ void PipeWireScreenVideoSource::reportPersistentDrop(const QString &reason) {
 		return;
 	}
 
-	QMetaObject::invokeMethod(this, [this, reason]() { emit failed(reason); }, Qt::QueuedConnection);
+	queueFailure(reason);
 }
 
 void PipeWireScreenVideoSource::publishFrame(const QImage &frame, std::uint64_t captureTimestampUsec) {
-	m_everPublished = true;
-
+	if (!m_running || frame.isNull())
+		return;
+	m_everPublished       = true;
+	bool scheduleDelivery = false;
 	{
 		QMutexLocker lock(&m_frameMutex);
 
@@ -466,11 +558,22 @@ void PipeWireScreenVideoSource::publishFrame(const QImage &frame, std::uint64_t 
 		m_pendingFrame         = frame;
 		m_pendingTimestampUsec = captureTimestampUsec;
 		m_hasPendingFrame      = true;
+		scheduleDelivery       = !m_deliveryQueued;
+		m_deliveryQueued       = true;
 	}
 
 	// Hops to the owning thread, so frameReady - and everything the broadcaster does in response - runs
 	// where the rest of the client does, not on a PipeWire callback.
-	QMetaObject::invokeMethod(this, [this]() { deliverPendingFrame(); }, Qt::QueuedConnection);
+	if (scheduleDelivery) {
+		const auto generation = m_generation.load();
+		QMetaObject::invokeMethod(
+			this,
+			[this, generation]() {
+				if (generation == m_generation)
+					deliverPendingFrame();
+			},
+			Qt::QueuedConnection);
+	}
 }
 
 void PipeWireScreenVideoSource::deliverPendingFrame() {
@@ -480,6 +583,7 @@ void PipeWireScreenVideoSource::deliverPendingFrame() {
 	{
 		QMutexLocker lock(&m_frameMutex);
 
+		m_deliveryQueued = false;
 		if (!m_hasPendingFrame) {
 			return;
 		}

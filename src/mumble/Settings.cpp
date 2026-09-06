@@ -231,7 +231,10 @@ void Settings::load(const QString &path, bool skipSettingsBackupPrompt) {
 	try {
 		stream >> settingsJSON;
 
-		settingsJSON.get_to(*this);
+		// Decode transactionally: a schema error must not leave half-applied settings.
+		Settings loaded = *this;
+		settingsJSON.get_to(loaded);
+		*this = std::move(loaded);
 
 		if (!mumbleQuitNormally && !skipSettingsBackupPrompt) {
 			// These settings were saved without Mumble quitting normally afterwards. In order to prevent loading
@@ -275,7 +278,7 @@ void Settings::load(const QString &path, bool skipSettingsBackupPrompt) {
 				msgBox.exec();
 			}
 		}
-	} catch (const nlohmann::json::parse_error &e) {
+	} catch (const nlohmann::json::exception &e) {
 		qWarning() << "Failed to load settings from" << path << "due to invalid format: " << e.what();
 
 		if (!path.endsWith(QLatin1String(BACKUP_FILE_EXTENSION)) && QFileInfo(path + BACKUP_FILE_EXTENSION).exists()) {

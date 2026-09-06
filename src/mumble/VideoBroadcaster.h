@@ -10,10 +10,12 @@
 #include "VideoEncoder.h"
 #include "VideoFragmentation.h"
 
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QObject>
 #include <QtCore/QString>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 class VideoSource;
@@ -46,6 +48,7 @@ public:
 	bool start(std::unique_ptr< VideoSource > source);
 
 	void stop();
+	void setStreamIDAllocator(std::function< std::uint32_t() > allocator) { m_allocateStreamID = std::move(allocator); }
 
 	bool isActive() const { return m_source != nullptr; }
 
@@ -94,6 +97,8 @@ public:
 	void configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality, int tileSize);
 
 signals:
+	/// Emitted before encoding a resized image, so the owner can announce its new stream.
+	void streamResized(unsigned int previousID, unsigned int streamID, QSize size);
 	/// One encoded unit, ready to fragment and send.
 	void unitReady(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload);
 
@@ -112,8 +117,10 @@ signals:
 
 protected slots:
 	void onFrameReady(const QImage &frame, std::uint64_t captureTimestampUsec);
+	void onCaptureIdle(std::uint64_t captureTimestampUsec);
 
 protected:
+	void encodeFrame(const QImage &frame, std::uint64_t captureTimestampUsec);
 	std::unique_ptr< VideoSource > m_source;
 	TiledImageEncoder m_encoder;
 	VP8Encoder m_vp8;
@@ -132,6 +139,11 @@ protected:
 	bool m_streamIDSeeded    = false;
 
 	bool m_forceKeyframe = true;
+	std::function< std::uint32_t() > m_allocateStreamID;
+	QImage m_lastFrame;
+	QElapsedTimer m_captureActivity;
+	std::uint64_t m_captureTimestamp    = 0;
+	std::uint64_t m_lastEncodeTimestamp = 0;
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOBROADCASTER_H_

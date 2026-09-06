@@ -225,6 +225,8 @@ private slots:
 	void anUnsubscribedClientReceivesNothing();
 	void aClientJoiningLaterLearnsOfExistingStreams();
 	void aKeyframeRequestReachesTheSenderOnceASecond();
+	void aDeniedSubscriptionGetsAnExplicitReply();
+	void recoveryRequestsDoNotKeepASilentStreamAlive();
 
 private:
 	QTemporaryDir m_dir;
@@ -233,6 +235,25 @@ private:
 
 	bool startServer();
 };
+
+void TestVideoCall::aDeniedSubscriptionGetsAnExplicitReply() {
+	TestClient alice;
+	QVERIFY(alice.connectAndAuthenticate("alice-denied", m_port));
+	MumbleProto::VideoSubscribe request;
+	request.set_session(alice.session);
+	request.set_stream_id(123);
+	request.set_subscribe(true);
+	request.set_request_keyframe(true);
+	alice.sendTcp(request, TCPMessageType::VideoSubscribe);
+	QByteArray body;
+	QVERIFY2(alice.waitFor(TCPMessageType::VideoSubscribe, body), "subscription denial left the viewer waiting");
+	MumbleProto::VideoSubscribe reply;
+	QVERIFY(reply.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+	QCOMPARE(reply.session(), alice.session);
+	QCOMPARE(reply.stream_id(), 123u);
+	QVERIFY(!reply.subscribe());
+	QVERIFY(!reply.request_keyframe());
+}
 
 bool TestVideoCall::startServer() {
 	// A port the kernel just told us was free, so parallel test runs do not collide.
@@ -260,6 +281,9 @@ bool TestVideoCall::startServer() {
 	out << "host=127.0.0.1\n";
 	out << "port=" << m_port << "\n";
 	out << "users=10\n";
+	out << "timeout=120\n";
+	// Every test connects from loopback; this is intentional churn, not a password attack.
+	out << "autobanAttempts=0\n";
 	// Nothing here should reach the network or a real registry.
 	out << "registername=\n";
 	out << "registerurl=\n";
@@ -297,6 +321,38 @@ bool TestVideoCall::startServer() {
 	}
 
 	return false;
+}
+
+void TestVideoCall::recoveryRequestsDoNotKeepASilentStreamAlive() {
+	TestClient alice;
+	TestClient bob;
+	QVERIFY(alice.connectAndAuthenticate("alice-silent", m_port));
+	QVERIFY(bob.connectAndAuthenticate("bob-recovery", m_port));
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(42);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+	QByteArray body;
+	QVERIFY(bob.waitFor(TCPMessageType::VideoState, body));
+	MumbleProto::VideoSubscribe request;
+	request.set_session(alice.session);
+	request.set_stream_id(42);
+	request.set_subscribe(true);
+	request.set_request_keyframe(true);
+	QElapsedTimer elapsed;
+	elapsed.start();
+	bool ended = false;
+	// checkTimeout polls every 15.5 seconds, so a 30-second deadline may be observed at 46.5 seconds.
+	while (elapsed.elapsed() < 50000 && !ended) {
+		bob.sendTcp(request, TCPMessageType::VideoSubscribe);
+		if (bob.waitFor(TCPMessageType::VideoState, body, 1000)) {
+			MumbleProto::VideoState state;
+			QVERIFY(state.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+			ended = state.session() == alice.session && state.stream_id() == 42 && !state.active();
+		}
+	}
+	QVERIFY2(ended, "repeated recovery requests postponed the silent-stream timeout");
 }
 
 void TestVideoCall::initTestCase() {
@@ -431,7 +487,8 @@ void TestVideoCall::aClientJoiningLaterLearnsOfExistingStreams() {
 	QVERIFY2(bob.connectAndAuthenticate("bob-late", m_port), "bob could not authenticate");
 
 	QByteArray body;
-	QVERIFY2(bob.waitFor(TCPMessageType::VideoState, body), "the existing stream was never announced to the late joiner");
+	QVERIFY2(bob.waitFor(TCPMessageType::VideoState, body),
+			 "the existing stream was never announced to the late joiner");
 
 	MumbleProto::VideoState replayed;
 	QVERIFY(replayed.ParseFromArray(body.constData(), static_cast< int >(body.size())));

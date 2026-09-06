@@ -1,0 +1,71 @@
+Test project /home/natej/projects/wt/mumble-video-review/build-native-review
+      Start 13: TestVideoCall
+      Start  6: TestVideoGrid
+      Start  7: TestVideoUi
+      Start  3: TestVP8Codec
+ 1/33 Test  #7: TestVideoUi ......................   Passed    5.80 sec
+      Start 18: TestDatabase
+ 2/33 Test  #3: TestVP8Codec .....................   Passed    8.64 sec
+      Start 19: TestServerDatabase
+ 3/33 Test #18: TestDatabase .....................   Passed    4.33 sec
+      Start 17: TestCryptographicRandom
+ 4/33 Test #19: TestServerDatabase ...............   Passed    4.16 sec
+      Start 26: TestSSLLocks
+ 5/33 Test #26: TestSSLLocks .....................   Passed    2.23 sec
+      Start  5: TestScreenCaptureImage
+ 6/33 Test  #5: TestScreenCaptureImage ...........   Passed    0.08 sec
+      Start  4: TestVideoBroadcaster
+ 7/33 Test #17: TestCryptographicRandom ..........   Passed    5.35 sec
+      Start 32: TestVideoFragmentation
+ 8/33 Test #32: TestVideoFragmentation ...........   Passed    0.90 sec
+      Start  2: TestVideoPipeline
+ 9/33 Test  #6: TestVideoGrid ....................   Passed   16.84 sec
+      Start 24: TestSelfSignedCertificate
+10/33 Test #24: TestSelfSignedCertificate ........   Passed    0.72 sec
+      Start  9: TestSettingsJSONSerialization
+11/33 Test  #4: TestVideoBroadcaster .............   Passed    2.86 sec
+      Start 10: TestSettingsLoad
+12/33 Test  #2: TestVideoPipeline ................   Passed    1.70 sec
+      Start 28: TestTimer
+13/33 Test  #9: TestSettingsJSONSerialization ....   Passed    0.58 sec
+      Start 20: TestFFDHE
+14/33 Test #20: TestFFDHE ........................   Passed    0.13 sec
+      Start 33: TestVideoTransport
+15/33 Test #28: TestTimer ........................   Passed    0.24 sec
+      Start 31: TestMediaFraming
+16/33 Test #33: TestVideoTransport ...............   Passed    0.23 sec
+      Start 11: TestCrypt
+17/33 Test #31: TestMediaFraming .................   Passed    0.15 sec
+      Start 22: TestPasswordGenerator
+18/33 Test #10: TestSettingsLoad .................   Passed    0.55 sec
+      Start 15: TestCaseInsensitiveQString
+19/33 Test #22: TestPasswordGenerator ............   Passed    0.12 sec
+      Start  8: TestXMLTools
+20/33 Test #11: TestCrypt ........................   Passed    0.16 sec
+      Start 16: TestCryptographicHash
+21/33 Test #15: TestCaseInsensitiveQString .......   Passed    0.09 sec
+      Start 12: TestAudioReceiverBuffer
+22/33 Test  #8: TestXMLTools .....................   Passed    0.15 sec
+      Start 27: TestStdAbs
+23/33 Test #16: TestCryptographicHash ............   Passed    0.36 sec
+      Start 21: TestPacketDataStream
+24/33 Test #12: TestAudioReceiverBuffer ..........   Passed    0.34 sec
+      Start 14: TestVideoRouter
+25/33 Test #27: TestStdAbs .......................   Passed    0.26 sec
+      Start 25: TestServerAddress
+26/33 Test #21: TestPacketDataStream .............   Passed    0.14 sec
+      Start 30: TestVersion
+27/33 Test #25: TestServerAddress ................   Passed    0.13 sec
+      Start 29: TestUnresolvedServerAddress
+28/33 Test #14: TestVideoRouter ..................   Passed    0.15 sec
+      Start 23: TestMumbleProtocol
+29/33 Test #23: TestMumbleProtocol ...............   Passed    0.13 sec
+      Start  1: TestLinuxScreenCapture
+30/33 Test #30: TestVersion ......................   Passed    0.23 sec
+31/33 Test #29: TestUnresolvedServerAddress ......   Passed    0.29 sec
+32/33 Test  #1: TestLinuxScreenCapture ...........   Passed    0.85 sec
+33/33 Test #13: TestVideoCall ....................   Passed   57.15 sec
+
+100% tests passed, 0 tests failed out of 33
+
+Total Test time (real) =  57.16 sec

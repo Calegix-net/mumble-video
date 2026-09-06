@@ -33,3 +33,9 @@ target_include_directories(TestVideoBroadcaster PRIVATE ${MUMBLE_SOURCE_DIR})
 target_link_libraries(TestVideoBroadcaster PRIVATE shared Qt6::Gui Qt6::Test PkgConfig::VPX)
 
 add_test(NAME TestVideoBroadcaster COMMAND $<TARGET_FILE:TestVideoBroadcaster>)
+
+add_executable(TestScreenCaptureImage TestScreenCaptureImage.cpp)
+set_target_properties(TestScreenCaptureImage PROPERTIES AUTOMOC ON)
+target_include_directories(TestScreenCaptureImage PRIVATE ${MUMBLE_SOURCE_DIR})
+target_link_libraries(TestScreenCaptureImage PRIVATE Qt6::Gui Qt6::Test)
+add_test(NAME TestScreenCaptureImage COMMAND $<TARGET_FILE:TestScreenCaptureImage>)

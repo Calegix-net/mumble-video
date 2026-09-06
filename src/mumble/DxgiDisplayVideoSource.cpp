@@ -4,6 +4,7 @@
 // Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
 #include "DxgiDisplayVideoSource.h"
+#include "ScreenCaptureImage.h"
 
 #include <cstring>
 
@@ -36,8 +37,7 @@ QList< DxgiDisplayVideoSource::DisplayInfo > DxgiDisplayVideoSource::availableDi
 		 ++adapterIndex) {
 		IDXGIOutput *output = nullptr;
 
-		for (UINT outputIndex = 0; adapter->EnumOutputs(outputIndex, &output) != DXGI_ERROR_NOT_FOUND;
-			 ++outputIndex) {
+		for (UINT outputIndex = 0; adapter->EnumOutputs(outputIndex, &output) != DXGI_ERROR_NOT_FOUND; ++outputIndex) {
 			DXGI_OUTPUT_DESC desc;
 
 			// AttachedToDesktop excludes an output DXGI knows about but that is not currently part of the
@@ -88,6 +88,10 @@ QString DxgiDisplayVideoSource::describe() const {
 }
 
 void DxgiDisplayVideoSource::releaseDuplication() {
+	m_pointerBytes.clear();
+	m_pointerPosition = {};
+	m_pointerShape    = {};
+	m_rotation        = DXGI_MODE_ROTATION_IDENTITY;
 	if (m_stagingTexture) {
 		m_stagingTexture->Release();
 		m_stagingTexture = nullptr;
@@ -132,11 +136,11 @@ bool DxgiDisplayVideoSource::acquireDuplication() {
 		 !matchedOutput && factory->EnumAdapters1(adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
 		IDXGIOutput *output = nullptr;
 
-		for (UINT outputIndex = 0; adapter->EnumOutputs(outputIndex, &output) != DXGI_ERROR_NOT_FOUND;
-			 ++outputIndex) {
+		for (UINT outputIndex = 0; adapter->EnumOutputs(outputIndex, &output) != DXGI_ERROR_NOT_FOUND; ++outputIndex) {
 			DXGI_OUTPUT_DESC desc;
 
 			if (SUCCEEDED(output->GetDesc(&desc)) && QString::fromWCharArray(desc.DeviceName) == m_display.deviceName) {
+				m_rotation     = desc.Rotation;
 				matchedAdapter = adapter;
 				matchedAdapter->AddRef();
 				matchedOutput = output;
@@ -177,7 +181,8 @@ bool DxgiDisplayVideoSource::acquireDuplication() {
 	}
 
 	IDXGIOutput1 *output1 = nullptr;
-	const HRESULT queryResult = matchedOutput->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast< void ** >(&output1));
+	const HRESULT queryResult =
+		matchedOutput->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast< void ** >(&output1));
 
 	matchedOutput->Release();
 	matchedAdapter->Release();
@@ -260,8 +265,8 @@ void DxgiDisplayVideoSource::pollFrame() {
 	const HRESULT acquireResult = m_duplication->AcquireNextFrame(0, &frameInfo, &desktopResource);
 
 	if (acquireResult == DXGI_ERROR_WAIT_TIMEOUT) {
-		// Nothing has changed since the last frame. The overwhelmingly common case for a mostly-static
-		// desktop, and not something to report or retry differently.
+		// Capture is healthy even when the desktop has not changed.
+		emit captureIdle(static_cast< std::uint64_t >(m_clock.elapsed().count()));
 		return;
 	}
 
@@ -287,6 +292,17 @@ void DxgiDisplayVideoSource::pollFrame() {
 		return;
 	}
 
+	if (frameInfo.LastMouseUpdateTime.QuadPart != 0) {
+		m_pointerPosition = frameInfo.PointerPosition;
+	}
+	if (frameInfo.PointerShapeBufferSize > 0) {
+		m_pointerBytes.resize(frameInfo.PointerShapeBufferSize);
+		UINT required               = 0;
+		const HRESULT pointerResult = m_duplication->GetFramePointerShape(
+			static_cast< UINT >(m_pointerBytes.size()), m_pointerBytes.data(), &required, &m_pointerShape);
+		if (FAILED(pointerResult))
+			m_pointerBytes.clear();
+	}
 	ID3D11Texture2D *acquiredTexture = nullptr;
 	const HRESULT textureResult =
 		desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast< void ** >(&acquiredTexture));
@@ -295,6 +311,8 @@ void DxgiDisplayVideoSource::pollFrame() {
 
 	if (FAILED(textureResult) || !acquiredTexture) {
 		m_duplication->ReleaseFrame();
+		stop();
+		emit failed(tr("Could not read the captured display"));
 
 		return;
 	}
@@ -309,14 +327,14 @@ void DxgiDisplayVideoSource::pollFrame() {
 		}
 
 		D3D11_TEXTURE2D_DESC stagingDesc = desc;
-		stagingDesc.Usage               = D3D11_USAGE_STAGING;
-		stagingDesc.BindFlags           = 0;
-		stagingDesc.CPUAccessFlags      = D3D11_CPU_ACCESS_READ;
-		stagingDesc.MiscFlags           = 0;
-		stagingDesc.MipLevels           = 1;
-		stagingDesc.ArraySize           = 1;
-		stagingDesc.SampleDesc.Count    = 1;
-		stagingDesc.SampleDesc.Quality  = 0;
+		stagingDesc.Usage                = D3D11_USAGE_STAGING;
+		stagingDesc.BindFlags            = 0;
+		stagingDesc.CPUAccessFlags       = D3D11_CPU_ACCESS_READ;
+		stagingDesc.MiscFlags            = 0;
+		stagingDesc.MipLevels            = 1;
+		stagingDesc.ArraySize            = 1;
+		stagingDesc.SampleDesc.Count     = 1;
+		stagingDesc.SampleDesc.Quality   = 0;
 
 		const HRESULT stagingResult = m_device->CreateTexture2D(&stagingDesc, nullptr, &m_stagingTexture);
 
@@ -343,6 +361,8 @@ void DxgiDisplayVideoSource::pollFrame() {
 
 	if (FAILED(mapResult)) {
 		m_duplication->ReleaseFrame();
+		stop();
+		emit failed(tr("Could not read the captured display"));
 
 		return;
 	}
@@ -353,16 +373,28 @@ void DxgiDisplayVideoSource::pollFrame() {
 	// (0xAARRGGBB as a 32-bit value), so this is a row-by-row copy rather than a per-pixel conversion.
 	QImage frame(static_cast< int >(desc.Width), static_cast< int >(desc.Height), QImage::Format_ARGB32);
 
+	if (frame.isNull()) {
+		m_context->Unmap(m_stagingTexture, 0);
+		m_duplication->ReleaseFrame();
+		stop();
+		emit failed(tr("Could not allocate a display capture image"));
+		return;
+	}
 	const auto *src = static_cast< const unsigned char * >(mapped.pData);
 
 	for (UINT row = 0; row < desc.Height; ++row) {
-		std::memcpy(frame.scanLine(static_cast< int >(row)),
-					src + static_cast< std::size_t >(row) * mapped.RowPitch,
+		std::memcpy(frame.scanLine(static_cast< int >(row)), src + static_cast< std::size_t >(row) * mapped.RowPitch,
 					static_cast< std::size_t >(desc.Width) * 4);
 	}
 
 	m_context->Unmap(m_stagingTexture, 0);
 	m_duplication->ReleaseFrame();
 
+	frame = ScreenCaptureImage::orient(frame, static_cast< unsigned int >(m_rotation));
+	if (m_pointerPosition.Visible) {
+		ScreenCaptureImage::drawPointer(frame, QPoint(m_pointerPosition.Position.x, m_pointerPosition.Position.y),
+										m_pointerShape.Type, m_pointerShape.Width, m_pointerShape.Height,
+										m_pointerShape.Pitch, m_pointerBytes.data(), m_pointerBytes.size());
+	}
 	emit frameReady(frame, static_cast< std::uint64_t >(m_clock.elapsed().count()));
 }

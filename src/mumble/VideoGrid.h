@@ -15,6 +15,7 @@
 #include <QtWidgets/QWidget>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -189,6 +190,10 @@ public slots:
 	 */
 	void setWatching(unsigned int senderSession, unsigned int streamID, bool watching);
 
+	/// Consumes the server's reply to a local unwatch without removing the advertised stream.
+	/// Counts outstanding requests so a delayed reply cannot cancel a subsequent watch.
+	bool consumeUnsubscribeAcknowledgement(unsigned int senderSession, unsigned int streamID);
+
 	/**
 	 * Sets the name drawn on a sender's tile.
 	 *
@@ -243,8 +248,17 @@ signals:
 	void streamWentStale(unsigned int senderSession, unsigned int streamID);
 
 protected:
+	struct PendingTile {
+		quint64 frameNumber = 0;
+		unsigned int x      = 0;
+		unsigned int y      = 0;
+		QImage image;
+		bool ready = false;
+	};
+
 	struct Surface {
 		QImage canvas;
+		std::deque< std::shared_ptr< PendingTile > > pendingTiles;
 		unsigned int senderSession = 0;
 		unsigned int streamID      = 0;
 
@@ -268,8 +282,8 @@ protected:
 
 		/// Frozen: a gap was seen and only a keyframe may resume decoding. Suppresses repeated
 		/// keyframeNeeded spam; dropped units are counted so the request can be repeated if lost.
-		bool awaitingKeyframe   = false;
-		int unitsWhileAwaiting  = 0;
+		bool awaitingKeyframe  = false;
+		int unitsWhileAwaiting = 0;
 
 		/// False for a brand new stream - it starts as a greyed-out preview, and only actually decodes
 		/// once its tile's eyeball is clicked - and left alone by whatever an existing surface's stream id
@@ -278,7 +292,8 @@ protected:
 		/// is dropped unread - see onVideoUnitReceived() - both because there is nothing to paint it into
 		/// right now and because the server is expected to stop sending them shortly after
 		/// watchToggled(false) goes out; this is the defensive side of that, not the mechanism itself.
-		bool watching = false;
+		bool watching                       = false;
+		unsigned int pendingUnsubscriptions = 0;
 
 		/// QDateTime::currentMSecsSinceEpoch() the last time a unit arrived for this stream - including
 		/// one dropped because the surface was not being watched at the time, and reset again the instant
@@ -342,6 +357,9 @@ protected:
 	// set of visible senders actually changes - and the map is capped at MAX_SENDERS entries, so the
 	// O(log n) it costs over a hash map is not worth worrying about.
 	std::map< std::uint64_t, Surface > m_surfaces;
+	static constexpr std::size_t MAX_PENDING_TILE_DECODES = 1024;
+	std::size_t m_pendingTileDecodes                      = 0;
+	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 
 	/// Number of distinct senders currently holding at least one surface, regardless of how many streams
 	/// each holds. What MAX_SENDERS actually bounds: the cap exists to stop the grid drawing more people
@@ -374,10 +392,10 @@ protected:
 	/// layout does. fullscreenButton exists on every tile, own or remote; watchButton and volumeSlider are
 	/// only ever non-null on a remote sender's tile, and volumeSlider only on one carrying a screen share.
 	struct TileControlBar {
-		QWidget *bar               = nullptr;
+		QWidget *bar                  = nullptr;
 		QToolButton *fullscreenButton = nullptr;
 		QToolButton *watchButton      = nullptr;
-		QSlider *volumeSlider          = nullptr;
+		QSlider *volumeSlider         = nullptr;
 
 		/// bar owns fullscreenButton/watchButton/volumeSlider through Qt's own parent-child ownership - they
 		/// are all constructed with bar as their parent - but bar itself is a plain QWidget*, not something
@@ -539,7 +557,6 @@ public:
 	QSize sizeHint() const override;
 
 protected:
-
 	/// Grows a surface so the given rectangle fits, within the bounds above. Returns false if the
 	/// rectangle cannot be accommodated.
 	static bool growToFit(QImage &canvas, int x, int y, int width, int height);
@@ -563,7 +580,7 @@ protected:
 	/// must be discarded rather than painted into whatever now occupies - or no longer occupies - that
 	/// slot in m_surfaces.
 	void onTiledImageTileDecoded(unsigned int senderSession, unsigned int streamID, unsigned int x, unsigned int y,
-								 QImage tile);
+								 QImage tile, quint64 frameNumber);
 
 	/// Paints one successfully decoded tile into its surface's canvas and brings the rest of the grid in
 	/// line with it - shared by onVideoUnitReceived()'s own synchronous VP8 path and

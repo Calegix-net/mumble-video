@@ -27,14 +27,17 @@ namespace {
 class ProcessLoopbackActivationHandler : public IActivateAudioInterfaceCompletionHandler {
 public:
 	ProcessLoopbackActivationHandler() : m_event(CreateEvent(nullptr, TRUE, FALSE, nullptr)) {
+		m_initResult = m_event ? CoCreateFreeThreadedMarshaler(this, &m_marshaler) : HRESULT_FROM_WIN32(GetLastError());
 	}
+	HRESULT initializationResult() const { return m_initResult; }
 
 	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
 		if (!ppv) {
 			return E_POINTER;
 		}
 
-		if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(IAgileObject)
+			|| riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
 			*ppv = static_cast< IActivateAudioInterfaceCompletionHandler * >(this);
 			AddRef();
 
@@ -42,13 +45,14 @@ public:
 		}
 
 		*ppv = nullptr;
+		if (riid == __uuidof(IMarshal) && m_marshaler) {
+			return m_marshaler->QueryInterface(riid, ppv);
+		}
 
 		return E_NOINTERFACE;
 	}
 
-	ULONG STDMETHODCALLTYPE AddRef() override {
-		return ++m_refCount;
-	}
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refCount; }
 
 	ULONG STDMETHODCALLTYPE Release() override {
 		const ULONG remaining = --m_refCount;
@@ -64,14 +68,14 @@ public:
 		HRESULT activateResult       = E_FAIL;
 		IUnknown *activatedInterface = nullptr;
 
-		if (op) {
-			op->GetActivateResult(&activateResult, &activatedInterface);
-		}
+		const HRESULT hr = op ? op->GetActivateResult(&activateResult, &activatedInterface) : E_POINTER;
+		m_result         = FAILED(hr) ? hr : activateResult;
 
-		m_result = activateResult;
-
-		if (SUCCEEDED(activateResult) && activatedInterface) {
-			activatedInterface->QueryInterface(__uuidof(IAudioClient), reinterpret_cast< void ** >(&m_client));
+		if (activatedInterface) {
+			if (SUCCEEDED(m_result)) {
+				m_result =
+					activatedInterface->QueryInterface(__uuidof(IAudioClient), reinterpret_cast< void ** >(&m_client));
+			}
 			activatedInterface->Release();
 		}
 
@@ -80,13 +84,9 @@ public:
 		return S_OK;
 	}
 
-	HANDLE eventHandle() const {
-		return m_event;
-	}
+	HANDLE eventHandle() const { return m_event; }
 
-	HRESULT result() const {
-		return m_result;
-	}
+	HRESULT result() const { return m_result; }
 
 	IAudioClient *takeClient() {
 		IAudioClient *client = m_client;
@@ -97,6 +97,9 @@ public:
 
 protected:
 	virtual ~ProcessLoopbackActivationHandler() {
+		if (m_marshaler) {
+			m_marshaler->Release();
+		}
 		if (m_event) {
 			CloseHandle(m_event);
 		}
@@ -109,6 +112,8 @@ protected:
 private:
 	std::atomic< ULONG > m_refCount{ 1 };
 	HANDLE m_event;
+	IUnknown *m_marshaler  = nullptr;
+	HRESULT m_initResult   = E_FAIL;
 	HRESULT m_result       = E_FAIL;
 	IAudioClient *m_client = nullptr;
 };
@@ -123,8 +128,8 @@ void WasapiProcessLoopbackSource::Worker::run() {
 }
 
 WasapiProcessLoopbackSource::WasapiProcessLoopbackSource(unsigned long targetProcessId,
-														  const QString &processDescription, bool excludeTargetTree,
-														  QObject *parent)
+														 const QString &processDescription, bool excludeTargetTree,
+														 QObject *parent)
 	: AudioLoopbackSource(parent), m_targetProcessId(targetProcessId), m_excludeTargetTree(excludeTargetTree),
 	  m_processDescription(processDescription) {
 }
@@ -240,8 +245,8 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 		QMetaObject::invokeMethod(this, [this, reason]() { emit failed(reason); }, Qt::QueuedConnection);
 	};
 
-	AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
-	activationParams.ActivationType                 = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+	AUDIOCLIENT_ACTIVATION_PARAMS activationParams         = {};
+	activationParams.ActivationType                        = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
 	activationParams.ProcessLoopbackParams.TargetProcessId = static_cast< DWORD >(m_targetProcessId);
 	activationParams.ProcessLoopbackParams.ProcessLoopbackMode =
 		m_excludeTargetTree ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
@@ -255,8 +260,11 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 
 	handler = new ProcessLoopbackActivationHandler();
 
-	HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient),
-											 &activationPropVariant, handler, &asyncOp);
+	HRESULT hr = handler->initializationResult();
+	if (SUCCEEDED(hr)) {
+		hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient),
+										 &activationPropVariant, handler, &asyncOp);
+	}
 
 	if (FAILED(hr) || !asyncOp) {
 		cleanup();
@@ -265,6 +273,7 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 			CoUninitialize();
 		}
 
+		qWarning("WasapiProcessLoopbackSource: activation failed (HRESULT 0x%08lx)", static_cast< unsigned long >(hr));
 		fail(tr("Could not begin activating per-application audio capture"));
 
 		return;
@@ -275,6 +284,9 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 	const DWORD activationWaitResult = WaitForSingleObject(handler->eventHandle(), 5000);
 
 	if (activationWaitResult != WAIT_OBJECT_0 || FAILED(handler->result())) {
+		qWarning("WasapiProcessLoopbackSource: activation wait %lu, HRESULT 0x%08lx",
+				 static_cast< unsigned long >(activationWaitResult),
+				 static_cast< unsigned long >(activationWaitResult == WAIT_OBJECT_0 ? handler->result() : E_PENDING));
 		cleanup();
 
 		if (comInitialized) {
@@ -300,14 +312,14 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 		return;
 	}
 
-	WAVEFORMATEX waveFormat     = {};
-	waveFormat.wFormatTag       = WAVE_FORMAT_IEEE_FLOAT;
-	waveFormat.nChannels        = static_cast< WORD >(kChannelCount);
-	waveFormat.nSamplesPerSec   = kSampleRate;
-	waveFormat.wBitsPerSample   = 32;
-	waveFormat.nBlockAlign      = static_cast< WORD >(waveFormat.nChannels * waveFormat.wBitsPerSample / 8);
-	waveFormat.nAvgBytesPerSec  = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
-	waveFormat.cbSize           = 0;
+	WAVEFORMATEX waveFormat    = {};
+	waveFormat.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
+	waveFormat.nChannels       = static_cast< WORD >(kChannelCount);
+	waveFormat.nSamplesPerSec  = kSampleRate;
+	waveFormat.wBitsPerSample  = 32;
+	waveFormat.nBlockAlign     = static_cast< WORD >(waveFormat.nChannels * waveFormat.wBitsPerSample / 8);
+	waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
+	waveFormat.cbSize          = 0;
 
 	// 200ms, matching Microsoft's own ApplicationLoopback sample: a process-loopback client, unlike an
 	// ordinary loopback client, is documented to need an explicit non-zero buffer duration here rather
@@ -386,8 +398,8 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 	m_running = true;
 	m_clock.restart();
 
-	qWarning("WasapiProcessLoopbackSource: capture started (target pid %lu, %s, requested %u Hz)",
-			 m_targetProcessId, m_excludeTargetTree ? "exclude tree" : "include tree only", kSampleRate);
+	qWarning("WasapiProcessLoopbackSource: capture started (target pid %lu, %s, requested %u Hz)", m_targetProcessId,
+			 m_excludeTargetTree ? "exclude tree" : "include tree only", kSampleRate);
 
 	// Diagnostic only, not behavioural: this class has never been confirmed to actually deliver audio on a
 	// real (non-headless) machine - see the project's own release notes. These counters, logged once
@@ -451,6 +463,12 @@ void WasapiProcessLoopbackSource::runCaptureLoop() {
 				this, [this, pcm, timestamp]() { emit samplesReady(pcm, timestamp); }, Qt::QueuedConnection);
 
 			packetResult = captureClient->GetNextPacketSize(&packetLength);
+		}
+		if (FAILED(packetResult)) {
+			qWarning("WasapiProcessLoopbackSource: reading audio failed (HRESULT 0x%08lx)",
+					 static_cast< unsigned long >(packetResult));
+			fail(tr("Lost the screen-share audio capture"));
+			break;
 		}
 	}
 
