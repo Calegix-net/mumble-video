@@ -14,6 +14,7 @@
 #include "VideoGrid.h"
 #include "VideoSource.h"
 
+#include <QEnterEvent>
 #include <QObject>
 #include <QSignalSpy>
 #include <QtGui/QImage>
@@ -96,6 +97,8 @@ double meanDifference(const QImage &a, const QImage &b) {
 class TestVideoGrid : public QObject {
 	Q_OBJECT
 private slots:
+	void hoveredControlsDoNotHideAndShowAgain();
+	void hidingControlsDoesNotReenterHoverUpdates();
 	void backgroundTilesPaintInArrivalOrder();
 	void lateNetworkTilesCannotOverwriteNewPixels();
 	void resizingPreservesWatchingAndDiscardsOldPixels();
@@ -150,6 +153,72 @@ public:
 	}
 };
 } // namespace
+
+namespace {
+class HoverGrid : public VideoGrid {
+public:
+	void hover(const QPoint &point) {
+		QEnterEvent event(point, point, mapToGlobal(point));
+		QApplication::sendEvent(this, &event);
+	}
+	QWidget *cameraBar() { return m_ownCameraControls->bar; }
+};
+
+class HoverOnHide : public QObject {
+public:
+	HoverGrid &grid;
+	int hides = 0;
+	explicit HoverOnHide(HoverGrid &owner) : grid(owner) {}
+	bool eventFilter(QObject *, QEvent *event) override {
+		if (event->type() == QEvent::Hide) {
+			++hides;
+			// Qt can send an enter event synchronously while a child under the
+			// pointer is hidden. Bound the fixture so the broken code fails safely.
+			if (hides < 8)
+				grid.hover(QPoint(20, 20));
+		}
+		return false;
+	}
+};
+} // namespace
+
+void TestVideoGrid::hoveredControlsDoNotHideAndShowAgain() {
+	HoverGrid grid;
+	grid.resize(400, 300);
+	QImage image(32, 32, QImage::Format_RGB32);
+	image.fill(Qt::red);
+	grid.setSelfCameraFrame(image);
+	grid.show();
+	grid.hover(QPoint(20, 20));
+	QWidget *bar = grid.cameraBar();
+	QVERIFY(bar->isVisible());
+	HoverOnHide events(grid);
+	bar->installEventFilter(&events);
+	for (int i = 0; i < 30; ++i)
+		grid.hover(QPoint(20, 20));
+	QCOMPARE(events.hides, 0);
+	QVERIFY(bar->isVisible());
+}
+
+void TestVideoGrid::hidingControlsDoesNotReenterHoverUpdates() {
+	HoverGrid grid;
+	grid.resize(400, 300);
+	QImage image(32, 32, QImage::Format_RGB32);
+	image.fill(Qt::red);
+	grid.setSelfCameraFrame(image);
+	grid.show();
+	grid.hover(QPoint(20, 20));
+	QWidget *bar = grid.cameraBar();
+	HoverOnHide events(grid);
+	bar->installEventFilter(&events);
+	QEvent leave(QEvent::Leave);
+	QApplication::sendEvent(&grid, &leave);
+	QCOMPARE(events.hides, 1);
+	QVERIFY(bar->isHidden());
+	// A subsequent real enter must still show the controls.
+	grid.hover(QPoint(20, 20));
+	QVERIFY(bar->isVisible());
+}
 
 void TestVideoGrid::backgroundTilesPaintInArrivalOrder() {
 	ControlledDecodeGrid grid;
