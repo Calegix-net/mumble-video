@@ -1,0 +1,71 @@
+Test project /build
+      Start  1: TestLinuxScreenCapture
+      Start  2: TestVideoPipeline
+      Start  3: TestVP8Codec
+      Start  4: TestVideoBroadcaster
+ 1/33 Test  #1: TestLinuxScreenCapture ...........   Passed    0.39 sec
+      Start  5: TestScreenCaptureImage
+ 2/33 Test  #5: TestScreenCaptureImage ...........   Passed    0.04 sec
+      Start  6: TestVideoGrid
+ 3/33 Test  #2: TestVideoPipeline ................   Passed    0.55 sec
+      Start  7: TestVideoUi
+ 4/33 Test  #3: TestVP8Codec .....................   Passed    1.62 sec
+      Start  8: TestXMLTools
+ 5/33 Test  #8: TestXMLTools .....................   Passed    0.02 sec
+      Start  9: TestSettingsJSONSerialization
+ 6/33 Test  #9: TestSettingsJSONSerialization ....   Passed    0.07 sec
+      Start 10: TestSettingsLoad
+ 7/33 Test #10: TestSettingsLoad .................   Passed    0.07 sec
+      Start 11: TestCrypt
+ 8/33 Test #11: TestCrypt ........................   Passed    0.03 sec
+      Start 12: TestAudioReceiverBuffer
+ 9/33 Test #12: TestAudioReceiverBuffer ..........   Passed    0.02 sec
+      Start 13: TestVideoCall
+10/33 Test  #4: TestVideoBroadcaster .............   Passed    2.40 sec
+      Start 14: TestVideoRouter
+11/33 Test #14: TestVideoRouter ..................   Passed    0.02 sec
+      Start 15: TestCaseInsensitiveQString
+12/33 Test #15: TestCaseInsensitiveQString .......   Passed    0.02 sec
+      Start 16: TestCryptographicHash
+13/33 Test #16: TestCryptographicHash ............   Passed    0.02 sec
+      Start 17: TestCryptographicRandom
+14/33 Test #17: TestCryptographicRandom ..........   Passed    2.04 sec
+      Start 18: TestDatabase
+15/33 Test  #7: TestVideoUi ......................   Passed    5.39 sec
+      Start 19: TestServerDatabase
+16/33 Test  #6: TestVideoGrid ....................   Passed   13.21 sec
+      Start 20: TestFFDHE
+17/33 Test #20: TestFFDHE ........................   Passed    0.09 sec
+      Start 21: TestPacketDataStream
+18/33 Test #21: TestPacketDataStream .............   Passed    0.02 sec
+      Start 22: TestPasswordGenerator
+19/33 Test #22: TestPasswordGenerator ............   Passed    0.03 sec
+      Start 23: TestMumbleProtocol
+20/33 Test #23: TestMumbleProtocol ...............   Passed    0.02 sec
+      Start 24: TestSelfSignedCertificate
+21/33 Test #24: TestSelfSignedCertificate ........   Passed    0.44 sec
+      Start 25: TestServerAddress
+22/33 Test #25: TestServerAddress ................   Passed    0.02 sec
+      Start 26: TestSSLLocks
+23/33 Test #26: TestSSLLocks .....................   Passed    2.02 sec
+      Start 27: TestStdAbs
+24/33 Test #27: TestStdAbs .......................   Passed    0.02 sec
+      Start 28: TestTimer
+25/33 Test #28: TestTimer ........................   Passed    0.17 sec
+      Start 29: TestUnresolvedServerAddress
+26/33 Test #29: TestUnresolvedServerAddress ......   Passed    0.02 sec
+      Start 30: TestVersion
+27/33 Test #30: TestVersion ......................   Passed    0.02 sec
+      Start 31: TestMediaFraming
+28/33 Test #31: TestMediaFraming .................   Passed    0.03 sec
+      Start 32: TestVideoFragmentation
+29/33 Test #32: TestVideoFragmentation ...........   Passed    0.09 sec
+      Start 33: TestVideoTransport
+30/33 Test #33: TestVideoTransport ...............   Passed    0.06 sec
+31/33 Test #19: TestServerDatabase ...............   Passed   18.45 sec
+32/33 Test #18: TestDatabase .....................   Passed   20.43 sec
+33/33 Test #13: TestVideoCall ....................   Passed   42.08 sec
+
+100% tests passed, 0 tests failed out of 33
+
+Total Test time (real) =  43.93 sec
