@@ -175,6 +175,21 @@ std::size_t VideoGrid::distinctSenderCount() const {
 	return seen.size();
 }
 
+std::vector< unsigned int > VideoGrid::senderSessions() const {
+	std::vector< unsigned int > sessions;
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		// m_surfaces is keyed by (session, stream), so a sender holding both a camera and a screen appears
+		// twice in this walk. Deduplicated here rather than left to the caller: every caller wants "who is
+		// in this grid", and removeSender()'s per-session overload is a no-op the second time anyway.
+		if (std::find(sessions.begin(), sessions.end(), it->second.senderSession) == sessions.end()) {
+			sessions.push_back(it->second.senderSession);
+		}
+	}
+
+	return sessions;
+}
+
 bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
 	if (width <= 0 || height <= 0) {
 		return false;
@@ -770,6 +785,12 @@ void VideoGrid::clear() {
 	m_ownScreenControls.reset();
 	m_remoteControls.clear();
 
+	// Every bar this grid had is gone, so whatever updateHoveredBarImpl() last decided about them cannot
+	// be reused - see m_controlsGeneration. Also reset the hovered slot outright: nothing is hovered when
+	// there is nothing left to hover.
+	++m_controlsGeneration;
+	m_hoveredSlot = -1;
+
 	const bool hadAnything = !m_surfaces.empty() || !m_selfCameraFrame.isNull() || !m_selfScreenFrame.isNull();
 
 	m_surfaces.clear();
@@ -952,28 +973,36 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 
 	int index = 0;
 
+	// Every create and destroy below bumps m_controlsGeneration - see updateHoveredBarImpl(), which uses it
+	// to tell "the layout moved" (nothing to redo) from "the set of bars changed" (everything to redo).
+	// Only real changes count: a reset() of something already null, or a find() that was already there, is
+	// not a change and must not invalidate anything.
 	if (!m_selfCameraFrame.isNull()) {
 		if (!m_ownCameraControls) {
 			m_ownCameraControls = makeOwnControlBar(FocusTarget::SelfCamera);
+			++m_controlsGeneration;
 		}
 
 		const QRect cell = cellRect(layout, index++);
 		m_ownCameraControls->bar->setGeometry(cell.x(), cell.bottom() - BAR_HEIGHT + 1, cell.width(), BAR_HEIGHT);
 		m_ownCameraControls->bar->raise();
-	} else {
+	} else if (m_ownCameraControls) {
 		m_ownCameraControls.reset();
+		++m_controlsGeneration;
 	}
 
 	if (!m_selfScreenFrame.isNull()) {
 		if (!m_ownScreenControls) {
 			m_ownScreenControls = makeOwnControlBar(FocusTarget::SelfScreen);
+			++m_controlsGeneration;
 		}
 
 		const QRect cell = cellRect(layout, index++);
 		m_ownScreenControls->bar->setGeometry(cell.x(), cell.bottom() - BAR_HEIGHT + 1, cell.width(), BAR_HEIGHT);
 		m_ownScreenControls->bar->raise();
-	} else {
+	} else if (m_ownScreenControls) {
 		m_ownScreenControls.reset();
+		++m_controlsGeneration;
 	}
 
 	// Bars for a sender that no longer holds a surface at all are dropped outright; bars for a surface
@@ -982,6 +1011,7 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 	for (auto it = m_remoteControls.begin(); it != m_remoteControls.end();) {
 		if (m_surfaces.find(it->first) == m_surfaces.end()) {
 			it = m_remoteControls.erase(it);
+			++m_controlsGeneration;
 		} else {
 			++it;
 		}
@@ -1005,6 +1035,7 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 				m_remoteControls
 					.emplace(entry.first, makeRemoteControlBar(surface.senderSession, surface.streamID, hasAudio))
 					.first;
+			++m_controlsGeneration;
 		}
 
 		TileControlBar &controls = *controlsIt->second;
@@ -1021,8 +1052,48 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 }
 
 void VideoGrid::updateHoveredBar() {
-	// Hidden first, unconditionally - simpler than trying to track "which bar was visible last time" and
-	// only touch the ones that changed, and this runs at most once per relayout(), not once per frame.
+	if (m_updatingHoveredBar) {
+		// Already running, somewhere further down this same call stack - see m_updatingHoveredBar. That
+		// pass is still working from the same m_mouseInside/m_lastMousePos this one would have used, so
+		// skipping the nested call loses nothing, exactly as for m_relayoutInProgress.
+		return;
+	}
+
+	m_updatingHoveredBar = true;
+	updateHoveredBarImpl();
+	m_updatingHoveredBar = false;
+}
+
+void VideoGrid::updateHoveredBarImpl() {
+	// Worked out before anything is touched, so that the overwhelmingly common case - this being called
+	// again with the hover state exactly as it already is - can return without changing any widget's
+	// visibility at all.
+	//
+	// That case is not rare, it is most of them: relayout() calls this, and resizeEvent() calls relayout()
+	// unconditionally, so dragging a splitter beside the video panel runs this on every resize tick, dozens
+	// a second. Hiding every bar and re-showing one of them on each of those is pure churn - the hovered
+	// tile has not changed, only the geometry has - and it is churn of the exact kind that has now produced
+	// two separate crashes in this class: hide/show work colliding with Qt machinery that is busy doing
+	// something else with the same widgets. Not doing the work is a better fix than doing it more carefully.
+	const int slot = m_mouseInside ? slotAt(m_lastMousePos, currentLayout()) : -1;
+
+	// The generation is what keeps this honest. A slot index is positional, not an identity: after a tile
+	// appears or disappears, the same index can be a different sender's tile, and returning early on the
+	// index alone would leave the wrong bar - or a bar belonging to a stream that just ended - showing.
+	// relayoutControls() bumps the generation whenever it creates or destroys one, so any structural change
+	// forces the full pass below; a plain resize, which only moves bars, does not.
+	if (slot == m_hoveredSlot && m_controlsGeneration == m_hoveredBarGeneration) {
+		return;
+	}
+
+	m_hoveredSlot          = slot;
+	m_hoveredBarGeneration = m_controlsGeneration;
+
+	++m_hoveredBarAppliedCount;
+
+	// Hidden first, unconditionally - simpler than tracking which individual bar was visible last time,
+	// and now that the check above means this only runs when something actually changed, the cost of the
+	// extra hides is paid on hover changes rather than on every resize tick.
 	if (m_ownCameraControls) {
 		m_ownCameraControls->bar->setVisible(false);
 	}
@@ -1034,16 +1105,6 @@ void VideoGrid::updateHoveredBar() {
 	for (auto &entry : m_remoteControls) {
 		entry.second->bar->setVisible(false);
 	}
-
-	if (!m_mouseInside) {
-		m_hoveredSlot = -1;
-		return;
-	}
-
-	const Layout layout = currentLayout();
-	const int slot      = slotAt(m_lastMousePos, layout);
-
-	m_hoveredSlot = slot;
 
 	if (slot < 0) {
 		return;
@@ -1390,7 +1451,7 @@ void VideoGrid::mouseMoveEvent(QMouseEvent *event) {
 	// different tile, not on every one of the many move events Qt delivers while it is simply gliding
 	// across the one it is already over.
 	if (slotAt(pos, layout) != m_hoveredSlot) {
-		updateHoveredBar();
+		scheduleHoveredBarUpdate();
 	}
 
 	QWidget::mouseMoveEvent(event);
@@ -1399,16 +1460,38 @@ void VideoGrid::mouseMoveEvent(QMouseEvent *event) {
 void VideoGrid::enterEvent(QEnterEvent *event) {
 	m_mouseInside  = true;
 	m_lastMousePos = event->position().toPoint();
-	updateHoveredBar();
+	scheduleHoveredBarUpdate();
 
 	QWidget::enterEvent(event);
 }
 
 void VideoGrid::leaveEvent(QEvent *event) {
 	m_mouseInside = false;
-	updateHoveredBar();
+	scheduleHoveredBarUpdate();
 
 	QWidget::leaveEvent(event);
+}
+
+void VideoGrid::scheduleHoveredBarUpdate() {
+	if (m_hoveredBarUpdateScheduled) {
+		// Coalesced: Qt delivers a great many move events for one gesture, and every one of them that
+		// crosses a tile boundary would otherwise post its own redundant update.
+		return;
+	}
+
+	m_hoveredBarUpdateScheduled = true;
+
+	// Queued rather than called directly - see the declaration for the crash this exists to prevent. The
+	// context object is this widget itself, so a pending update is discarded rather than delivered if the
+	// grid is destroyed before the event loop gets back around to it.
+	QMetaObject::invokeMethod(
+		this,
+		[this]() {
+			m_hoveredBarUpdateScheduled = false;
+
+			updateHoveredBar();
+		},
+		Qt::QueuedConnection);
 }
 
 void VideoGrid::keyPressEvent(QKeyEvent *event) {

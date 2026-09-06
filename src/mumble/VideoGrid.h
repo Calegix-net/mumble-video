@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <vector>
 #include <memory>
 #include <unordered_map>
 
@@ -123,6 +124,18 @@ public:
 	/// outside a test.
 	int relayoutControlsCallCountForTesting() const { return m_relayoutControlsCallCount; }
 
+	/// Which slot the hover bars were last actually applied for, or -1 for none. Exposed so a test can
+	/// prove that a hover event does not do its widget work synchronously inside Qt's own event delivery -
+	/// see scheduleHoveredBarUpdate() for the crash that property exists to prevent, which is otherwise
+	/// invisible from outside this class. Not meant to be called outside a test.
+	int hoveredSlotForTesting() const { return m_hoveredSlot; }
+
+	/// How many times the hover update has actually changed any bar's visibility, as opposed to being
+	/// called and finding nothing to do. Exposed so a test can prove that a resize - which calls relayout()
+	/// and so reaches the hover update on every tick of a splitter drag - does no widget work at all.
+	/// Not meant to be called outside a test.
+	int hoveredBarAppliedCountForTesting() const { return m_hoveredBarAppliedCount; }
+
 	/// Number of other participants' tiles currently drawable - one per stream, not one per person, since
 	/// a sender may hold more than one stream (a camera and a screen, say). A stream not being watched
 	/// occupies its cell the moment it is announced, showing a preview placeholder there - it does not
@@ -130,6 +143,16 @@ public:
 	/// - announced, but its first tile has not arrived yet - occupies no cell and must not reserve one, or
 	/// the grid lays out around an empty square.
 	int senderCount() const;
+
+	/// Every distinct session this grid currently holds a surface for, watched or not.
+	///
+	/// Exposed so the owner can reconcile the grid against who is actually still on the server - this
+	/// class deliberately knows nothing about sessions beyond them being opaque ids (see the class
+	/// comment), so it cannot tell on its own that one of them has departed. Silence cannot answer that
+	/// question either: an unwatched stream is unsubscribed, so receiving nothing from it is its normal
+	/// indefinite state rather than evidence of anything (see checkForStaleStreams(), which skips exactly
+	/// those for that reason). Only the user list can, which is why this exists.
+	std::vector< unsigned int > senderSessions() const;
 
 	/// Everything drawn, including your own camera and your own screen share. This is what decides
 	/// whether the panel is worth showing at all.
@@ -449,6 +472,14 @@ protected:
 	/// whatever state change asked for the nested one, so skipping the nested call loses nothing.
 	bool m_relayoutInProgress = false;
 
+	/// Set for the duration of updateHoveredBar()'s real work (see updateHoveredBarImpl()), and checked at
+	/// its own start - the same reentrancy pattern as m_relayoutInProgress above, for a second, independent
+	/// way this class learned Qt can call back into itself: toggling a control bar's visibility from inside
+	/// an enter/leave event can make Qt redeliver a synthetic one for this widget before the outer call
+	/// returns, which without this guard recursed until the stack overflowed - see updateHoveredBar()'s own
+	/// comment for the full mechanism and how it was actually caught.
+	bool m_updatingHoveredBar = false;
+
 	/// Polls for streams that have gone quiet - see checkForStaleStreams(). A plain periodic timer rather
 	/// than something scheduled per-stream: the check itself is cheap (a linear scan of a map capped at
 	/// MAX_SENDERS entries), and a single shared timer needs no bookkeeping to add or remove as streams
@@ -512,7 +543,65 @@ protected:
 	/// translucent strip nobody is interacting with. Uses m_mouseInside/m_lastMousePos rather than an
 	/// event's own position, since this also has to re-run whenever the layout changes under a stationary
 	/// cursor - a tile appearing or disappearing elsewhere can move the cell the cursor is already over.
+	///
+	/// Guarded against reentrancy (see m_updatingHoveredBar) - the actual work is updateHoveredBarImpl().
+	/// Showing or hiding a bar QWidget positioned exactly under the cursor can make Qt recompute what is
+	/// now topmost there and redeliver a synthetic Enter/Leave to this widget as part of that, which calls
+	/// straight back into enterEvent()/leaveEvent() and this function again before the outer call has
+	/// returned - and because each pass toggles the same bar's visibility, nothing about that recursion
+	/// bottoms out on its own. Confirmed with gdb after a real, reproducible crash report ("as soon as
+	/// somebody shares their webcam"): a run of exactly this ran to a genuine stack overflow over 7000
+	/// frames deep before the process died, silently and with no crash dump - a stack overflow that deep
+	/// can outrun the OS's own fault-reporting machinery, which is why nothing short of a debugger attached
+	/// in advance ever caught it. relayout()'s m_relayoutInProgress guard does not cover this: it only
+	/// protects relayout()'s own call chain, and enterEvent()/leaveEvent()/mouseMoveEvent() all call this
+	/// directly, bypassing that guard entirely.
 	void updateHoveredBar();
+
+	/// The actual work of updateHoveredBar(), pulled out so the reentrancy guard has one place to wrap
+	/// regardless of which of this function's several early returns is taken.
+	void updateHoveredBarImpl();
+
+	/// Asks for a hover update on the next turn of the event loop instead of performing one immediately,
+	/// coalescing repeats. What enterEvent(), leaveEvent() and mouseMoveEvent() use; relayout() still
+	/// calls updateHoveredBar() directly, since it does not run from inside Qt's own event delivery.
+	///
+	/// The reason for the indirection is that those three run *inside* Qt's mouse and enter/leave
+	/// dispatch, and updateHoveredBar() shows and hides real QWidgets. Changing a widget's visibility
+	/// while QApplicationPrivate::dispatchEnterLeave() is part-way through walking the widgets it decided
+	/// to notify means mutating the hierarchy that walk is still using - which a Kubuntu tester hit as a
+	/// hard SIGSEGV inside Qt's own QWidgetPrivate::invalidateGraphicsEffectsRecursively(), reached from
+	/// setVisible(false) called straight out of dispatchEnterLeave, while merely hovering the splitter
+	/// between the chat log and the video panel. Deferring by one event-loop turn lets Qt finish that walk
+	/// completely before any bar is shown or hidden, so nothing is mutated underneath it.
+	///
+	/// This is a different failure from the reentrancy m_updatingHoveredBar guards against - that one
+	/// recursed thousands of frames deep into a stack overflow, this one is an immediate crash on a single
+	/// pass - but both come of the same root cause: doing widget work from inside Qt's event delivery for
+	/// the very events that widget work provokes. The guard stays regardless; it is the narrower fix and
+	/// still covers relayout()'s own synchronous path.
+	void scheduleHoveredBarUpdate();
+
+	/// Whether scheduleHoveredBarUpdate() already has an update posted and not yet run.
+	bool m_hoveredBarUpdateScheduled = false;
+
+	/// Bumped by relayoutControls() every time it actually creates or destroys a control bar, and by
+	/// clear(). What lets updateHoveredBarImpl() distinguish "the bars merely moved" from "the set of bars
+	/// changed" - the first needs no work at all, the second invalidates everything it knows.
+	///
+	/// A counter rather than a cached pointer to the currently-shown bar, deliberately: bars are owned by
+	/// unique_ptrs that deleteLater() the widget when dropped, so a remembered raw QWidget* would outlive
+	/// what it points at the moment a stream ends, and calling setVisible() on it later would be a
+	/// use-after-free - the very kind of bug this whole area is being hardened against.
+	int m_controlsGeneration = 0;
+
+	/// The m_controlsGeneration that m_hoveredSlot was last decided against. Unequal to the current one
+	/// means the bar set has changed underneath that decision and it has to be made again.
+	int m_hoveredBarGeneration = -1;
+
+	/// See hoveredBarAppliedCountForTesting(). Incremented only on a pass that gets past the early return
+	/// and actually touches widgets.
+	int m_hoveredBarAppliedCount = 0;
 
 	/// Builds and (still hidden) positions the picture-in-picture window a fullscreened tile is actually
 	/// shown in - see FullscreenVideoWindow's own comment for why the grid does not simply fill itself the

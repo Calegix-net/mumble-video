@@ -296,6 +296,12 @@ protected:
 	/// the sender disconnects and no per-stream end message will arrive.
 	void removeScreenShareAudioBuffersForSender(unsigned int senderSession);
 
+	/// Drops every tile, dispatcher entry and screen-share audio buffer belonging to a session that is no
+	/// longer on the server, whether or not anything ever told us it left. Polled, as the backstop to
+	/// msgUserRemove()'s own cleanup - see the implementation for why presence, rather than silence or a
+	/// message, is the only signal that settles this for a sender whose client crashed.
+	void pruneDepartedVideoSenders();
+
 	/// Applies a per-tile volume slider's value to whichever screen-share audio buffer(s) belong to this
 	/// sender. Sender-keyed rather than stream-keyed, same reasoning as removeScreenShareAudioBuffersForSender.
 	void setScreenShareVolumeForSender(unsigned int senderSession, float multiplier);

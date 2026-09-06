@@ -20,6 +20,7 @@
 #include <QtGui/QPainter>
 #include <QtTest>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -131,6 +132,9 @@ private slots:
 	void routineTileUpdatesDoNotReflowEveryTilesControls();
 	void tiledImageDecodeDoesNotBlockTheCallingThread();
 	void stalledStreamGetsOneKeyframeRequest();
+	void senderSessionsReportsEachSessionOnceWatchedOrNot();
+	void hoverEventsDoNotTouchWidgetsInsideQtsOwnDispatch();
+	void resizingDoesNotChurnTheHoverBarsVisibility();
 };
 
 namespace {
@@ -1242,6 +1246,155 @@ void TestVideoGrid::resizingPreservesWatchingAndDiscardsOldPixels() {
 	grid.onVideoUnitReceived(SENDER, 11, 0, true, 0, 0, bytes);
 	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 11).size(), QSize(32, 16));
+}
+
+// The grid cannot tell on its own that a sender has left the server - it only ever sees opaque session
+// ids - so MainWindow reconciles it against the real user list and removes whatever belongs to a session
+// that is gone (see MainWindow::pruneDepartedVideoSenders). That sweep is only as good as this list, and
+// two properties of it matter: a sender holding several streams must appear once rather than once per
+// stream, and an unwatched stream must appear at all - an unwatched tile is exactly the case no
+// silence-based watchdog is allowed to clean up, so if it were missing here nothing would ever remove it.
+void TestVideoGrid::senderSessionsReportsEachSessionOnceWatchedOrNot() {
+	VideoGrid grid;
+
+	QCOMPARE(grid.senderSessions().size(), std::size_t(0));
+
+	// Two streams from one sender - a camera and a screen - and one of them left unwatched.
+	grid.setStreamCodec(SENDER, 1, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+	grid.setWatching(SENDER, 1, true);
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+
+	std::vector< unsigned int > sessions = grid.senderSessions();
+	QCOMPARE(sessions.size(), std::size_t(1));
+	QCOMPARE(sessions.front(), SENDER);
+
+	// A second, different sender is its own entry.
+	const unsigned int other = SENDER + 1;
+	grid.setStreamCodec(other, 1, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+
+	sessions = grid.senderSessions();
+	QCOMPARE(sessions.size(), std::size_t(2));
+	QVERIFY(std::find(sessions.begin(), sessions.end(), SENDER) != sessions.end());
+	QVERIFY(std::find(sessions.begin(), sessions.end(), other) != sessions.end());
+
+	// And dropping one sender's tiles - what the sweep itself does - takes every stream of theirs with it,
+	// leaving the other sender untouched.
+	grid.removeSender(SENDER);
+
+	sessions = grid.senderSessions();
+	QCOMPARE(sessions.size(), std::size_t(1));
+	QCOMPARE(sessions.front(), other);
+}
+
+// Hover show/hide of the control bars must not happen inside Qt's own mouse and enter/leave dispatch.
+// updateHoveredBar() shows and hides real QWidgets, and doing that while
+// QApplicationPrivate::dispatchEnterLeave() is still walking the widgets it decided to notify mutates the
+// hierarchy underneath that walk - which a Kubuntu tester hit as a hard SIGSEGV inside Qt's own
+// invalidateGraphicsEffectsRecursively(), just from hovering the splitter beside the video panel. So the
+// property under test is the timing itself: an enter event must leave the hover state alone until the
+// event loop turns, and only then apply it.
+void TestVideoGrid::hoverEventsDoNotTouchWidgetsInsideQtsOwnDispatch() {
+	VideoGrid grid;
+	grid.resize(640, 360);
+
+	// One announced (unwatched, so it needs no decode) stream, which claims a cell and so gives the grid
+	// a slot for the cursor to be over at all.
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Camera,
+						MumbleProto::VideoState_Codec_VP8);
+	QCOMPARE(grid.senderCount(), 1);
+
+	QCOMPARE(grid.hoveredSlotForTesting(), -1);
+
+	// Delivered the way Qt delivers it - through the event system, not by calling enterEvent() directly -
+	// so this exercises the real path the crash came in on.
+	const QPointF inside(320.0, 180.0);
+	QEnterEvent enter(inside, inside, grid.mapToGlobal(inside));
+	QCoreApplication::sendEvent(&grid, &enter);
+
+	// Still untouched: the widget work has been posted, not performed. This is the assertion that fails if
+	// the handler ever goes back to calling updateHoveredBar() synchronously.
+	QCOMPARE(grid.hoveredSlotForTesting(), -1);
+
+	// And it does actually happen, one turn of the event loop later - deferring must not mean dropping.
+	QCoreApplication::processEvents();
+	QCOMPARE(grid.hoveredSlotForTesting(), 0);
+
+	// Leaving is deferred the same way, and lands the same way.
+	QEvent leave(QEvent::Leave);
+	QCoreApplication::sendEvent(&grid, &leave);
+	QCOMPARE(grid.hoveredSlotForTesting(), 0);
+
+	QCoreApplication::processEvents();
+	QCOMPARE(grid.hoveredSlotForTesting(), -1);
+
+	// A burst of hovering - what dragging along the splitter actually produces - must coalesce rather than
+	// pile up, and must leave the grid in one consistent state rather than crashing part-way through.
+	for (int i = 0; i < 50; ++i) {
+		QEnterEvent repeatedEnter(inside, inside, grid.mapToGlobal(inside));
+		QCoreApplication::sendEvent(&grid, &repeatedEnter);
+
+		QEvent repeatedLeave(QEvent::Leave);
+		QCoreApplication::sendEvent(&grid, &repeatedLeave);
+	}
+
+	QCoreApplication::processEvents();
+
+	// Last thing delivered was a leave, so nothing is hovered.
+	QCOMPARE(grid.hoveredSlotForTesting(), -1);
+}
+
+// resizeEvent() calls relayout() unconditionally, and relayout() reaches the hover update - so dragging a
+// splitter beside the video panel runs it on every resize tick, dozens a second. It used to hide every bar
+// and re-show one on each of those, even though the hovered tile had not changed and only the geometry
+// had. That is a lot of hide/show churn on widgets Qt is simultaneously busy resizing and repainting,
+// which is the condition both crashes in this area came out of. So: a resize must do no visibility work.
+void TestVideoGrid::resizingDoesNotChurnTheHoverBarsVisibility() {
+	VideoGrid grid;
+	grid.resize(640, 360);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Camera,
+						MumbleProto::VideoState_Codec_VP8);
+
+	// Settle the hover state first, so what follows measures resizing alone.
+	const QPointF inside(320.0, 180.0);
+	QEnterEvent enter(inside, inside, grid.mapToGlobal(inside));
+	QCoreApplication::sendEvent(&grid, &enter);
+	QCoreApplication::processEvents();
+
+	const int settled         = grid.hoveredBarAppliedCountForTesting();
+	const int settledRelayout = grid.relayoutControlsCallCountForTesting();
+	QVERIFY(settled > 0);
+
+	// A drag's worth of resizes. The event is sent explicitly as well as the widget actually being
+	// resized: this grid is never shown, and an unshown widget does not get resize events delivered to it
+	// on its own - without this the loop would exercise nothing at all and the assertion below would pass
+	// for entirely the wrong reason.
+	for (int i = 0; i < 50; ++i) {
+		const QSize before = grid.size();
+		grid.resize(640 - i, 360);
+
+		QResizeEvent resize(grid.size(), before);
+		QCoreApplication::sendEvent(&grid, &resize);
+	}
+
+	QCoreApplication::processEvents();
+
+	// The resize path really did run - relayoutControls() is on the far side of relayout(), the same call
+	// that reaches the hover update. Asserted so that this test cannot quietly become vacuous.
+	QVERIFY(grid.relayoutControlsCallCountForTesting() > settledRelayout);
+
+	// And not one of those resizes touched a bar's visibility: same hovered tile, same set of bars, only
+	// the geometry moved.
+	QCOMPARE(grid.hoveredBarAppliedCountForTesting(), settled);
+
+	// But a real change still gets through - the early return must not be a way to go permanently stale.
+	// A second stream is a structural change (a bar is created), which invalidates the decision.
+	grid.setStreamCodec(SENDER, STREAM + 1, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+	QCoreApplication::processEvents();
+
+	QVERIFY(grid.hoveredBarAppliedCountForTesting() > settled);
 }
 
 QTEST_MAIN(TestVideoGrid)

@@ -512,6 +512,15 @@ void MainWindow::setupVideoGrid() {
 	// panel at all for the many users who never touch this.
 	m_videoDock->hide();
 
+	// The safety net under msgUserRemove()'s own video cleanup - see pruneDepartedVideoSenders(). That
+	// path is the fast one and handles the ordinary case; this one exists because a tile whose owner is
+	// gone has no other way to ever leave the grid, and "their frozen last frame is still sitting there"
+	// is precisely what users report. Three seconds: fast enough that a departure does not visibly
+	// linger, and the check itself is a walk of at most MAX_SENDERS entries against a hash lookup each.
+	auto *departedSenderTimer = new QTimer(this);
+	connect(departedSenderTimer, &QTimer::timeout, this, &MainWindow::pruneDepartedVideoSenders);
+	departedSenderTimer->start(3000);
+
 	// The grid can tell that a stream's decoder is stuck - a run of undecodable units means its
 	// reference frames are gone - but it deliberately knows nothing about the server. The request goes
 	// out from here, as a re-subscribe carrying request_keyframe: re-subscribing is idempotent, and the
@@ -1228,6 +1237,42 @@ void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSessi
 		} else {
 			++it;
 		}
+	}
+}
+
+void MainWindow::pruneDepartedVideoSenders() {
+	if (!m_videoGrid || !Global::get().sh || Global::get().uiSession == 0) {
+		// Not connected, or not far enough into a connection to have a user list worth judging anything
+		// against. Deliberately not treated as "everyone has departed": a disconnect tears the grid down
+		// through its own path, and clearing it from here on a half-established connection would fight
+		// that rather than help it.
+		return;
+	}
+
+	for (unsigned int senderSession : m_videoGrid->senderSessions()) {
+		if (ClientUser::get(senderSession)) {
+			continue;
+		}
+
+		// No user with this session is on the server any more, so nothing will ever arrive for this tile
+		// again and no per-stream end message is coming either - the sender is not there to send one.
+		//
+		// msgUserRemove() already does exactly this cleanup the moment the server says someone left, and
+		// in the ordinary case gets there first. This is for when that message never arrives or never
+		// helped: the server only notices a client that crashed rather than quitting once its own
+		// connection timeout expires, a stream can be announced by someone already on their way out, and
+		// an unwatched tile is unsubscribed - so it receives nothing by design and no silence-based
+		// watchdog (see VideoGrid::checkForStaleStreams) can be allowed to judge it. Presence is the one
+		// signal that answers this for every one of those cases, and it is authoritative.
+		qWarning("Video: session %u is gone from the server, dropping its tiles", senderSession);
+
+		m_videoGrid->removeSender(senderSession);
+
+		if (m_videoStreamDispatcher) {
+			m_videoStreamDispatcher->removeSender(senderSession);
+		}
+
+		removeScreenShareAudioBuffersForSender(senderSession);
 	}
 }
 
