@@ -28,3 +28,18 @@ passed (55.11 seconds).
 The installed standard Mumble app (`info.mumble.Mumble`, version 1.5.915) is distinct
 from Mumble Video (`com.calegix.MumbleVideo`). Both desktop entries previously used
 the label Mumble, which made it easy to launch the wrong one.
+
+## Reveal follow-up
+
+The caller clarified that clicking Reveal on the receiving client crashed the
+screen-sharing sender. Reveal sends a keyframe request through the server to the
+sender's broadcaster. This does not establish that the sender hit the same hover
+failure as the captured local dump.
+
+Additional tests exercise the actual Watch button while a local screen preview
+is active, first-frame decoding, hover transitions, and repeated unwatch/re-watch
+for both tiled images and VP8. Sender tests issue 20 new-viewer keyframe requests
+per codec against an unchanged capture, checking that full frames are emitted and
+the broadcaster stays active. Both complete native suites pass (16.07 seconds).
+These tests use synthetic capture and do not reproduce the caller's crash. His
+exact build revision and crash trace are still needed to identify its cause.
