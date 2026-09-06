@@ -45,6 +45,23 @@ matrix of Wayland compositors still require device testing.
 
 ## Downloads
 
+### Audio wizard crash follow-up
+
+A host crash dump identified two different PipeWire core libraries in one process:
+the bundle's `libpipewire-0.3.so.0` and the host's `libpipewire-0.3.so`, alongside
+host SPA plugins. The crash occurred in thread-loop teardown while restarting audio.
+The bundle now leaves PipeWire to the host, and the audio loader prefers the runtime
+SONAME already linked by capture. This keeps the core, SPA plugins, and modules aligned.
+
+The regression test checks that audio's dynamically resolved entry point matches
+capture's linked entry point, then restarts 30 audio loops while a capture loop runs.
+All 12 Linux capture QtTest entries pass on the native host. The Fedora 42 Release
+client rebuilt successfully, and capture, broadcaster, and pipeline suites passed
+(3.09 seconds). A corrected bundle launched on the host with only one PipeWire core
+mapped; subsequent audio restarts did not reproduce the earlier context errors.
+This confirms the diagnosed Linux crash fix; it does not establish the cause of an
+unidentified Windows crash or every reported disconnect.
+
 The [download page](https://calegix.com/dl/mumble/) hosts Windows and Linux ZIPs
 under dated paths with SHA-256 checksums. Linux requires x86-64 and glibc 2.41+.
 `dev/downloads/index.html` is the source of this static page. Existing historical

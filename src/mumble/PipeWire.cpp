@@ -4,6 +4,7 @@
 // Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
 #include "PipeWire.h"
+#include "PipeWireLibrary.h"
 
 #include "Global.h"
 
@@ -128,24 +129,7 @@ void PipeWireInit::destroy() {
 static PipeWireInit pwi;
 
 PipeWireSystem::PipeWireSystem() : m_ok(false), m_users(0) {
-	// clang-format off
-	const QStringList names {
-		// Common names used by Linux distributions.
-		"libpipewire.so",
-		"libpipewire-0.3.so",
-		// Name used by the Flatpak FreeDesktop runtime.
-		"libpipewire-0.3.so.0"
-	};
-	// clang-format on
-
-	for (const auto &name : names) {
-		m_lib.setFileName(name);
-		if (m_lib.load()) {
-			break;
-		}
-	}
-
-	if (!m_lib.isLoaded()) {
+	if (!loadPipeWireLibrary(m_lib)) {
 		return;
 	}
 

@@ -1,5 +1,6 @@
 // Copyright The Mumble Developers. All rights reserved.
 // Use of this source code is governed by a BSD-style license.
+#include "PipeWireLibrary.h"
 #include "PipeWireScreenVideoSource.h"
 #include "PortalScreenCast.h"
 #include <QCoreApplication>
@@ -131,6 +132,36 @@ private slots:
 	void cleanupTestCase() {
 		portal.terminate();
 		QVERIFY(portal.waitForFinished());
+	}
+	void audioAndCaptureShareRuntime() {
+		QLibrary library;
+		QVERIFY(loadPipeWireLibrary(library));
+		QVERIFY(library.resolve("pw_get_library_version")
+				== reinterpret_cast< QFunctionPointer >(&pw_get_library_version));
+		const auto audioNew = reinterpret_cast< decltype(&pw_loop_new) >(library.resolve("pw_loop_new"));
+		const auto audioThreadNew =
+			reinterpret_cast< decltype(&pw_thread_loop_new_full) >(library.resolve("pw_thread_loop_new_full"));
+		const auto audioThreadDestroy =
+			reinterpret_cast< decltype(&pw_thread_loop_destroy) >(library.resolve("pw_thread_loop_destroy"));
+		QVERIFY(audioNew && audioThreadNew && audioThreadDestroy);
+		pw_init(nullptr, nullptr);
+		// Audio wizard restarts audio while screen capture can retain its own loop.
+		auto *capture = pw_thread_loop_new("capture-regression", nullptr);
+		QVERIFY(capture);
+		QCOMPARE(pw_thread_loop_start(capture), 0);
+		for (int i = 0; i < 30; ++i) {
+			auto *loop = audioNew(nullptr);
+			QVERIFY(loop);
+			auto *audio = audioThreadNew(loop, "audio-wizard-regression", nullptr);
+			QVERIFY(audio);
+			QCOMPARE(pw_thread_loop_start(audio), 0);
+			pw_thread_loop_stop(audio);
+			audioThreadDestroy(audio);
+			pw_loop_destroy(loop);
+		}
+		pw_thread_loop_stop(capture);
+		pw_thread_loop_destroy(capture);
+		pw_deinit();
 	}
 	void paddedRowsAndOffset() {
 		unsigned char bytes[24] = {};
