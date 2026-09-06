@@ -505,7 +505,8 @@ QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSiz
 		&& format != SPA_VIDEO_FORMAT_RGBx)
 		return {};
 	const spa_data &data = buffer->datas[0];
-	if (!data.data || !data.maxsize || !data.chunk || (data.chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
+	if (!data.data || !data.maxsize || !data.chunk
+		|| (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED))
 		return {};
 	const auto rowBytes = static_cast< std::uint64_t >(size.width()) * 4;
 	const auto stride   = data.chunk->stride;
@@ -515,20 +516,21 @@ QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSiz
 	// pixel, not padding after the final row, before touching producer-owned memory.
 	const auto offset    = data.chunk->offset % data.maxsize;
 	const auto available = std::min(data.chunk->size, data.maxsize);
-	const auto needed    = static_cast< std::uint64_t >(stride) * (size.height() - 1) + rowBytes;
+	const auto needed =
+		static_cast< std::uint64_t >(stride) * static_cast< std::uint64_t >(size.height() - 1) + rowBytes;
 	if (needed > available || needed > data.maxsize - offset)
 		return {};
 	QImage frame(size, QImage::Format_ARGB32);
 	if (frame.isNull())
 		return {};
-	if (data.chunk->flags & SPA_CHUNK_FLAG_EMPTY) {
+	if (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_EMPTY) {
 		frame.fill(Qt::black);
 		return frame;
 	}
 	const auto *base = static_cast< const std::uint8_t * >(data.data) + offset;
 	for (int y = 0; y < size.height(); ++y)
-		convertRow(format, base + static_cast< std::size_t >(y) * stride, reinterpret_cast< QRgb * >(frame.scanLine(y)),
-				   size.width());
+		convertRow(format, base + static_cast< std::size_t >(y) * static_cast< std::size_t >(stride),
+				   reinterpret_cast< QRgb * >(frame.scanLine(y)), size.width());
 	return frame;
 }
 
