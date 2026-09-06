@@ -120,6 +120,13 @@ bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > 
 		QDBusConnection::sessionBus().disconnect(QLatin1String(PORTAL_SERVICE), expected.path(),
 												 QLatin1String(REQUEST_IFACE), QStringLiteral("Response"), this, slot);
 
+		// Preserve the D-Bus message (e.g. "Operation not permitted" from xdg-desktop-portal-wlr
+		// on an X11-backed nested compositor) so the UI can say more than "could not ask".
+		m_lastError = reply.error().message();
+		if (m_lastError.isEmpty()) {
+			m_lastError = reply.error().name();
+		}
+
 		return false;
 	}
 
@@ -137,6 +144,7 @@ bool PortalScreenCast::callWithRequest(const QString &method, QList< QVariant > 
 
 bool PortalScreenCast::requestAccess(SourceType sourceType, bool allowCursor) {
 	close();
+	m_lastError.clear();
 	m_token         = newToken();
 	m_phase         = Phase::Creating;
 	m_sessionHandle = QDBusObjectPath(
