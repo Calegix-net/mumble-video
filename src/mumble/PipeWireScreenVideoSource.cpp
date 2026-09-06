@@ -273,7 +273,10 @@ bool PipeWireScreenVideoSource::start() {
 
 	if (!m_portal->requestAccess(m_sourceType, m_captureCursor)) {
 		teardown();
-		emit failed(tr("Could not ask the desktop portal for permission to share the screen."));
+		const QString detail = m_portal->lastError();
+		emit failed(detail.isEmpty()
+					 ? tr("Could not ask the desktop portal for permission to share the screen.")
+					 : tr("Could not ask the desktop portal for permission to share the screen: %1").arg(detail));
 
 		return false;
 	}
