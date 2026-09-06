@@ -14,8 +14,10 @@
 #include "VideoGrid.h"
 #include "VideoSource.h"
 
+#include <QEnterEvent>
 #include <QObject>
 #include <QSignalSpy>
+#include <QToolButton>
 #include <QtGui/QImage>
 #include <QtGui/QPainter>
 #include <QtTest>
@@ -96,6 +98,10 @@ double meanDifference(const QImage &a, const QImage &b) {
 class TestVideoGrid : public QObject {
 	Q_OBJECT
 private slots:
+	void watchingWhileSharingScreen_data();
+	void watchingWhileSharingScreen();
+	void hoveredControlsDoNotHideAndShowAgain();
+	void hidingControlsDoesNotReenterHoverUpdates();
 	void backgroundTilesPaintInArrivalOrder();
 	void lateNetworkTilesCannotOverwriteNewPixels();
 	void resizingPreservesWatchingAndDiscardsOldPixels();
@@ -150,6 +156,136 @@ public:
 	}
 };
 } // namespace
+
+namespace {
+class HoverGrid : public VideoGrid {
+public:
+	void hover(const QPoint &point) {
+		QEnterEvent event(point, point, mapToGlobal(point));
+		QApplication::sendEvent(this, &event);
+	}
+	QWidget *cameraBar() { return m_ownCameraControls->bar; }
+	QWidget *screenBar() { return m_ownScreenControls->bar; }
+	QWidget *remoteBar() { return m_remoteControls.at(surfaceKey(SENDER, STREAM))->bar; }
+	QToolButton *watchButton() { return m_remoteControls.at(surfaceKey(SENDER, STREAM))->watchButton; }
+	QImage ownScreen() const { return m_selfScreenFrame; }
+};
+
+class HoverOnHide : public QObject {
+public:
+	HoverGrid &grid;
+	int hides = 0;
+	explicit HoverOnHide(HoverGrid &owner) : grid(owner) {}
+	bool eventFilter(QObject *, QEvent *event) override {
+		if (event->type() == QEvent::Hide) {
+			++hides;
+			// Qt can send an enter event synchronously while a child under the
+			// pointer is hidden. Bound the fixture so the broken code fails safely.
+			if (hides < 8)
+				grid.hover(QPoint(20, 20));
+		}
+		return false;
+	}
+};
+} // namespace
+
+void TestVideoGrid::watchingWhileSharingScreen_data() {
+	QTest::addColumn< int >("codec");
+	QTest::newRow("tiled-image") << int(MumbleProto::VideoState_Codec_TiledImage);
+	QTest::newRow("vp8") << int(MumbleProto::VideoState_Codec_VP8);
+}
+
+void TestVideoGrid::watchingWhileSharingScreen() {
+	QFETCH(int, codec);
+	HoverGrid grid;
+	grid.resize(800, 600);
+	QImage own(64, 64, QImage::Format_RGB32);
+	own.fill(Qt::red);
+	grid.setSelfScreenFrame(own);
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Display, codec);
+	grid.show();
+	QSignalSpy toggles(&grid, &VideoGrid::watchToggled);
+	TiledImageEncoder tiled;
+	VP8Encoder vp8;
+	QImage incoming(64, 64, QImage::Format_RGB32);
+	incoming.fill(Qt::green);
+
+	for (int round = 0; round < 10; ++round) {
+		grid.hover(grid.remoteBar()->geometry().center());
+		QVERIFY(grid.remoteBar()->isVisible());
+		// Use the actual Watch button while the local screen preview is active.
+		QTest::mouseClick(grid.watchButton(), Qt::LeftButton);
+		QCOMPARE(toggles.count(), round * 2 + 1);
+		QVERIFY(toggles.last().at(2).toBool());
+		if (round == 0)
+			QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+		tiled.reset();
+		const auto units = codec == MumbleProto::VideoState_Codec_VP8
+							   ? vp8.encode(incoming, STREAM, static_cast< std::uint64_t >(round + 1), 1, true)
+							   : tiled.encode(incoming, STREAM, static_cast< std::uint64_t >(round + 1), 1);
+		QVERIFY(!units.empty());
+		for (const auto &unit : units) {
+			grid.onVideoUnitReceived(
+				SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+				QByteArray(reinterpret_cast< const char * >(unit.payload.data()), int(unit.payload.size())));
+		}
+		QTRY_COMPARE(grid.surfaceFor(SENDER, STREAM).size(), incoming.size());
+		QCOMPARE(grid.ownScreen(), own);
+		grid.hover(grid.remoteBar()->geometry().center());
+		HoverOnHide events(grid);
+		grid.remoteBar()->installEventFilter(&events);
+		for (int move = 0; move < 5; ++move)
+			grid.hover(grid.remoteBar()->geometry().center());
+		QCOMPARE(events.hides, 0);
+		grid.remoteBar()->removeEventFilter(&events);
+		grid.hover(grid.screenBar()->geometry().center());
+		QVERIFY(grid.screenBar()->isVisible());
+		QVERIFY(grid.remoteBar()->isHidden());
+		grid.hover(grid.remoteBar()->geometry().center());
+		QTest::mouseClick(grid.watchButton(), Qt::LeftButton);
+		QCOMPARE(toggles.count(), round * 2 + 2);
+		QVERIFY(!toggles.last().at(2).toBool());
+		QCOMPARE(grid.ownScreen(), own);
+	}
+}
+
+void TestVideoGrid::hoveredControlsDoNotHideAndShowAgain() {
+	HoverGrid grid;
+	grid.resize(400, 300);
+	QImage image(32, 32, QImage::Format_RGB32);
+	image.fill(Qt::red);
+	grid.setSelfCameraFrame(image);
+	grid.show();
+	grid.hover(QPoint(20, 20));
+	QWidget *bar = grid.cameraBar();
+	QVERIFY(bar->isVisible());
+	HoverOnHide events(grid);
+	bar->installEventFilter(&events);
+	for (int i = 0; i < 30; ++i)
+		grid.hover(QPoint(20, 20));
+	QCOMPARE(events.hides, 0);
+	QVERIFY(bar->isVisible());
+}
+
+void TestVideoGrid::hidingControlsDoesNotReenterHoverUpdates() {
+	HoverGrid grid;
+	grid.resize(400, 300);
+	QImage image(32, 32, QImage::Format_RGB32);
+	image.fill(Qt::red);
+	grid.setSelfCameraFrame(image);
+	grid.show();
+	grid.hover(QPoint(20, 20));
+	QWidget *bar = grid.cameraBar();
+	HoverOnHide events(grid);
+	bar->installEventFilter(&events);
+	QEvent leave(QEvent::Leave);
+	QApplication::sendEvent(&grid, &leave);
+	QCOMPARE(events.hides, 1);
+	QVERIFY(bar->isHidden());
+	// A subsequent real enter must still show the controls.
+	grid.hover(QPoint(20, 20));
+	QVERIFY(bar->isVisible());
+}
 
 void TestVideoGrid::backgroundTilesPaintInArrivalOrder() {
 	ControlledDecodeGrid grid;

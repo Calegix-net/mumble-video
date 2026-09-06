@@ -21,23 +21,26 @@ code { overflow-wrap: anywhere; } footer { border-top: 1px solid #343e50; paddin
 <main>
 <h1>Mumble Video downloads</h1>
 <p>Voice, video, and screen sharing. Download directly from Calegix.</p>
-<p class="meta">Test builds · September 5, 2026 · x86-64</p>
+<p>Server: <code>calegix.com</code> · port <code>64738</code> · <a href="mumble://calegix.com:64738/">Join server</a></p>
+<p class="meta">Test builds · updated September 6, 2026 · x86-64</p>
 <div class="downloads">
 <article>
 <h2>Windows</h2>
 <p>Portable client with window resizing, idle screen recovery, and shared-audio fixes.</p>
 <p><a class="button" href="2026-09-05/mumble-video-windows-x86_64.zip" download>Download Windows ZIP</a></p>
 <p class="meta">Extract the ZIP and run <code>mumble.exe</code>. Capture tested on Windows 11.</p>
+<p class="meta">Revision 3a839ac20 · <a href="2026-09-05/SHA256SUMS">Checksums</a></p>
 </article>
 <article>
 <h2>Linux</h2>
-<p>Portal and PipeWire capture fixes for cancellation, recovery, and readable frame buffers.</p>
-<p><a class="button" href="2026-09-05/mumble-video-linux-x86_64.zip" download>Download Linux ZIP</a></p>
+<p>Fixes video-control and audio crashes, keeps screen sharing active through updates with no new pixels, and reports capture startup errors more clearly.</p>
+<p><a class="button" href="2026-09-06-b2783a657/mumble-video-linux-x86_64.zip" download>Download Linux ZIP</a></p>
 <p class="meta">Built on Fedora 42; requires glibc 2.41 or newer. Extract and run <code>bundle/mumble</code>. Screen sharing requires a working desktop portal and PipeWire.</p>
+<p class="meta">Revision b2783a657 · <a href="2026-09-06-b2783a657/SHA256SUMS">Checksums</a>. Extract into a new directory; do not copy over an earlier bundle.</p>
 </article>
 </div>
 <p>These are development builds. Linux shared-audio capture is not implemented. Camera and compositor behavior can vary by desktop and device.</p>
-<p><a href="2026-09-05/SHA256SUMS">SHA-256 checksums</a> · <a href="https://github.com/Calegix-net/mumble-video/tree/fix/video-review">Source code</a> · <a href="https://github.com/Calegix-net/mumble-video/blob/fix/video-review/docs/dev/video-linux-fixes-2026-09-05.md">Fixes and test results</a></p>
+<p><a href="https://github.com/Calegix-net/mumble-video/tree/fix/video-review">Source code</a> · <a href="https://github.com/Calegix-net/mumble-video/blob/fix/video-review/docs/dev/video-linux-fixes-2026-09-05.md">Fixes and test results</a></p>
 </main>
 <footer class="meta">Calegix · <a href="https://github.com/Calegix-net/mumble-video">Mumble Video project</a></footer>
 </body>

@@ -49,7 +49,8 @@ REQUIREMENTS
 ------------
 Linux x86_64, glibc 2.41 or newer (built on Fedora 42). The bundle includes Qt 6, its multimedia
 backend, libvpx, protobuf and OpenSSL. Screen capture also requires host PipeWire and a working
-XDG desktop portal with ScreenCast support. See BUILD-INFO.txt for this build's source revision.
+XDG desktop portal with ScreenCast support. PipeWire itself comes from the host so its core
+library, SPA plugins, and modules use matching versions. See BUILD-INFO.txt for the source revision.
 See the download page for the available Windows packages. There is no macOS build.
 
 WHAT IS DIFFERENT FROM UPSTREAM MUMBLE

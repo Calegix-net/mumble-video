@@ -1,5 +1,6 @@
 // Copyright The Mumble Developers. All rights reserved.
 // Use of this source code is governed by a BSD-style license.
+#include "PipeWireLibrary.h"
 #include "PipeWireScreenVideoSource.h"
 #include "PortalScreenCast.h"
 #include <QCoreApplication>
@@ -20,6 +21,11 @@ public:
 	using PipeWireScreenVideoSource::publishFrame;
 	using PipeWireScreenVideoSource::reportPersistentDrop;
 	void begin() { m_running = true; }
+	void consume(const spa_buffer *buffer) {
+		m_size      = QSize(2, 2);
+		m_spaFormat = SPA_VIDEO_FORMAT_BGRA;
+		processBuffer(buffer);
+	}
 	bool published() const { return m_everPublished; }
 	bool deliveryQueued() const { return m_deliveryQueued; }
 	int drops() const { return m_consecutiveDrops; }
@@ -132,6 +138,36 @@ private slots:
 		portal.terminate();
 		QVERIFY(portal.waitForFinished());
 	}
+	void audioAndCaptureShareRuntime() {
+		QLibrary library;
+		QVERIFY(loadPipeWireLibrary(library));
+		QVERIFY(library.resolve("pw_get_library_version")
+				== reinterpret_cast< QFunctionPointer >(&pw_get_library_version));
+		const auto audioNew = reinterpret_cast< decltype(&pw_loop_new) >(library.resolve("pw_loop_new"));
+		const auto audioThreadNew =
+			reinterpret_cast< decltype(&pw_thread_loop_new_full) >(library.resolve("pw_thread_loop_new_full"));
+		const auto audioThreadDestroy =
+			reinterpret_cast< decltype(&pw_thread_loop_destroy) >(library.resolve("pw_thread_loop_destroy"));
+		QVERIFY(audioNew && audioThreadNew && audioThreadDestroy);
+		pw_init(nullptr, nullptr);
+		// Audio wizard restarts audio while screen capture can retain its own loop.
+		auto *capture = pw_thread_loop_new("capture-regression", nullptr);
+		QVERIFY(capture);
+		QCOMPARE(pw_thread_loop_start(capture), 0);
+		for (int i = 0; i < 30; ++i) {
+			auto *loop = audioNew(nullptr);
+			QVERIFY(loop);
+			auto *audio = audioThreadNew(loop, "audio-wizard-regression", nullptr);
+			QVERIFY(audio);
+			QCOMPARE(pw_thread_loop_start(audio), 0);
+			pw_thread_loop_stop(audio);
+			audioThreadDestroy(audio);
+			pw_loop_destroy(loop);
+		}
+		pw_thread_loop_stop(capture);
+		pw_thread_loop_destroy(capture);
+		pw_deinit();
+	}
 	void paddedRowsAndOffset() {
 		unsigned char bytes[24] = {};
 		bytes[4]                = 10;
@@ -203,6 +239,62 @@ private slots:
 		buffer.datas     = &data;
 		const auto frame = SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA);
 		QCOMPARE(frame.pixel(0, 0), qRgb(0, 0, 0));
+	}
+	void metadataOnlyBuffersDoNotStopCapture() {
+		SourceProbe source;
+		source.begin();
+		QSignalSpy errors(&source, &VideoSource::failed);
+		QSignalSpy frames(&source, &VideoSource::frameReady);
+		spa_chunk chunk{};
+		spa_data data{};
+		data.type  = SPA_DATA_MemPtr;
+		data.chunk = &chunk;
+		spa_buffer buffer{};
+		buffer.n_datas = 1;
+		buffer.datas   = &data;
+		for (int i = 0; i < 100; ++i)
+			source.consume(&buffer);
+		QCoreApplication::processEvents();
+		QCOMPARE(errors.count(), 0);
+		QCOMPARE(frames.count(), 0);
+		QCOMPARE(source.drops(), 0);
+		QVERIFY(!source.published());
+		unsigned char bytes[16] = {};
+		data.data               = bytes;
+		data.maxsize            = sizeof(bytes);
+		chunk.size              = sizeof(bytes);
+		chunk.stride            = 8;
+		source.consume(&buffer);
+		QTRY_COMPARE(frames.count(), 1);
+		QVERIFY(source.published());
+		chunk.size = 0;
+		for (int i = 0; i < 100; ++i)
+			source.consume(&buffer);
+		QCoreApplication::processEvents();
+		QCOMPARE(errors.count(), 0);
+		QCOMPARE(frames.count(), 1);
+		QVERIFY(source.isRunning());
+		// Corrupt empty chunks must still be rejected, never treated as idle.
+		chunk.flags = SPA_CHUNK_FLAG_CORRUPTED;
+		for (int i = 0; i < 30; ++i)
+			source.consume(&buffer);
+		QTRY_COMPARE(errors.count(), 1);
+		QVERIFY(!source.isRunning());
+	}
+	void neutralFrameDoesNotRequirePixelStorage() {
+		spa_chunk chunk{};
+		chunk.flags = SPA_CHUNK_FLAG_EMPTY;
+		spa_data data{};
+		data.chunk = &chunk;
+		spa_buffer buffer{};
+		buffer.n_datas   = 1;
+		buffer.datas     = &data;
+		const auto frame = SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA);
+		QCOMPARE(frame.size(), QSize(2, 2));
+		QCOMPARE(frame.pixel(0, 0), qRgb(0, 0, 0));
+		QCOMPARE(frame.pixel(1, 1), qRgb(0, 0, 0));
+		chunk.flags = SPA_CHUNK_FLAG_EMPTY | SPA_CHUNK_FLAG_CORRUPTED;
+		QVERIFY(SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA).isNull());
 	}
 	void restartDiscardsOldFramesAndErrors() {
 		SourceProbe source;

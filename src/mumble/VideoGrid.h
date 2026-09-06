@@ -440,6 +440,9 @@ protected:
 	/// wasted widget churn for something that produces no visible difference most of the time it runs.
 	int m_hoveredSlot = -1;
 
+	/// Child visibility changes can synchronously send enter/leave events back to us.
+	bool m_hoverUpdateInProgress = false;
+
 	/// Set for the duration of a relayout() call, and checked at its own start: several paths reach here
 	/// synchronously from inside another relayout() already in progress - most notably, the video dock
 	/// becoming visible for the first time can synchronously fire this widget's own resizeEvent() before

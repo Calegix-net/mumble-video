@@ -35,7 +35,9 @@ All 33 native CTest suites passed (57.16 seconds), including the real TLS/UDP
 server integration suite and 11 QtTest entries in the Linux capture suite.
 See [native test results](video-review-evidence/linux-ctest.txt).
 After the final heartbeat timeout change, the Linux capture, broadcaster, and
-pipeline suites passed again (5.30 seconds). Release build validation follows.
+pipeline suites passed again (5.30 seconds). The Fedora 42 Release build also passed all 33 suites (43.93 seconds). After
+compiler-warning cleanup, the affected release suites passed again (3.11 seconds).
+Both the Linux and Windows client builds completed successfully.
 The host GNOME portal advertises source and cursor mask 7. The automated portal
 fixture validates the protocol; it is not a live compositor capture test.
 Linux screen-share audio capture is not implemented. Physical cameras and a full
@@ -43,14 +45,54 @@ matrix of Wayland compositors still require device testing.
 
 ## Downloads
 
+### Audio wizard crash follow-up
+
+A host crash dump identified two different PipeWire core libraries in one process:
+the bundle's `libpipewire-0.3.so.0` and the host's `libpipewire-0.3.so`, alongside
+host SPA plugins. The crash occurred in thread-loop teardown while restarting audio.
+The bundle now leaves PipeWire to the host, and the audio loader prefers the runtime
+SONAME already linked by capture. This keeps the core, SPA plugins, and modules aligned.
+
+The regression test checks that audio's dynamically resolved entry point matches
+capture's linked entry point, then restarts 30 audio loops while a capture loop runs.
+All 12 Linux capture QtTest entries pass on the native host. The Fedora 42 Release
+client rebuilt successfully, and capture, broadcaster, and pipeline suites passed
+(3.09 seconds). A corrected bundle launched on the host with only one PipeWire core
+mapped; subsequent audio restarts did not reproduce the earlier context errors.
+This confirms the diagnosed Linux crash fix; it does not establish the cause of an
+unidentified Windows crash or every reported disconnect.
+
 The [download page](https://calegix.com/dl/mumble/) hosts Windows and Linux ZIPs
 under dated paths with SHA-256 checksums. Linux requires x86-64 and glibc 2.41+.
 `dev/downloads/index.html` is the source of this static page. Existing historical
 artifacts remain at their existing paths.
 
 The site serves files through its existing `mumble-dl` nginx container and
-`/dl/mumble/` Traefik route. No production Mumble server deployment is part of this
-publication.
+`/dl/mumble/` Traefik route. Both public ZIP URLs passed HTTP 206 byte-range
+checks, matching local bytes and file lengths. The public page and checksum file
+match the staged versions.
+
+The packaged Linux client also started on the host Wayland desktop with an
+isolated, muted profile. This confirms startup and runtime loading, not live
+compositor capture.
+
+## Production server
+
+At the user's request, the production `mumble-fork-server` on calegix.com was
+upgraded to `localhost/mumble-video-server:3a839ac20`. Its binary SHA-256 is
+`885c38c74a9d7a8320e88160829920fb9227600422ea7e61a1594241320f9ce8`, matching
+the tested Fedora 42 build. A temporary loopback server passed the TLS/Version
+probe before the production replacement. The public server then passed the same
+probe on TCP 64738 and retained its existing certificate. The public UDP 64738
+endpoint also returned a valid nonce-matched status response (version 1.7.0).
+Host networking and
+`unless-stopped` restart policy are preserved.
+
+The stopped previous container is `mumble-fork-server-before-3a839ac20`.
+A consistent data backup was taken after stopping the old server at
+`/home/natej/mumble-fork/server-data-before-3a839ac20`. The active data directory
+remains `/home/natej/mumble-fork/server-data`. The temporary preflight server was
+removed after verification. No live multi-person call was used as an upgrade check.
 
 ## API references
 

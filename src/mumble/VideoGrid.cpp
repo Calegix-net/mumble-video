@@ -10,6 +10,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
 #include <QtCore/QFutureWatcher>
+#include <QtCore/QScopedValueRollback>
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
@@ -1021,78 +1022,55 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 }
 
 void VideoGrid::updateHoveredBar() {
-	// Hidden first, unconditionally - simpler than trying to track "which bar was visible last time" and
-	// only touch the ones that changed, and this runs at most once per relayout(), not once per frame.
-	if (m_ownCameraControls) {
-		m_ownCameraControls->bar->setVisible(false);
-	}
-
-	if (m_ownScreenControls) {
-		m_ownScreenControls->bar->setVisible(false);
-	}
-
-	for (auto &entry : m_remoteControls) {
-		entry.second->bar->setVisible(false);
-	}
-
-	if (!m_mouseInside) {
-		m_hoveredSlot = -1;
+	// Hiding a child under the cursor can synchronously deliver another enter
+	// event to this grid. Never let that event re-enter a visibility transition.
+	if (m_hoverUpdateInProgress) {
 		return;
 	}
+	QScopedValueRollback< bool > updating(m_hoverUpdateInProgress, true);
 
-	const Layout layout = currentLayout();
-	const int slot      = slotAt(m_lastMousePos, layout);
-
-	m_hoveredSlot = slot;
-
-	if (slot < 0) {
-		return;
-	}
-
-	// Same walk order as paintEvent(), mouseDoubleClickEvent() and relayoutControls() - see the latter's
-	// comment on why m_surfaces being a std::map is what makes this order something worth relying on.
-	int index = 0;
-
+	const int slot      = m_mouseInside ? slotAt(m_lastMousePos, currentLayout()) : -1;
+	m_hoveredSlot       = slot;
+	QWidget *hoveredBar = nullptr;
+	int index           = 0;
 	if (!m_selfCameraFrame.isNull()) {
-		if (index == slot) {
-			if (m_ownCameraControls) {
-				m_ownCameraControls->bar->setVisible(true);
-			}
-
-			return;
+		if (index++ == slot && m_ownCameraControls) {
+			hoveredBar = m_ownCameraControls->bar;
 		}
-
-		++index;
 	}
-
 	if (!m_selfScreenFrame.isNull()) {
-		if (index == slot) {
-			if (m_ownScreenControls) {
-				m_ownScreenControls->bar->setVisible(true);
-			}
-
-			return;
+		if (index++ == slot && m_ownScreenControls) {
+			hoveredBar = m_ownScreenControls->bar;
 		}
-
-		++index;
 	}
-
-	for (auto &entry : m_surfaces) {
+	for (const auto &entry : m_surfaces) {
 		if (entry.second.watching && entry.second.canvas.isNull()) {
 			continue;
 		}
-
-		if (index == slot) {
+		if (index++ == slot) {
 			const auto it = m_remoteControls.find(entry.first);
-
 			if (it != m_remoteControls.end()) {
-				it->second->bar->setVisible(true);
+				hoveredBar = it->second->bar;
 			}
-
-			return;
+			break;
 		}
+	}
 
-		++index;
+	// Keep the selected bar visible throughout. Hiding all bars before showing
+	// it again generates synthetic enter/leave events even on an unchanged tile.
+	const auto setVisibility = [hoveredBar](const std::unique_ptr< TileControlBar > &controls) {
+		if (controls) {
+			QWidget *bar       = controls->bar;
+			const bool visible = bar == hoveredBar;
+			if (bar->isHidden() == visible) {
+				bar->setVisible(visible);
+			}
+		}
+	};
+	setVisibility(m_ownCameraControls);
+	setVisibility(m_ownScreenControls);
+	for (const auto &entry : m_remoteControls) {
+		setVisibility(entry.second);
 	}
 }
 

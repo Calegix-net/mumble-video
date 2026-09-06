@@ -52,6 +52,9 @@ copy_deps() {
                 # from the host at runtime, not from here.
                 ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*) continue ;;
                 libGLX*|libGL.so*|libEGL.so*|libGLdispatch*|libdrm*|libgbm*) continue ;;
+                # PipeWire loads SPA/modules from the host. Bundling only its core library mixes
+                # runtime versions and can crash when the audio wizard restarts an engine.
+                libpipewire*.so*) continue ;;
             esac
 
             cp -L "${lib}" "${OUT_DIR}/lib/" 2>/dev/null && added=1

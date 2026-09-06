@@ -20,6 +20,8 @@
 class TestVideoBroadcaster : public QObject {
 	Q_OBJECT
 private slots:
+	void repeatedViewerRequestsKeepSenderRunning_data();
+	void repeatedViewerRequestsKeepSenderRunning();
 	void startingAndStoppingReportsItself();
 	void framesBecomeUnits();
 	void anUnchangedPictureSendsNothing();
@@ -35,6 +37,46 @@ private slots:
 	void vp8SendsOneWholeFrameUnit();
 	void theCodecCanBeSwitched();
 };
+
+void TestVideoBroadcaster::repeatedViewerRequestsKeepSenderRunning_data() {
+	QTest::addColumn< int >("codec");
+	QTest::newRow("vp8") << 0;
+	QTest::newRow("tiled-image") << 1;
+}
+
+void TestVideoBroadcaster::repeatedViewerRequestsKeepSenderRunning() {
+	QFETCH(int, codec);
+	VideoBroadcaster broadcaster;
+	broadcaster.setCodec(codec);
+	auto owned   = std::make_unique< SyntheticVideoSource >(320, 240);
+	auto *source = owned.get();
+	source->setChangeRatio(0);
+	QVERIFY(broadcaster.start(std::move(owned)));
+	source->pump(1);
+	QSignalSpy units(&broadcaster, &VideoBroadcaster::unitReady);
+	QSignalSpy preview(&broadcaster, &VideoBroadcaster::previewFrame);
+	std::uint64_t previousFrame = 0;
+	for (int viewer = 0; viewer < 20; ++viewer) {
+		units.clear();
+		preview.clear();
+		// Reveal is relayed to the sender as requestKeyframe(). Exercise the
+		// cached-frame path, including the preview signal delivered to its grid.
+		source->captureIdle(static_cast< std::uint64_t >(viewer + 1));
+		broadcaster.requestKeyframe();
+		QVERIFY(broadcaster.isActive());
+		QCOMPARE(preview.count(), 1);
+		QVERIFY(!units.isEmpty());
+		const auto frame = units.first().at(0).value< Mumble::Protocol::VideoUnitHeader >().frameNumber;
+		QVERIFY(frame > previousFrame);
+		for (const auto &entry : units) {
+			const auto header = entry.at(0).value< Mumble::Protocol::VideoUnitHeader >();
+			QVERIFY(header.isKeyframe);
+			QCOMPARE(header.frameNumber, frame);
+			QVERIFY(!entry.at(1).toByteArray().isEmpty());
+		}
+		previousFrame = frame;
+	}
+}
 
 void TestVideoBroadcaster::startingAndStoppingReportsItself() {
 	VideoBroadcaster broadcaster;

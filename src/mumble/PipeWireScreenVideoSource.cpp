@@ -5,6 +5,7 @@
 
 #include "PipeWireScreenVideoSource.h"
 
+#include <QtCore/QDebug>
 #include <QtCore/QMutexLocker>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
@@ -19,6 +20,7 @@
 #include <spa/param/video/format-utils.h>
 #include <spa/utils/result.h>
 
+#include <cerrno>
 #include <cstring>
 
 namespace {
@@ -151,8 +153,12 @@ bool PipeWireScreenVideoSource::start() {
 		m_loop = pw_thread_loop_new("mumble-screencast", nullptr);
 
 		if (!m_loop) {
+			const int error      = errno;
+			const QString detail = QString::fromLocal8Bit(spa_strerror(error ? -error : -EIO));
+			qWarning("Screen capture: pw_thread_loop_new failed: %s (%d), PipeWire %s", qPrintable(detail), error,
+					 pw_get_library_version());
 			teardown();
-			emit failed(tr("Could not start the screen capture thread."));
+			emit failed(tr("Could not create the screen capture loop: %1").arg(detail));
 
 			return;
 		}
@@ -256,9 +262,13 @@ bool PipeWireScreenVideoSource::start() {
 			return;
 		}
 
-		if (pw_thread_loop_start(m_loop) < 0) {
+		const int started = pw_thread_loop_start(m_loop);
+		if (started < 0) {
+			const QString detail = QString::fromLocal8Bit(spa_strerror(started));
+			qWarning("Screen capture: pw_thread_loop_start failed: %s (%d), PipeWire %s", qPrintable(detail), started,
+					 pw_get_library_version());
 			teardown();
-			emit failed(tr("Could not start the screen capture thread."));
+			emit failed(tr("Could not start the screen capture thread: %1").arg(detail));
 
 			return;
 		}
@@ -487,9 +497,31 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 		return;
 	}
 
-	QImage frame = imageFromBuffer(buffer->buffer, m_size, m_spaFormat);
+	processBuffer(buffer->buffer);
 	pw_stream_queue_buffer(m_stream, buffer);
+}
+
+void PipeWireScreenVideoSource::processBuffer(const spa_buffer *buffer) {
+	if (!m_running || !m_size.isValid() || m_spaFormat == 0)
+		return;
+	const spa_data *data   = buffer && buffer->n_datas && buffer->datas ? &buffer->datas[0] : nullptr;
+	const spa_chunk *chunk = data ? data->chunk : nullptr;
+	// Cursor/metadata-only updates contain no new pixels. They do not imply a
+	// broken format. Leave the image and first-frame watchdog unchanged.
+	if (chunk && chunk->size == 0
+		&& !(static_cast< std::uint32_t >(chunk->flags) & (SPA_CHUNK_FLAG_EMPTY | SPA_CHUNK_FLAG_CORRUPTED)))
+		return;
+	QImage frame = imageFromBuffer(buffer, m_size, m_spaFormat);
 	if (frame.isNull()) {
+		if (m_consecutiveDrops == 0 || m_consecutiveDrops == CONSECUTIVE_DROPS_BEFORE_FAILURE - 1) {
+			qWarning().nospace() << "Screen capture: unreadable buffer; format=" << m_spaFormat
+								 << " dimensions=" << m_size << " planes=" << (buffer ? buffer->n_datas : 0)
+								 << " type=" << (data ? data->type : 0) << " mapped=" << bool(data && data->data)
+								 << " maxsize=" << (data ? data->maxsize : 0) << " size=" << (chunk ? chunk->size : 0)
+								 << " offset=" << (chunk ? chunk->offset : 0)
+								 << " stride=" << (chunk ? chunk->stride : 0)
+								 << " flags=" << (chunk ? chunk->flags : 0);
+		}
 		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
 		return;
 	}
@@ -505,8 +537,16 @@ QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSiz
 		&& format != SPA_VIDEO_FORMAT_RGBx)
 		return {};
 	const spa_data &data = buffer->datas[0];
-	if (!data.data || !data.maxsize || !data.chunk
-		|| (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED))
+	if (!data.chunk || (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_CORRUPTED))
+		return {};
+	// EMPTY is an explicit neutral (black) frame and need not carry pixel storage.
+	if (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_EMPTY) {
+		QImage frame(size, QImage::Format_ARGB32);
+		if (!frame.isNull())
+			frame.fill(Qt::black);
+		return frame;
+	}
+	if (!data.data || !data.maxsize)
 		return {};
 	const auto rowBytes = static_cast< std::uint64_t >(size.width()) * 4;
 	const auto stride   = data.chunk->stride;
@@ -523,10 +563,6 @@ QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSiz
 	QImage frame(size, QImage::Format_ARGB32);
 	if (frame.isNull())
 		return {};
-	if (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_EMPTY) {
-		frame.fill(Qt::black);
-		return frame;
-	}
 	const auto *base = static_cast< const std::uint8_t * >(data.data) + offset;
 	for (int y = 0; y < size.height(); ++y)
 		convertRow(format, base + static_cast< std::size_t >(y) * static_cast< std::size_t >(stride),

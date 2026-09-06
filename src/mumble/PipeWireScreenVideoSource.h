@@ -84,6 +84,9 @@ public:
 	void onStreamStateChanged(int state, const char *error);
 
 protected:
+	/// Consumes a borrowed PipeWire buffer without treating metadata-only updates as failed frames.
+	void processBuffer(const spa_buffer *buffer);
+
 	/// Hands a converted frame to the Qt side. Called on the PipeWire thread.
 	void publishFrame(const QImage &frame, std::uint64_t captureTimestampUsec);
 
