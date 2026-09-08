@@ -37,11 +37,13 @@ To drive a remote QA host instead, add it to `[qa]` in `inventory.ini` with
 |---|---|
 | `src/`, `build/` | source checkout and the built `mumble-server` |
 | `server-data/` | server ini, sqlite db, log |
+| `run/run-server.sh`, `run/stop-server.sh` | loopback server lifecycle (supervised, no systemd) |
 | `run/launch-clients.sh`, `run/stop-clients.sh` | client lifecycle |
 | `run/logs/` | one stderr log per client, plus Xvfb logs |
 | `run/configs/qa-mvN/` | per-client config dir (one instance each) |
 
-The server runs as the user systemd service `mumble-qa-server`. Clients launch
+The server runs as a supervised background process (`run/run-server.sh`, no
+systemd required - works under tini/containers too). Clients launch
 with `MUMBLE_MOCK_CAMERA=1` and `MUMBLE_MOCK_SCREEN=1` so they stream without a
 camera or a desktop portal. Stopping is scoped to `config/qa-mv*`, so a real
 user's own Mumble client on the same host is left alone.
@@ -49,6 +51,4 @@ user's own Mumble client on the same host is left alone.
 ## Requirements
 
 - Ansible on the controller; `sudo` on the target for the package-install tasks.
-- A user systemd instance (`loginctl enable-linger $USER` if the QA user is not
-  logged in interactively).
 - The client bundle installed for the user, or pass `qa_flatpak_bundle`.

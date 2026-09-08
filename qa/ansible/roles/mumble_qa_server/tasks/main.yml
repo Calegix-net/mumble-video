@@ -93,25 +93,22 @@
     mode: "0644"
   register: qa_ini
 
-- name: Install the user systemd unit
+- name: Install the server run/stop scripts
   ansible.builtin.template:
-    src: mumble-qa-server.service.j2
-    dest: "{{ ansible_env.HOME }}/.config/systemd/user/mumble-qa-server.service"
-    mode: "0644"
-  register: qa_unit
+    src: "{{ item.src }}"
+    dest: "{{ qa_run_dir }}/{{ item.dest }}"
+    mode: "0755"
+  loop:
+    - { src: "run-server.sh.j2", dest: "run-server.sh" }
+    - { src: "stop-server.sh.j2", dest: "stop-server.sh" }
 
-- name: Reload the user systemd daemon
-  ansible.builtin.systemd:
-    scope: user
-    daemon_reload: true
-  when: qa_unit.changed
-
-- name: Ensure the loopback server is running (restart on rebuild/config change)
-  ansible.builtin.systemd:
-    scope: user
-    name: mumble-qa-server.service
-    enabled: true
-    state: "{{ 'restarted' if (qa_build.changed or qa_ini.changed or qa_unit.changed) else 'started' }}"
+# No systemd dependency: the cursorvm agents box runs under tini (PID 1), and a
+# user systemd instance is not guaranteed. A setsid'd process with a pidfile runs
+# anywhere. run-server.sh stops any prior instance first, so this is idempotent.
+- name: (Re)start the loopback server
+  ansible.builtin.command:
+    cmd: "{{ qa_run_dir }}/run-server.sh"
+  changed_when: true
 
 - name: Wait for the server to listen
   ansible.builtin.wait_for:

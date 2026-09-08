@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Managed by Ansible (qa/ansible). Stop the loopback QA server and its supervisor.
+set -u
+RUN_DIR="{{ qa_run_dir }}"
+PIDFILE="${RUN_DIR}/mumble-qa-server.pid"
+if [ -f "${PIDFILE}" ]; then
+  kill -- -"$(cat "${PIDFILE}")" 2>/dev/null || kill "$(cat "${PIDFILE}")" 2>/dev/null || true
+  rm -f "${PIDFILE}"
+fi
+# Belt and braces: the server binary itself, matched by its ini path.
+pkill -f "mumble-server .*{{ qa_data_dir }}/mumble-server.ini" 2>/dev/null || true
+echo "stopped QA server"
