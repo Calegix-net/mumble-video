@@ -1,0 +1,9 @@
+# Managed by Ansible (qa/ansible). Loopback QA server for {{ mumble_video_ref }}.
+database={{ qa_data_dir }}/murmur.sqlite
+logfile={{ qa_data_dir }}/mumble-server.log
+host={{ qa_server_host }}
+port={{ qa_server_port }}
+users=100
+welcometext=<b>mumble-video QA</b> loopback server ({{ mumble_video_ref }})
+# No password: this listens on loopback only.
+allowping=true

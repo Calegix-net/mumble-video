@@ -1,0 +1,29 @@
+---
+# Which build of mumble-video to test.
+mumble_video_repo: "https://github.com/Calegix-net/mumble-video.git"
+mumble_video_ref: "fix/movie-night"
+
+# Where everything lives on the target host.
+qa_base_dir: "{{ ansible_env.HOME }}/mumble-qa"
+qa_src_dir: "{{ qa_base_dir }}/src"
+qa_build_dir: "{{ qa_base_dir }}/build"
+qa_data_dir: "{{ qa_base_dir }}/server-data"
+qa_run_dir: "{{ qa_base_dir }}/run"
+
+# Loopback server: video relays over lo, so a host that blocks large UDP to the
+# internet (the cursorvm agents box) can still carry real video between clients.
+qa_server_host: "127.0.0.1"
+qa_server_port: 64738
+
+# Clients.
+qa_client_count: 4
+qa_flatpak_id: "com.calegix.MumbleVideo"
+# Optional: a .flatpak bundle to (re)install before launching. Leave empty to use
+# whatever is already installed for the user.
+qa_flatpak_bundle: ""
+# X server per client, starting here (:NN). Xvfb is used when no real display exists.
+qa_display_base: 40
+qa_client_env:
+  MUMBLE_MOCK_CAMERA: "1"
+  MUMBLE_MOCK_SCREEN: "1"
+  MUMBLE_MOCK_SCREEN_SIZE: "1920x1080"

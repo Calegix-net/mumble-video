@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Managed by Ansible (qa/ansible). Launch {{ qa_client_count }} headless mock clients
+# against the loopback QA server. Each gets its own Xvfb display and config dir, and
+# exactly one Mumble instance. Re-running launch is safe: stop-clients.sh runs first.
+set -u
+RUN_DIR="{{ qa_run_dir }}"
+LOG_DIR="${RUN_DIR}/logs"
+CFG_DIR="${RUN_DIR}/configs"
+mkdir -p "${LOG_DIR}" "${CFG_DIR}"
+
+export {% for k, v in qa_client_env.items() %}{{ k }}="{{ v }}" {% endfor %}
+
+for i in $(seq 1 {{ qa_client_count }}); do
+  name="qa-mv${i}"
+  disp=":$(( {{ qa_display_base }} + i ))"
+  cfg="${CFG_DIR}/${name}"
+  mkdir -p "${cfg}"
+
+  # One Xvfb per client display, if nothing is already there.
+  if ! xdpyinfo -display "${disp}" >/dev/null 2>&1; then
+    Xvfb "${disp}" -screen 0 1920x1080x24 -nolisten tcp >"${LOG_DIR}/xvfb-${name}.log" 2>&1 &
+    sleep 1
+  fi
+
+  # The wlroots/xcb recipe that produced working shares on the battle box, minus any
+  # real portal - screen content comes from MUMBLE_MOCK_SCREEN.
+  env -u WAYLAND_DISPLAY DISPLAY="${disp}" \
+      QT_QPA_PLATFORM=xcb XDG_CURRENT_DESKTOP=wlroots XDG_SESSION_TYPE=x11 \
+      XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+      setsid flatpak run --user "{{ qa_flatpak_id }}" \
+        -c "${cfg}/mumble_settings.json" \
+        "mumble://${name}@{{ qa_server_host }}:{{ qa_server_port }}/" \
+        >"${LOG_DIR}/${name}.log" 2>&1 < /dev/null &
+  echo "launched ${name} on ${disp} -> mumble://${name}@{{ qa_server_host }}:{{ qa_server_port }}/"
+  sleep 2
+done

@@ -1,0 +1,120 @@
+---
+- name: Install build dependencies (Debian/Ubuntu)
+  become: true
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - cmake
+      - pkg-config
+      - git
+      - qt6-base-dev
+      - qt6-tools-dev
+      - libssl-dev
+      - libprotobuf-dev
+      - protobuf-compiler
+      - libcap-dev
+      - libvpx-dev
+      - libboost-dev
+      - libmariadb-dev
+      - libpq-dev
+      - libsqlite3-dev
+      - libavahi-compat-libdnssd-dev
+      - libpoco-dev
+      - nlohmann-json3-dev
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install build dependencies (Fedora/RHEL)
+  become: true
+  ansible.builtin.dnf:
+    name:
+      - gcc-c++
+      - make
+      - cmake
+      - pkgconf
+      - git
+      - qt6-qtbase-devel
+      - qt6-qttools-devel
+      - openssl-devel
+      - protobuf-devel
+      - protobuf-compiler
+      - libcap-devel
+      - libvpx-devel
+      - boost-devel
+      - mariadb-connector-c-devel
+      - libpq-devel
+      - sqlite-devel
+      - avahi-compat-libdns_sd-devel
+      - poco-devel
+      - nlohmann-json-devel
+    state: present
+    install_weak_deps: false
+  when: ansible_os_family == "RedHat"
+
+- name: Create QA directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ qa_base_dir }}"
+    - "{{ qa_data_dir }}"
+    - "{{ qa_run_dir }}"
+
+- name: Clone/update the source at the requested ref
+  ansible.builtin.git:
+    repo: "{{ mumble_video_repo }}"
+    dest: "{{ qa_src_dir }}"
+    version: "{{ mumble_video_ref }}"
+    recursive: true
+    force: true
+  register: qa_checkout
+
+- name: Configure the server build
+  ansible.builtin.command:
+    cmd: >-
+      cmake -S {{ qa_src_dir }} -B {{ qa_build_dir }}
+      -DCMAKE_BUILD_TYPE=Release
+      -Dclient=OFF -Dserver=ON -Dice=OFF -Dgrpc=OFF -Dtests=OFF
+      -Doverlay=OFF -Dplugins=OFF -Dwarnings-as-errors=OFF
+    creates: "{{ qa_build_dir }}/CMakeCache.txt"
+
+- name: Build mumble-server
+  ansible.builtin.command:
+    cmd: "cmake --build {{ qa_build_dir }} -j{{ ansible_processor_vcpus | default(4) }} --target mumble-server"
+  register: qa_build
+  changed_when: "'Built target mumble-server' in qa_build.stdout or qa_checkout.changed"
+
+- name: Install the server config
+  ansible.builtin.template:
+    src: mumble-server.ini.j2
+    dest: "{{ qa_data_dir }}/mumble-server.ini"
+    mode: "0644"
+  register: qa_ini
+
+- name: Install the user systemd unit
+  ansible.builtin.template:
+    src: mumble-qa-server.service.j2
+    dest: "{{ ansible_env.HOME }}/.config/systemd/user/mumble-qa-server.service"
+    mode: "0644"
+  register: qa_unit
+
+- name: Reload the user systemd daemon
+  ansible.builtin.systemd:
+    scope: user
+    daemon_reload: true
+  when: qa_unit.changed
+
+- name: Ensure the loopback server is running (restart on rebuild/config change)
+  ansible.builtin.systemd:
+    scope: user
+    name: mumble-qa-server.service
+    enabled: true
+    state: "{{ 'restarted' if (qa_build.changed or qa_ini.changed or qa_unit.changed) else 'started' }}"
+
+- name: Wait for the server to listen
+  ansible.builtin.wait_for:
+    host: "{{ qa_server_host }}"
+    port: "{{ qa_server_port }}"
+    timeout: 30
