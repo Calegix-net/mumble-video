@@ -2588,22 +2588,30 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	MSG_SETUP(ServerUser::Authenticated);
 
-	// Only a start is metered. RATELIMIT drops what exceeds the bucket silently, and an end-of-stream
-	// dropped that way is not merely delayed but lost: the stream stays announced here, keeps being
-	// replayed to everyone who joins or moves in, and keeps its tile on every client until the sender
-	// happens to restart it - the classic "someone's dead screen share that will not go away". Ending a
-	// stream frees state rather than allocating it, and the relay below is bounded to streams that were
-	// actually announced, so letting it through unmetered is not an amplification.
-	if (msg.active()) {
-		RATELIMIT(uSource);
-	}
-
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
 
 	const auto streamKey =
 		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
+
+	// Metering is deliberately narrow: only a *redundant* re-announcement of a stream this sender already
+	// has announced as active. An end-of-stream is never metered - dropping one leaves the stream
+	// announced forever, replayed to every later joiner, the classic "dead share that will not go away".
+	// A genuine start - a stream_id not currently announced - is never metered either, and that is the fix
+	// for the symmetric failure: RATELIMIT drops silently, so a start dropped that way leaves a live share
+	// invisible to everyone. It surfaced as a camera or screen toggled off and back on faster than the
+	// message bucket refills (each toggle-on is a fresh stream_id) simply never reappearing for any viewer.
+	// Both directions of a real state change must get through; abuse is bounded elsewhere - a sender may
+	// hold at most MAX_STREAMS_PER_SENDER distinct live streams (announceStream caps it), and re-announcing
+	// one it already holds is exactly what this meters.
+	const bool alreadyAnnounced = m_videoAnnouncements.find(streamKey) != m_videoAnnouncements.end();
+
+	if (msg.active() && alreadyAnnounced) {
+		if (uSource->leakyBucket.ratelimit(1)) {
+			return;
+		}
+	}
 
 	if (!msg.active() && m_videoAnnouncements.find(streamKey) == m_videoAnnouncements.end()) {
 		// Ending a stream nobody was ever told about: nothing to relay, and - being the one message a
