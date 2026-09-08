@@ -52,3 +52,20 @@ user's own Mumble client on the same host is left alone.
 
 - Ansible on the controller; `sudo` on the target for the package-install tasks.
 - The client bundle installed for the user, or pass `qa_flatpak_bundle`.
+
+## Known test-environment limits
+
+- **Channel-visibility (server-side) needs a sub-channel.** A fresh server has only
+  Root, so the "move between channels" half of the visibility fix can't be exercised
+  until a sub-channel exists. Create one from a connected client (right-click Root ->
+  Add), or seed one before first use. The mid-share-join half works on Root alone.
+- **True fullscreen needs a compositor.** Under bare Xvfb there is no window manager,
+  so a client can't actually go fullscreen; the fullscreen-CPU lane still yields useful
+  per-client CPU numbers but not a real fullscreen window. Run the clients under a
+  nested compositor (sway/cage) if you need to exercise the fullscreen path itself.
+- **Client auto-seeding is partial.** Launching a Mumble client fully unattended needs
+  a pre-existing `mumble_settings.json` carrying a base64 PKCS12 certificate, the
+  trusted server-cert digest for the loopback server, and the wizard-suppression flags
+  - otherwise the cert/consent wizards block a headless start. The playbook creates the
+  per-client config dir and passes `-m --filesystem=<qa_base_dir>`; seeding the settings
+  file itself is the remaining turnkey step (tracked in loopback-qa notes).

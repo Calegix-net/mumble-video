@@ -20,6 +20,19 @@
     cmd: flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
   changed_when: false
 
+- name: Clear a stale/empty flatpak deploy stub before (re)install
+  # flatpak install --bundle --reinstall while another instance is running can
+  # leave an empty ~/.local/share/flatpak/app/<id> directory that then fails the
+  # next install with "Directory not empty". Removing it when it holds no active
+  # deploy is safe.
+  ansible.builtin.shell: >-
+    set -e;
+    d="{{ ansible_env.HOME }}/.local/share/flatpak/app/{{ qa_flatpak_id }}";
+    if [ -d "$d" ] && ! flatpak info --user {{ qa_flatpak_id }} >/dev/null 2>&1; then rm -rf "$d"; echo removed; else echo kept; fi
+  register: qa_stub_clean
+  changed_when: "'removed' in qa_stub_clean.stdout"
+  when: qa_flatpak_bundle | length > 0
+
 - name: Install/refresh the client bundle when one is provided
   ansible.builtin.command:
     cmd: "flatpak install --user --bundle --reinstall --noninteractive -y {{ qa_flatpak_bundle }}"

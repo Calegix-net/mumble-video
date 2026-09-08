@@ -27,7 +27,7 @@ for i in $(seq 1 {{ qa_client_count }}); do
   env -u WAYLAND_DISPLAY DISPLAY="${disp}" \
       QT_QPA_PLATFORM=xcb XDG_CURRENT_DESKTOP=wlroots XDG_SESSION_TYPE=x11 \
       XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
-      setsid flatpak run --user "{{ qa_flatpak_id }}" \
+      setsid flatpak run --user -m --filesystem="{{ qa_base_dir }}" "{{ qa_flatpak_id }}" \
         -c "${cfg}/mumble_settings.json" \
         "mumble://${name}@{{ qa_server_host }}:{{ qa_server_port }}/" \
         >"${LOG_DIR}/${name}.log" 2>&1 < /dev/null &
