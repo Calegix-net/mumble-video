@@ -387,6 +387,8 @@ void Server::readParams() {
 	iMessageBurst                      = Meta::mp->iMessageBurst;
 	iPluginMessageLimit                = Meta::mp->iPluginMessageLimit;
 	iPluginMessageBurst                = Meta::mp->iPluginMessageBurst;
+	iVideoMessageLimit                 = Meta::mp->iVideoMessageLimit;
+	iVideoMessageBurst                 = Meta::mp->iVideoMessageBurst;
 	broadcastListenerVolumeAdjustments = Meta::mp->broadcastListenerVolumeAdjustments;
 	m_suggestVersion                   = Meta::mp->m_suggestVersion;
 	m_suggestPositional                = Meta::mp->suggestPositional;
@@ -507,6 +509,14 @@ void Server::readParams() {
 	m_dbWrapper.getConfigurationTo(iServerNum, "pluginmessageburst", iPluginMessageBurst);
 	if (iPluginMessageBurst < 1) { // Prevent disabling messages entirely
 		iPluginMessageBurst = 1;
+	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videomessagelimit", iVideoMessageLimit);
+	if (iVideoMessageLimit < 1) { // Prevent disabling video control entirely
+		iVideoMessageLimit = 1;
+	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videomessageburst", iVideoMessageBurst);
+	if (iVideoMessageBurst < 1) { // Prevent disabling video control entirely
+		iVideoMessageBurst = 1;
 	}
 	m_dbWrapper.getConfigurationTo(iServerNum, "broadcastlistenervolumeadjustments",
 								   broadcastListenerVolumeAdjustments);

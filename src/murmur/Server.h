@@ -156,6 +156,8 @@ public:
 
 	unsigned int iPluginMessageLimit;
 	unsigned int iPluginMessageBurst;
+	unsigned int iVideoMessageLimit;
+	unsigned int iVideoMessageBurst;
 
 	bool broadcastListenerVolumeAdjustments;
 

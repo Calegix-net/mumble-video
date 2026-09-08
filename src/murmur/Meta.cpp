@@ -115,6 +115,8 @@ MetaParams::MetaParams() {
 
 	iPluginMessageLimit = 4;
 	iPluginMessageBurst = 15;
+	iVideoMessageLimit  = 20;
+	iVideoMessageBurst  = 60;
 
 	broadcastListenerVolumeAdjustments = false;
 
@@ -381,6 +383,8 @@ void MetaParams::read(QString fname) {
 
 	iPluginMessageLimit = typeCheckedFromSettings< unsigned int >("pluginmessagelimit", 4);
 	iPluginMessageBurst = typeCheckedFromSettings< unsigned int >("pluginmessageburst", 15);
+	iVideoMessageLimit  = typeCheckedFromSettings< unsigned int >("videomessagelimit", 20);
+	iVideoMessageBurst  = typeCheckedFromSettings< unsigned int >("videomessageburst", 60);
 
 	broadcastListenerVolumeAdjustments = typeCheckedFromSettings("broadcastlistenervolumeadjustments", false);
 

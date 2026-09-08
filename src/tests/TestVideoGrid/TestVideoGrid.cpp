@@ -138,6 +138,9 @@ private slots:
 	void aSingleClickOnAPlaceholderStartsWatching();
 	void aSingleClickOnAWatchedTileDoesNothing();
 	void aReplacedStreamWithdrawsTheOldSubscription();
+	void aToggledShareResumesWatchingWithinTheGraceWindow();
+	void aRestartOfADifferentKindDoesNotResume();
+	void aRestartFromADepartedSenderDoesNotResume();
 	void fullscreenDoesNotCopyTheCanvasOnEveryTile();
 };
 
@@ -1403,6 +1406,77 @@ void TestVideoGrid::resizingDoesNotChurnTheHoverBarsVisibility() {
 	QCoreApplication::processEvents();
 
 	QVERIFY(grid.hoveredBarAppliedCountForTesting() > settled);
+}
+
+
+// After a clean off/on toggle the sender's restart carries a fresh stream id, so the old surface is
+// already gone by the time the new one is announced - the existing same-surface resume cannot fire. A
+// viewer who was watching should keep watching across that toggle rather than being dropped to a
+// placeholder they have to click again.
+void TestVideoGrid::aToggledShareResumesWatchingWithinTheGraceWindow() {
+	VideoGrid grid;
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_VP8, MumbleProto::VideoState_SourceKind_Camera);
+	grid.removeSender(SENDER, 1); // the share is toggled off - end arrives, surface removed
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	// Toggled back on as a new stream. Not via the announce() helper, which would force watching on
+	// regardless - the point is that the resume happens on its own.
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+
+	bool resumed = false;
+	for (const QList< QVariant > &sig : toggled) {
+		if (sig.at(1).toUInt() == 2u && sig.at(2).toBool()) {
+			resumed = true;
+		}
+	}
+
+	QVERIFY2(resumed, "a camera restart within the grace window did not resume watching");
+}
+
+// Resuming is per source kind: closing a camera must not re-arm watching for a screen share the viewer
+// never opened, and vice versa.
+void TestVideoGrid::aRestartOfADifferentKindDoesNotResume() {
+	VideoGrid grid;
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+	grid.removeSender(SENDER, 1);
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	// A screen share from the same sender - a different kind - must not inherit the camera's watch.
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Display, MumbleProto::VideoState_Codec_TiledImage);
+
+	bool resumed = false;
+	for (const QList< QVariant > &sig : toggled) {
+		if (sig.at(1).toUInt() == 2u && sig.at(2).toBool()) {
+			resumed = true;
+		}
+	}
+
+	QVERIFY2(!resumed, "a screen share resumed a watch that only a camera had held");
+}
+
+// A sender who left entirely is not resumed even if a later stream reuses the session id.
+void TestVideoGrid::aRestartFromADepartedSenderDoesNotResume() {
+	VideoGrid grid;
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_VP8, MumbleProto::VideoState_SourceKind_Camera);
+	grid.removeSender(SENDER); // the whole sender is gone, not just one stream
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Camera, MumbleProto::VideoState_Codec_VP8);
+
+	bool resumed = false;
+	for (const QList< QVariant > &sig : toggled) {
+		if (sig.at(1).toUInt() == 2u && sig.at(2).toBool()) {
+			resumed = true;
+		}
+	}
+
+	QVERIFY2(!resumed, "a departed sender's later stream resumed watching");
 }
 
 QTEST_MAIN(TestVideoGrid)

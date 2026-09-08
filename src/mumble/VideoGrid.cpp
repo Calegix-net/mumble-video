@@ -449,6 +449,21 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		if (!senderAlreadyPresent && distinctSenderCount() >= static_cast< std::size_t >(MAX_SENDERS)) {
 			return;
 		}
+
+		// The common toggle case: the old stream's end already arrived, so the loop above found nothing
+		// to resume from, but the viewer was watching this sender's camera (or screen) moments ago. A
+		// restart of the same kind within the grace window resumes watching - see m_recentlyWatched.
+		if (!resumeWatching) {
+			const auto recent = m_recentlyWatched.find({ senderSession, sourceKind });
+
+			if (recent != m_recentlyWatched.end()) {
+				if (QDateTime::currentMSecsSinceEpoch() - recent->second <= RESUME_WATCH_GRACE_MSEC) {
+					resumeWatching = true;
+				}
+
+				m_recentlyWatched.erase(recent);
+			}
+		}
 	}
 
 	Surface &surface = m_surfaces[key];
@@ -867,10 +882,21 @@ void VideoGrid::clearSelfScreenFrame() {
 }
 
 void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) {
-	if (m_surfaces.erase(surfaceKey(senderSession, streamID)) > 0) {
-		emit senderCountChanged(tileCount());
-		relayout();
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+
+	if (it == m_surfaces.end()) {
+		return;
 	}
+
+	// Remember a watched stream's sender+kind so a restart within the grace window resumes watching
+	// rather than dropping the viewer back to a placeholder - see m_recentlyWatched.
+	if (it->second.watching) {
+		m_recentlyWatched[{ senderSession, it->second.sourceKind }] = QDateTime::currentMSecsSinceEpoch();
+	}
+
+	m_surfaces.erase(it);
+	emit senderCountChanged(tileCount());
+	relayout();
 }
 
 void VideoGrid::removeSender(unsigned int senderSession) {
@@ -886,6 +912,11 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 	}
 
 	m_senderNames.erase(senderSession);
+
+	// The sender is gone entirely - do not resume watching them if some later stream reuses the session.
+	for (auto it = m_recentlyWatched.begin(); it != m_recentlyWatched.end();) {
+		it = (it->first.first == senderSession) ? m_recentlyWatched.erase(it) : std::next(it);
+	}
 
 	if (removedAny) {
 		emit senderCountChanged(tileCount());

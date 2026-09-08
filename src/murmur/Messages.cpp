@@ -2608,7 +2608,7 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 	const bool alreadyAnnounced = m_videoAnnouncements.find(streamKey) != m_videoAnnouncements.end();
 
 	if (msg.active() && alreadyAnnounced) {
-		if (uSource->leakyBucket.ratelimit(1)) {
+		if (uSource->m_videoControlBucket.ratelimit(1)) {
 			return;
 		}
 	}
@@ -2661,15 +2661,18 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe &msg) {
 	ZoneScoped;
 
-	// Rate-limited like every other control message. It is NOT free: subscribe runs two ACL walks
-	// (Enter + ReceiveVideo) per call, and an authenticated client without ReceiveVideo can never
-	// satisfy them, so it is never inserted and the idempotent early-out never fires - every repeat
-	// re-runs both walks and earns a reflected reply. Leaving it unmetered was an unbounded-work DoS.
-	// The freeze that first motivated removing the limit is handled at the source instead: the client
-	// asks for a keyframe at most once per second per stream, and both encoders emit a keyframe on
-	// their own schedule regardless, so a conforming client stays well under the bucket.
+	// Metered, because subscribe is NOT free: it runs two ACL walks (Enter + ReceiveVideo) per call, and
+	// an authenticated client without ReceiveVideo can never satisfy them, so it is never inserted and the
+	// idempotent early-out never fires - every repeat re-runs both walks and earns a reflected reply.
+	// Leaving it unmetered was an unbounded-work DoS. But it is metered on the dedicated video bucket, not
+	// the small chat one: a client legitimately watching many streams asks each for a keyframe up to once
+	// a second, and an auto-resume across a toggle re-subscribes, so on the chat bucket (burst 5, 1/s) a
+	// heavy but entirely conforming watcher starved and its watch/keyframe requests were dropped - tiles
+	// that never painted. The video bucket is sized for that traffic; see Meta::iVideoMessageLimit.
 	MSG_SETUP(ServerUser::Authenticated);
-	RATELIMIT(uSource);
+	if (uSource->m_videoControlBucket.ratelimit(1)) {
+		return;
+	}
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	const unsigned int sender = msg.session();

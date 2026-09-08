@@ -400,6 +400,20 @@ protected:
 	/// one of their streams.
 	std::unordered_map< unsigned int, QString > m_senderNames;
 
+	/// A viewer who was watching a sender's camera or screen keeps watching it across a clean toggle:
+	/// when the stream ends its (senderSession, sourceKind) is recorded here with the time it ended, and
+	/// a new stream from the same sender of the same kind announced within RESUME_WATCH_GRACE_MSEC starts
+	/// watched rather than as a placeholder the viewer has to click again. Distinct from the resume that
+	/// setStreamCodec already does when the *old* surface is still present (its end never arrived): this
+	/// covers the ordinary case where the end did arrive and the surface is already gone. Keyed on
+	/// sourceKind (camera vs screen) so resuming a camera does not resume a screen the viewer had closed.
+	std::map< std::pair< unsigned int, int >, qint64 > m_recentlyWatched;
+
+	/// How long after a watched stream ends a same-sender, same-kind restart still auto-resumes. Long
+	/// enough to cover a deliberate off/on toggle, short enough that watching is not silently re-armed
+	/// minutes later when the sender happens to share again for an unrelated reason.
+	static constexpr qint64 RESUME_WATCH_GRACE_MSEC = 12000;
+
 	/// Your own camera and your own screen share, kept apart both from m_surfaces (they have no session)
 	/// and from each other (see the class comment for why they used to share one slot, and why that was
 	/// a bug worth fixing rather than a limitation worth documenting).
