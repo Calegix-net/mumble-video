@@ -183,7 +183,19 @@ void AudioOutput::addFrameToBuffer(ClientUser *sender, const Mumble::Protocol::A
 		// user is received. It also contains AudioOutputSample objects with various other non-speech sounds. This map
 		// will be iterated in mix(). After the speech or sample audio is finished, the AudioOutputBuffer object will be
 		// removed from this map and deleted.
-		speech = qobject_cast< AudioOutputSpeech * >(qmOutputs.value(sender));
+		// Searched among every buffer under this sender, not just the most recently inserted one that
+		// QMultiHash::value() hands back. A sender who is also sharing a screen with audio holds two
+		// buffers under one key - their voice and that screen-share audio (see addExternalBuffer) - and
+		// whichever was inserted last is what value() returns. When that was the screen-share buffer, the
+		// cast below came back null, a "new" speech buffer was created, and replace() below overwrote the
+		// most recent entry - the screen-share buffer - with it: the share's audio silently dropped out of
+		// the mixer for good the first time its sender said anything, and the orphaned buffer leaked.
+		for (auto iter = qmOutputs.constFind(sender); iter != qmOutputs.constEnd() && iter.key() == sender; ++iter) {
+			if (auto *candidate = qobject_cast< AudioOutputSpeech * >(iter.value())) {
+				speech = candidate;
+				break;
+			}
+		}
 
 		createNew = !speech || (speech->m_codec != audioData.usedCodec);
 
@@ -203,11 +215,15 @@ void AudioOutput::addFrameToBuffer(ClientUser *sender, const Mumble::Protocol::A
 
 		QWriteLocker lock(&qrwlOutputs);
 		if (speech) {
+			// Erases exactly the old speech buffer's own entry, leaving any other buffer under this
+			// sender - the screen-share audio - alone.
 			removeBuffer(speech, false);
 		}
 
 		speech = new AudioOutputSpeech(sender, iMixerFreq, audioData.usedCodec, iBufferSize);
-		qmOutputs.replace(sender, speech);
+		// insert(), not replace(): replace() overwrites whichever entry under this key was inserted most
+		// recently, which is the sender's screen-share audio buffer whenever they have one.
+		qmOutputs.insert(sender, speech);
 
 		speech->addFrameToBuffer(audioData);
 	}
@@ -266,15 +282,20 @@ void AudioOutput::invalidateBuffer(const void *buffer) {
 }
 
 void AudioOutput::removeUser(const ClientUser *user) {
-	AudioOutputBuffer *buffer = nullptr;
+	// Every buffer under the user, not only the most recently inserted one: a user sharing a screen
+	// with audio holds two (see addExternalBuffer), and the one value() did not return was left in the
+	// mixer, attached to a user that no longer exists.
+	QList< AudioOutputBuffer * > buffers;
 	{
 		QReadLocker lock(&qrwlOutputs);
-		buffer = qmOutputs.value(user);
+		buffers = qmOutputs.values(user);
 	}
 
 	// We rely on removeBuffer not actually dereferencing the passed pointer.
 	// If it did, releasing the lock before calling the function cries for trouble.
-	removeBuffer(buffer);
+	for (AudioOutputBuffer *buffer : buffers) {
+		removeBuffer(buffer);
+	}
 }
 
 void AudioOutput::invalidateToken(const AudioOutputToken &token) {

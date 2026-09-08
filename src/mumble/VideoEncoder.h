@@ -54,8 +54,25 @@ public:
 		unsigned int tilesUnchanged       = 0;
 		unsigned int tilesRequantised     = 0;
 		unsigned int tilesDroppedOversize = 0;
-		std::size_t bytesEncoded          = 0;
+		/// Tiles that needed sending but were held back to the next frame by MAX_UNITS_PER_FRAME.
+		unsigned int tilesDeferred = 0;
+		std::size_t bytesEncoded   = 0;
 	};
+
+	/// The most units one encode() call emits. Whatever else needed sending is deferred - left unhashed,
+	/// so the next call sees it as still changed and sends it then, starting from where this one stopped.
+	///
+	/// This exists because a burst is where tiles go missing. A keyframe (a new viewer, a refresh
+	/// request, a resize) or simply a whole screen changing at once (a page scrolling, a video playing)
+	/// used to emit every tile of the frame in one tight loop: 135 units for 1080p, 510 for 4K, several
+	/// megabytes handed to a UDP socket in a few milliseconds. Whatever that overran - the sender's own
+	/// socket buffer, the path, the server's, the receiver's - was dropped, and because the hash had
+	/// already been recorded as sent, each lost tile stayed a black square on every viewer's screen until
+	/// the periodic refresh got round to it up to two seconds later. Sized to the receiver's own reassembly
+	/// budget for one sender (MAX_PENDING_VIDEO_UNITS_PER_SENDER), which is the one bound a burst must
+	/// never exceed even if nothing in between drops a packet. A fully changing screen degrades to a lower
+	/// frame rate under this cap, which is what it should do; the picture stays whole.
+	static constexpr std::size_t MAX_UNITS_PER_FRAME = 128;
 
 	TiledImageEncoder() = default;
 
@@ -110,6 +127,11 @@ protected:
 	/// on undisturbed means an explicit refresh never has to fight the staggered one for which tiles get
 	/// sent this frame.
 	unsigned int m_frameCounter = 0;
+
+	/// Tile index encode() starts its walk from - the first tile the previous call deferred, so a run of
+	/// over-budget frames rotates through the grid rather than starving the tiles at its end. 0 whenever
+	/// the previous call sent everything it needed to.
+	std::size_t m_nextTileStart = 0;
 
 	/// A tile whose content has not changed is still re-sent once every this many frames, on a schedule
 	/// staggered by tile index rather than all at once - see encode(). Recovers a tile lost to real network

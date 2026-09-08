@@ -135,6 +135,10 @@ private slots:
 	void senderSessionsReportsEachSessionOnceWatchedOrNot();
 	void hoverEventsDoNotTouchWidgetsInsideQtsOwnDispatch();
 	void resizingDoesNotChurnTheHoverBarsVisibility();
+	void aSingleClickOnAPlaceholderStartsWatching();
+	void aSingleClickOnAWatchedTileDoesNothing();
+	void aReplacedStreamWithdrawsTheOldSubscription();
+	void fullscreenDoesNotCopyTheCanvasOnEveryTile();
 };
 
 namespace {
@@ -1233,9 +1237,13 @@ void TestVideoGrid::resizingPreservesWatchingAndDiscardsOldPixels() {
 	QSignalSpy subscriptions(&grid, &VideoGrid::watchToggled);
 	grid.setStreamCodec(SENDER, 11, MumbleProto::VideoState_SourceKind_Window,
 						MumbleProto::VideoState_Codec_TiledImage);
-	QCOMPARE(subscriptions.count(), 1);
-	QCOMPARE(subscriptions.at(0).at(1).toUInt(), 11u);
-	QVERIFY(subscriptions.at(0).at(2).toBool());
+	// The replaced stream's subscription is withdrawn before the new one is requested - see
+	// aReplacedStreamWithdrawsTheOldSubscription() for why the withdrawal matters.
+	QCOMPARE(subscriptions.count(), 2);
+	QCOMPARE(subscriptions.at(0).at(1).toUInt(), 10u);
+	QVERIFY(!subscriptions.at(0).at(2).toBool());
+	QCOMPARE(subscriptions.at(1).at(1).toUInt(), 11u);
+	QVERIFY(subscriptions.at(1).at(2).toBool());
 	QVERIFY(grid.surfaceFor(SENDER, 10).isNull());
 	QImage small(32, 16, QImage::Format_RGB32);
 	small.fill(Qt::red);
@@ -1430,4 +1438,146 @@ void TestVideoGrid::aRestartedStreamOfTheSameKindReplacesTheOld() {
 	waitForAsyncDecode();
 	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(64, 64));
 	QCOMPARE(grid.senderCount(), 1);
+}
+
+// The placeholder tile said "Click to watch", and a click did nothing: only the small eyeball in the
+// hover bar at the bottom right, or a double-click, actually started watching. The placeholder is the
+// button now.
+void TestVideoGrid::aSingleClickOnAPlaceholderStartsWatching() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	grid.setStreamCodec(SENDER, STREAM, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+	QCOMPARE(grid.senderCount(), 1);
+
+	// The one placeholder fills the whole grid, so its centre is the centre of the widget.
+	QTest::mouseClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+
+	QCOMPARE(toggled.count(), 1);
+	QCOMPARE(toggled.at(0).at(0).toUInt(), SENDER);
+	QCOMPARE(toggled.at(0).at(1).toUInt(), STREAM);
+	QCOMPARE(toggled.at(0).at(2).toBool(), true);
+
+	// Watched but blank: holds no cell until the first frame lands, exactly as setWatching() would.
+	QCOMPARE(grid.senderCount(), 0);
+
+	// The second click of a double-click on that same spot must not fullscreen whatever reflowed into
+	// the slot - here nothing did, but the event must be swallowed rather than treated as a fresh
+	// double-click either way.
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(!grid.hasFocusedTile());
+	QCOMPARE(toggled.count(), 1);
+}
+
+// A plain click on a tile that is already showing a picture is not a gesture: fullscreen stays on
+// double-click and on the control bar's own button, so reaching for a slider cannot fullscreen a tile.
+void TestVideoGrid::aSingleClickOnAWatchedTileDoesNothing() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
+	QCOMPARE(grid.senderCount(), 1);
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	QTest::mouseClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+
+	QCOMPARE(toggled.count(), 0);
+	QVERIFY(!grid.hasFocusedTile());
+	QCOMPARE(grid.senderCount(), 1);
+
+	// And a double-click still fullscreens it, the way it always did.
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(grid.hasFocusedTile());
+}
+
+// When a sender's stream of one kind is replaced by a newer stream of the same kind without the old
+// one's end ever arriving, the grid drops the old surface and re-watches under the new id - but it used
+// to leave the server still relaying the old stream to this client, since nothing ever withdrew that
+// subscription. One leaked subscription per silent restart, each still costing bandwidth for a surface
+// that no longer exists.
+void TestVideoGrid::aReplacedStreamWithdrawsTheOldSubscription() {
+	VideoGrid grid;
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+
+	QSignalSpy toggled(&grid, &VideoGrid::watchToggled);
+
+	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+
+	// announce() itself calls setWatching(2, true), which is a no-op if the replacement already resumed
+	// watching - so exactly two signals are expected: the old id withdrawn, the new id requested.
+	QCOMPARE(toggled.count(), 2);
+	QCOMPARE(toggled.at(0).at(1).toUInt(), 1u);
+	QCOMPARE(toggled.at(0).at(2).toBool(), false);
+	QCOMPARE(toggled.at(1).at(1).toUInt(), 2u);
+	QCOMPARE(toggled.at(1).at(2).toBool(), true);
+}
+
+// The fullscreen window used to keep its own QImage handle on the focused surface's canvas. QImage is
+// implicitly shared, so the very next tile painted into that canvas detached it - a deep copy of the
+// whole canvas, up to a 4K desktop, for every tile of a screen share. Watching one fullscreen was what
+// brought the viewer's machine to its knees. The canvas's pixel buffer must stay put across a tile
+// arriving while fullscreen, which it only does if nothing else is holding a handle on it.
+void TestVideoGrid::fullscreenDoesNotCopyTheCanvasOnEveryTile() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM);
+
+	// Two tiles side by side, so the canvas is already its final size before fullscreen and no later
+	// tile has any reason to reallocate it by growing it.
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 32, 0, encoded);
+	waitForAsyncDecode();
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(64, 32));
+
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(grid.hasFocusedTile());
+
+	// Let the fullscreen window actually show and paint once, holding whatever it is going to hold.
+	QTest::qWait(150);
+
+	// The pointer is taken through a temporary that is gone again before the next tile arrives - a
+	// handle of the test's own kept alive across the tile would force the very detach being tested for.
+	const uchar *before = grid.surfaceFor(SENDER, STREAM).constBits();
+
+	grid.onVideoUnitReceived(SENDER, STREAM, 1, false, 32, 0, encoded);
+	waitForAsyncDecode();
+
+	const uchar *after = grid.surfaceFor(SENDER, STREAM).constBits();
+
+	QVERIFY2(before == after, "the canvas was deep-copied by a tile arriving while fullscreen");
+
+	grid.clearFocusedTile();
+	QVERIFY(!grid.hasFocusedTile());
 }

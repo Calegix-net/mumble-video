@@ -54,6 +54,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 #include <span>
 #include <vector>
@@ -191,13 +192,40 @@ public:
 	/// of the permission model.
 	VideoRouter m_videoRouter;
 
+	/// Requested size for each UDP socket's send and receive buffers, for video - see where it is
+	/// applied in the constructor. 4 MB holds a couple of frames' worth of screen-share tiles.
+	static constexpr int VIDEO_UDP_BUFFER_BYTES = 4 * 1024 * 1024;
+
 	/// Whether the user may share video into the channel they are currently in.
 	bool mayShareVideo(unsigned int senderSession);
 
 	/// Whether `subscriberSession` may receive video from `senderSession` right now. This is evaluated
 	/// against the *sender's current channel*, so a sender moving into a channel the subscriber cannot
 	/// enter ends the subscription just as surely as the subscriber moving out of it.
+	///
+	/// Video follows the channel the way voice does: the subscriber has to be in the sender's channel,
+	/// or one linked to it, as well as holding Enter and ReceiveVideo there. Without the channel test,
+	/// the ACL alone - which on a default server grants everyone Enter everywhere - meant every stream
+	/// on the server was announced to every user on it, whichever room either of them was in.
 	bool mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession);
+
+	/// Who may see what, involving one user, at one moment: the streams from other senders that user
+	/// may receive, and for each of the user's own streams, the sessions that may receive it. Captured
+	/// before and after a channel move so the two can be diffed - see syncVideoVisibility().
+	struct VideoVisibility {
+		std::set< std::pair< unsigned int, unsigned int > > receivable;
+		std::map< std::pair< unsigned int, unsigned int >, std::set< unsigned int > > viewers;
+	};
+
+	VideoVisibility videoVisibilityFor(ServerUser *user);
+
+	/// Brings every affected client in line with what a user's move between channels changed about who
+	/// may see which stream: the mover is told about streams now visible to it and told that streams no
+	/// longer visible have ended, and everyone who gained or lost sight of the mover's own streams is told
+	/// the same about those. Announcements are relayed once, when a stream starts, and end-of-stream only
+	/// when its sender stops - so without this, a sharer walking into a room was invisible to the people
+	/// already there, and the people they left behind kept a tile for a stream they could no longer watch.
+	void syncVideoVisibility(ServerUser *user, const VideoVisibility &before);
 
 	/// Drops video subscriptions that the current ACLs no longer permit, telling each affected client
 	/// that its subscription ended.

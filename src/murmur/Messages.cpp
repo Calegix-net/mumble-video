@@ -2587,13 +2587,32 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 	ZoneScoped;
 
 	MSG_SETUP(ServerUser::Authenticated);
-	RATELIMIT(uSource);
+
+	// Only a start is metered. RATELIMIT drops what exceeds the bucket silently, and an end-of-stream
+	// dropped that way is not merely delayed but lost: the stream stays announced here, keeps being
+	// replayed to everyone who joins or moves in, and keeps its tile on every client until the sender
+	// happens to restart it - the classic "someone's dead screen share that will not go away". Ending a
+	// stream frees state rather than allocating it, and the relay below is bounded to streams that were
+	// actually announced, so letting it through unmetered is not an amplification.
+	if (msg.active()) {
+		RATELIMIT(uSource);
+	}
+
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
 
 	const auto streamKey =
 		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
+
+	if (!msg.active() && m_videoAnnouncements.find(streamKey) == m_videoAnnouncements.end()) {
+		// Ending a stream nobody was ever told about: nothing to relay, and - being the one message a
+		// client may send without earning a rate-limit token - nothing worth fanning out to every user
+		// on the server for a client that just keeps sending it.
+		m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), false);
+
+		return;
+	}
 
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are

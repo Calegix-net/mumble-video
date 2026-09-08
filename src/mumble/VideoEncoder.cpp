@@ -49,6 +49,7 @@ void TiledImageEncoder::setQuality(int quality) {
 void TiledImageEncoder::reset() {
 	m_tileHashes.clear();
 	m_lastFrameSize = QSize();
+	m_nextTileStart = 0;
 }
 
 std::vector< Mumble::Protocol::byte > TiledImageEncoder::encodeTile(const QImage &tile, bool &fitted,
@@ -196,46 +197,72 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 	// came from.
 	std::uint32_t nextUnitID = 0;
 
-	for (int row = 0; row < rows; ++row) {
-		for (int column = 0; column < columns; ++column) {
-			const std::size_t index = static_cast< std::size_t >(row) * static_cast< std::size_t >(columns)
-									  + static_cast< std::size_t >(column);
+	// Walked from wherever the previous call left off rather than always from the top-left - see
+	// m_nextTileStart - so that when more tiles need sending than MAX_UNITS_PER_FRAME allows, successive
+	// frames rotate through the grid and every tile gets its turn. Reset to the top once a call gets
+	// through everything it needed to.
+	const std::size_t start = m_nextTileStart < tileCount ? m_nextTileStart : 0;
+	bool deferredAny        = false;
 
-			const int x = column * m_tileSize;
-			const int y = row * m_tileSize;
-			const int w = std::min(m_tileSize, source.width() - x);
-			const int h = std::min(m_tileSize, source.height() - y);
+	for (std::size_t step = 0; step < tileCount; ++step) {
+		const std::size_t index = (start + step) % tileCount;
+		const int row           = static_cast< int >(index / static_cast< std::size_t >(columns));
+		const int column        = static_cast< int >(index % static_cast< std::size_t >(columns));
 
-			const QImage tile = source.copy(x, y, w, h);
+		const int x = column * m_tileSize;
+		const int y = row * m_tileSize;
+		const int w = std::min(m_tileSize, source.width() - x);
+		const int h = std::min(m_tileSize, source.height() - y);
 
-			m_lastStats.tilesConsidered++;
+		const QImage tile = source.copy(x, y, w, h);
 
-			const std::uint64_t hash = hashImage(tile);
+		m_lastStats.tilesConsidered++;
 
-			// Every tile gets its periodic re-send on a different frame from every other tile - see
-			// FULL_REFRESH_INTERVAL_FRAMES - a index-staggered schedule rather than the whole grid
-			// landing on the same frame every 150th call. An unchanged tile whose turn has not come up
-			// yet is skipped exactly as before.
-			const bool tileDueForPeriodicRefresh =
-				(static_cast< unsigned int >(index) + m_frameCounter) % FULL_REFRESH_INTERVAL_FRAMES == 0;
+		const std::uint64_t hash = hashImage(tile);
 
-			if (!forceKeyframe && !tileDueForPeriodicRefresh && m_tileHashes[index] == hash) {
-				m_lastStats.tilesUnchanged++;
-				continue;
-			}
+		// Every tile gets its periodic re-send on a different frame from every other tile - see
+		// FULL_REFRESH_INTERVAL_FRAMES - a index-staggered schedule rather than the whole grid
+		// landing on the same frame every 150th call. An unchanged tile whose turn has not come up
+		// yet is skipped exactly as before.
+		const bool tileDueForPeriodicRefresh =
+			(static_cast< unsigned int >(index) + m_frameCounter) % FULL_REFRESH_INTERVAL_FRAMES == 0;
 
-			// Encodes the tile whole if it fits, or splits it into independently-encoded quadrants if it
-			// does not - see the class comment for why dropping outright is a last resort now, not the
-			// first response to a tile being too large. The hash is recorded only when every quadrant
-			// made it out, so a partially-covered tile keeps being retried rather than being mistaken for
-			// done.
-			const bool fullyCovered = encodeRegionSplitting(source, x, y, w, h, streamID, frameNumber,
-															captureTimestampUsec, nextUnitID, units);
-
-			if (fullyCovered) {
-				m_tileHashes[index] = hash;
-			}
+		if (!forceKeyframe && !tileDueForPeriodicRefresh && m_tileHashes[index] == hash) {
+			m_lastStats.tilesUnchanged++;
+			continue;
 		}
+
+		if (units.size() >= MAX_UNITS_PER_FRAME) {
+			// Over budget for this frame. Left for the next call, and its recorded hash cleared so that
+			// the next call sees it as changed regardless of whether this was a forced send (a keyframe
+			// or a periodic refresh) of content that has not actually changed - otherwise a deferred
+			// keyframe tile would simply never go out.
+			m_tileHashes[index] = 0;
+			m_lastStats.tilesDeferred++;
+
+			if (!deferredAny) {
+				deferredAny     = true;
+				m_nextTileStart = index;
+			}
+
+			continue;
+		}
+
+		// Encodes the tile whole if it fits, or splits it into independently-encoded quadrants if it
+		// does not - see the class comment for why dropping outright is a last resort now, not the
+		// first response to a tile being too large. The hash is recorded only when every quadrant
+		// made it out, so a partially-covered tile keeps being retried rather than being mistaken for
+		// done.
+		const bool fullyCovered =
+			encodeRegionSplitting(source, x, y, w, h, streamID, frameNumber, captureTimestampUsec, nextUnitID, units);
+
+		if (fullyCovered) {
+			m_tileHashes[index] = hash;
+		}
+	}
+
+	if (!deferredAny) {
+		m_nextTileStart = 0;
 	}
 
 	// Marks the frame boundary so a receiver can present without waiting for a timeout. Set on the last

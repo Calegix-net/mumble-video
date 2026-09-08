@@ -991,6 +991,16 @@ void ServerHandler::serverConnectionConnected() {
 			}
 		}
 
+		// Video is the reason for both of these: a screen share's tiles for one frame - up to
+		// TiledImageEncoder::MAX_UNITS_PER_FRAME units, each a dozen or so datagrams - are written in
+		// one go on the sending side and land in one go on the receiving side, and the platform default
+		// buffers (a couple of hundred kilobytes) are sized for voice. What overflows them is dropped
+		// silently, and for TiledImage a dropped tile is a black rectangle until the next refresh. Best
+		// effort: the kernel may cap these (net.core.rmem_max on Linux), which is still no worse than
+		// before.
+		qusUdp->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
+		qusUdp->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
+
 		QObject::connect(qusUdp, &QUdpSocket::readyRead, this, &ServerHandler::udpReady);
 
 		if (Global::get().s.bQoS) {

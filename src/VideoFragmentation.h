@@ -41,7 +41,13 @@ namespace Protocol {
 	// Sized from the default codec rather than guessed. TiledImage sends one unit per tile, and a 1080p
 	// screen at 128px tiles is 135 tiles per frame, all of which can legitimately be in flight at once.
 	// The previous value of 8 predated that measurement and would have evicted most of every frame.
-	constexpr std::size_t MAX_PENDING_VIDEO_UNITS_PER_SENDER = 160;
+	//
+	// 512, up from 160: the sender caps one frame's burst at TiledImageEncoder::MAX_UNITS_PER_FRAME
+	// (128), but two consecutive frames' worth can overlap in flight under reordering, and a 4K share
+	// (510 tiles) refreshing itself was, at 160, guaranteed to have its own oldest half-received tiles
+	// evicted here to make room for the newest - each one a black square on the viewer's screen until
+	// the next periodic refresh, for no reason a network could be blamed for.
+	constexpr std::size_t MAX_PENDING_VIDEO_UNITS_PER_SENDER = 512;
 
 	// Backstop on the number of tracked units across all senders. Memory is bounded by the byte budget
 	// below; this exists only so that the bookkeeping cannot grow without limit when units are tiny.
@@ -53,7 +59,10 @@ namespace Protocol {
 	// tile ranges from about 2 KB for camera content to 21 KB for dense text. Bounding the bytes
 	// actually buffered is both a tighter guarantee and one that does not need re-tuning whenever the
 	// tile size or codec changes.
-	constexpr std::size_t MAX_PENDING_VIDEO_BYTES_TOTAL = 8 * 1024 * 1024;
+	//
+	// 16 MB: enough for the per-sender unit cap above at the largest measured tile size, with room for
+	// a second sender, rather than a bound that a single dense-text 4K share could hit on its own.
+	constexpr std::size_t MAX_PENDING_VIDEO_BYTES_TOTAL = 16 * 1024 * 1024;
 
 	// How long a partially received unit is kept before it is discarded.
 	constexpr std::uint64_t VIDEO_REASSEMBLY_TIMEOUT_USEC = 500 * 1000;

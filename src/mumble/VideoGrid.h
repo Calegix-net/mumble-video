@@ -10,6 +10,7 @@
 
 #include <QtCore/QByteArray>
 #include <QtCore/QPoint>
+#include <QtCore/QRect>
 #include <QtCore/QString>
 #include <QtGui/QImage>
 #include <QtWidgets/QWidget>
@@ -303,6 +304,12 @@ protected:
 		quint64 lastFrameNumber = 0;
 		bool hasDecodedFrame    = false;
 
+		/// TiledImage only: the frame number last painted at each tile origin ((x << 32) | y), so a
+		/// late tile is refused only where a newer frame has actually painted since - see
+		/// onTiledImageTileDecoded(). Bounded by the surface's own tile grid, a few hundred entries at
+		/// most, and cleared with the canvas.
+		std::unordered_map< std::uint64_t, quint64 > tileFrameNumbers;
+
 		/// Frozen: a gap was seen and only a keyframe may resume decoding. Suppresses repeated
 		/// keyframeNeeded spam; dropped units are counted so the request can be repeated if lost.
 		bool awaitingKeyframe  = false;
@@ -463,6 +470,14 @@ protected:
 	/// wasted widget churn for something that produces no visible difference most of the time it runs.
 	int m_hoveredSlot = -1;
 
+	/// The slot the left button went down in, for mouseReleaseEvent() to compare against; -1 otherwise.
+	int m_pressedSlot = -1;
+
+	/// When a single click last started watching a placeholder, so mouseDoubleClickEvent() can tell the
+	/// second half of that same double-click apart from a genuine request to fullscreen whatever tile has
+	/// since reflowed into the clicked slot. 0 if never.
+	qint64 m_lastClickWatchMsec = 0;
+
 	/// Set for the duration of a relayout() call, and checked at its own start: several paths reach here
 	/// synchronously from inside another relayout() already in progress - most notably, the video dock
 	/// becoming visible for the first time can synchronously fire this widget's own resizeEvent() before
@@ -610,6 +625,20 @@ protected:
 	/// is focused.
 	void updateFullscreenWindow();
 
+	/// Tells the fullscreen window, if there is one, that the given rectangle of the focused tile's
+	/// picture - in that picture's own pixel coordinates - has changed, so it repaints just that much of
+	/// the monitor on its next coalesced repaint. The cheap per-tile sibling of updateFullscreenWindow(),
+	/// which repaints everything and is reserved for structural changes.
+	void notifyFullscreenContentChanged(const QRect &changed);
+
+	/// The slot index (see Layout) the given surface currently occupies, or -1 if it holds no cell right
+	/// now (watched but blank). What lets a tile update repaint only its own cell.
+	int slotForSurface(std::uint64_t key) const;
+
+	/// The remote surface occupying the given slot, or nullptr if the slot is empty or holds one of your
+	/// own tiles. The hit-testing half of the walk paintEvent() draws with.
+	const Surface *surfaceAtSlot(int slot) const;
+
 	/// The name and, for anything other than a camera, the kind of stream a tile is showing - "Screen",
 	/// "Window", "App" - shared between paintEvent()'s labels and the fullscreen window's, so the two
 	/// never describe the same tile differently.
@@ -629,6 +658,12 @@ protected:
 	void mouseMoveEvent(QMouseEvent *event) override;
 	void enterEvent(QEnterEvent *event) override;
 	void leaveEvent(QEvent *event) override;
+
+	/// A single click on an unwatched placeholder tile starts watching it - the placeholder itself is the
+	/// "click to watch" button, not just the small eyeball in its hover bar. Press and release are
+	/// tracked separately so a drag that ends on a different tile does not count as a click on either.
+	void mousePressEvent(QMouseEvent *event) override;
+	void mouseReleaseEvent(QMouseEvent *event) override;
 
 	/// Toggles fullscreen on whichever tile is under the cursor: focuses it if nothing is focused, returns
 	/// to the grid if that same tile already is, or moves focus straight to the newly clicked one if a
