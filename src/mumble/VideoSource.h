@@ -106,6 +106,15 @@ public:
 	void setChangeRatio(int percent) { m_changePercent = percent; }
 
 	/**
+	 * Render a desktop-like picture instead of the gradient-plus-noise test pattern: a window with
+	 * scrolling terminal text, a bouncing block, a frame counter and a static bar along the bottom.
+	 * Most of the frame stays still between frames while a few regions change every frame, which is
+	 * what a real screen share looks like to the tiled encoder. This is what MUMBLE_MOCK_SCREEN streams
+	 * on hosts that have no desktop portal to capture from. setChangeRatio() is ignored in this mode.
+	 */
+	void setScreenLike(bool screenLike) { m_screenLike = screenLike; }
+
+	/**
 	 * Emits a frame every `milliseconds` once started, instead of only when pumped.
 	 *
 	 * Pull mode is what a test wants when it needs to control exactly how many frames exist. Anything
@@ -118,6 +127,7 @@ protected:
 	int m_width;
 	int m_height;
 	int m_changePercent  = 100;
+	bool m_screenLike    = false;
 	bool m_running       = false;
 	std::uint64_t m_next = 0;
 

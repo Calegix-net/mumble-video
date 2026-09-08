@@ -15,6 +15,7 @@
 #include <QSignalSpy>
 #include <QtTest>
 
+#include <algorithm>
 #include <memory>
 
 class TestVideoBroadcaster : public QObject {
@@ -34,6 +35,7 @@ private slots:
 	void resizedFramesUseFreshStreamIDs();
 	void vp8SendsOneWholeFrameUnit();
 	void theCodecCanBeSwitched();
+	void aMockScreenKeepsMovingWithoutRepaintingEverything();
 };
 
 void TestVideoBroadcaster::startingAndStoppingReportsItself() {
@@ -354,6 +356,49 @@ void TestVideoBroadcaster::lowRateUnchangedFramesStillRefresh() {
 	QCOMPARE(units.count(), 0);
 	source->pump(2000000);
 	QVERIFY(!units.isEmpty());
+}
+
+// The MUMBLE_MOCK_SCREEN source. What matters for the encoder is the shape of its changes: successive
+// frames must differ (a still picture sends nothing and would prove nothing), and most of the picture
+// must stay the same between frames, otherwise it models a camera, not a screen.
+void TestVideoBroadcaster::aMockScreenKeepsMovingWithoutRepaintingEverything() {
+	SyntheticVideoSource source(1280, 720);
+	source.setScreenLike(true);
+
+	QCOMPARE(source.describe(), QStringLiteral("Mock screen 1280x720"));
+
+	const QImage a = source.render(100);
+	const QImage b = source.render(101);
+	const QImage c = source.render(115);
+
+	QCOMPARE(a.size(), QSize(1280, 720));
+	QVERIFY(a != b);
+	QVERIFY(b != c);
+
+	// Count 64x64 tiles that changed between consecutive frames: the bouncing block, the counter and at
+	// most one scrolled line touch a few of them; the wallpaper, bar and window frame touch none.
+	int changed = 0;
+	int total   = 0;
+	for (int y = 0; y < a.height(); y += 64) {
+		for (int x = 0; x < a.width(); x += 64) {
+			const QRect tile(x, y, std::min(64, a.width() - x), std::min(64, a.height() - y));
+			++total;
+			if (a.copy(tile) != b.copy(tile)) {
+				++changed;
+			}
+		}
+	}
+
+	QVERIFY2(changed > 0, "consecutive mock screen frames must differ somewhere");
+	QVERIFY2(changed * 2 < total, qPrintable(QStringLiteral("%1 of %2 tiles changed; a screen should be mostly static")
+												  .arg(changed)
+												  .arg(total)));
+
+	// And the broadcaster accepts it as a source like any other.
+	VideoBroadcaster broadcaster;
+	broadcaster.configure(1, 2000, 15, 70, 64);
+	QVERIFY(broadcaster.start(std::make_unique< SyntheticVideoSource >(320, 180)));
+	broadcaster.stop();
 }
 
 QTEST_MAIN(TestVideoBroadcaster)

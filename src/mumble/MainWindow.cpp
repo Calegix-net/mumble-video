@@ -762,12 +762,17 @@ void MainWindow::setupScreenShare() {
 	// could only ever report its own unavailability. The action is built regardless, so every signal
 	// connection below stays unconditional.
 #if defined(Q_OS_WIN)
-	const bool screenCaptureAvailable = true;
+	const bool nativeScreenCaptureAvailable = true;
 #elif defined(USE_SCREEN_SHARE_PIPEWIRE)
-	const bool screenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
+	const bool nativeScreenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
 #else
-	const bool screenCaptureAvailable = false;
+	const bool nativeScreenCaptureAvailable = false;
 #endif
+
+	// MUMBLE_MOCK_SCREEN streams a synthetic desktop instead of capturing one - see toggleScreenShare().
+	// The action has to be visible for that to be reachable, portal or no portal.
+	const bool screenCaptureAvailable =
+		nativeScreenCaptureAvailable || !qEnvironmentVariableIsEmpty("MUMBLE_MOCK_SCREEN");
 
 	m_shareScreenAction->setVisible(screenCaptureAvailable);
 
@@ -981,6 +986,65 @@ void MainWindow::toggleScreenShare(bool share) {
 			audioEnd.set_active(false);
 			Global::get().sh->sendMessage(audioEnd);
 		}
+
+		return;
+	}
+
+	// A synthetic desktop in place of a captured one, for hosts that have nothing to capture: a headless
+	// battle box, a container, CI. Gated by env exactly like MUMBLE_MOCK_CAMERA so production never
+	// silently shares a fake screen. MUMBLE_MOCK_SCREEN_SIZE=WxH overrides the default 1920x1080.
+	if (!qEnvironmentVariableIsEmpty("MUMBLE_MOCK_SCREEN")) {
+		const Settings &mockSettings = Global::get().s;
+
+		int mockWidth  = 1920;
+		int mockHeight = 1080;
+		const QStringList size = qEnvironmentVariable("MUMBLE_MOCK_SCREEN_SIZE").split(QLatin1Char('x'));
+		if (size.size() == 2) {
+			const int w = size.at(0).toInt();
+			const int h = size.at(1).toInt();
+			if (w >= 64 && h >= 64 && w <= 7680 && h <= 4320) {
+				mockWidth  = w;
+				mockHeight = h;
+			}
+		}
+
+		// TiledImage, as every real screen share is - that is the codec whose behaviour on screen
+		// content this exists to exercise.
+		m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(mockSettings.iVideoBitrate),
+											static_cast< unsigned int >(mockSettings.iVideoFramerate),
+											mockSettings.iVideoTileQuality, mockSettings.iVideoTileSize);
+		m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
+
+		auto mock = std::make_unique< SyntheticVideoSource >(mockWidth, mockHeight);
+		mock->setScreenLike(true);
+		mock->setInterval(mockSettings.iVideoFramerate > 0 ? std::max(1, 1000 / mockSettings.iVideoFramerate) : 66);
+
+		const QString description = mock->describe();
+
+		if (!m_screenVideoBroadcaster->start(std::move(mock))) {
+			Global::get().l->log(Log::Warning, tr("Could not start the mock screen."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		// Announced immediately, like the camera: there is no picker to wait on, and frames start on
+		// the next timer tick.
+		m_screenAwaitingFrame = false;
+		m_screenSourceKind    = MumbleProto::VideoState_SourceKind_Display;
+
+		MumbleProto::VideoState state;
+		state.set_stream_id(m_screenVideoBroadcaster->streamID());
+		state.set_active(true);
+		state.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
+		state.set_source_name(u8(description));
+		state.set_width(static_cast< unsigned int >(mockWidth));
+		state.set_height(static_cast< unsigned int >(mockHeight));
+		state.set_max_framerate(static_cast< unsigned int >(mockSettings.iVideoFramerate));
+		Global::get().sh->sendMessage(state);
+
+		Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(description));
 
 		return;
 	}
