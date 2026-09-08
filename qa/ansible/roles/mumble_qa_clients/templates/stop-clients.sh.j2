@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Managed by Ansible (qa/ansible). Stop only the QA clients this rig launched -
+# matched by their per-client config path - and their Xvfb displays. Leaves any
+# other Mumble process (a real user's client) untouched.
+set -u
+pkill -f 'config/qa-mv' 2>/dev/null || true
+sleep 1
+pkill -9 -f 'config/qa-mv' 2>/dev/null || true
+for i in $(seq 1 {{ qa_client_count }}); do
+  pkill -f "Xvfb :$(( {{ qa_display_base }} + i )) " 2>/dev/null || true
+done
+echo "stopped QA clients"

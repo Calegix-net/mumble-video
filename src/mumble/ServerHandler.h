@@ -74,6 +74,13 @@ private:
 	Q_OBJECT
 	Q_DISABLE_COPY(ServerHandler)
 
+public:
+	/// Requested size for the UDP socket's send and receive buffers - see where they are applied in
+	/// ServerHandler::run(). 4 MB holds a couple of frames' worth of screen-share tiles.
+	static constexpr int VIDEO_UDP_BUFFER_BYTES = 4 * 1024 * 1024;
+
+private:
+
 	Database *database;
 
 	static QMutex nextConnectionIDMutex;

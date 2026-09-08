@@ -142,6 +142,8 @@ public:
 
 	LeakyBucket leakyBucket;
 	LeakyBucket m_pluginMessageBucket;
+	/// Video share-state and subscribe/keyframe messages - see Meta::iVideoMessageLimit.
+	LeakyBucket m_videoControlBucket;
 
 	int iLastPermissionCheck;
 	QMap< int, unsigned int > qmPermissionSent;

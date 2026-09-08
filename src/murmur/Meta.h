@@ -110,6 +110,12 @@ public:
 	unsigned int iPluginMessageLimit;
 	unsigned int iPluginMessageBurst;
 
+	/// Video control messages (share announcements and watch/keyframe requests) scale with the number
+	/// of participants and streams watched, so they get their own, more generous leaky bucket rather than
+	/// competing with chat on the small default one - see ServerUser::m_videoControlBucket.
+	unsigned int iVideoMessageLimit;
+	unsigned int iVideoMessageBurst;
+
 	bool broadcastListenerVolumeAdjustments;
 
 	QSslCertificate qscCert;

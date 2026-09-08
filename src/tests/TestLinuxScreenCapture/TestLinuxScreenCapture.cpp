@@ -201,8 +201,12 @@ private slots:
 		spa_buffer buffer{};
 		buffer.n_datas   = 1;
 		buffer.datas     = &data;
+		// An empty chunk produces no frame at all - neither the producer's stale bytes (255 here) nor,
+		// as an earlier version did, a synthetic black frame: that black frame reached every viewer as a
+		// flash to black and cost the sender a full-tile re-send of the next real frame. The previous
+		// frame stays current instead - see onStreamProcess().
 		const auto frame = SourceProbe::imageFromBuffer(&buffer, QSize(2, 2), SPA_VIDEO_FORMAT_BGRA);
-		QCOMPARE(frame.pixel(0, 0), qRgb(0, 0, 0));
+		QVERIFY(frame.isNull());
 	}
 	void restartDiscardsOldFramesAndErrors() {
 		SourceProbe source;

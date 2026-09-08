@@ -490,8 +490,19 @@ void PipeWireScreenVideoSource::onStreamProcess() {
 		return;
 	}
 
+	const bool emptyChunk = buffer->buffer && buffer->buffer->n_datas && buffer->buffer->datas
+							&& buffer->buffer->datas[0].chunk
+							&& (static_cast< std::uint32_t >(buffer->buffer->datas[0].chunk->flags) & SPA_CHUNK_FLAG_EMPTY);
+
 	QImage frame = imageFromBuffer(buffer->buffer, m_size, m_spaFormat);
 	pw_stream_queue_buffer(m_stream, buffer);
+
+	if (emptyChunk) {
+		// Not a drop, not a frame: the compositor had nothing new to show. The last frame delivered stays
+		// the current picture. Not counted towards the persistent-drop failure either.
+		return;
+	}
+
 	if (frame.isNull()) {
 		reportPersistentDrop(tr("The compositor is delivering screen frames in a form this client cannot read."));
 		return;
@@ -527,8 +538,11 @@ QImage PipeWireScreenVideoSource::imageFromBuffer(const spa_buffer *buffer, QSiz
 	if (frame.isNull())
 		return {};
 	if (static_cast< std::uint32_t >(data.chunk->flags) & SPA_CHUNK_FLAG_EMPTY) {
-		frame.fill(Qt::black);
-		return frame;
+		// A buffer with no picture in it. This used to be turned into a genuinely black frame, which was
+		// worse than useless: every viewer saw the share flash to black, the encoder recorded every tile
+		// as "black", and the next real frame was a forced all-tiles burst - exactly the burst that loses
+		// tiles and leaves black rectangles behind. The previous frame stays valid; this one is skipped.
+		return {};
 	}
 	const auto *base = static_cast< const std::uint8_t * >(data.data) + offset;
 	for (int y = 0; y < size.height(); ++y)

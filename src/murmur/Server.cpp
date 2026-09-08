@@ -199,6 +199,20 @@ Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &conne
 						.arg(addressToString(ss->serverAddress(), usPort), errno));
 #endif
 			} else {
+				// Sized for video, not voice: one screen-share frame is up to a hundred-odd JPEG tiles of
+				// a dozen datagrams each, arriving from the sender in one burst and going back out to
+				// every subscriber in one burst. Whatever overflows the platform default (a couple of
+				// hundred kilobytes) is dropped silently, and on the viewer's screen each dropped tile is
+				// a black rectangle until the next refresh. Best effort - the kernel may cap this.
+				{
+					const int bufferBytes = VIDEO_UDP_BUFFER_BYTES;
+					if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast< const char * >(&bufferBytes),
+								   sizeof(bufferBytes))
+						|| setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast< const char * >(&bufferBytes),
+									  sizeof(bufferBytes))) {
+						log("Server: Failed to enlarge UDP socket buffers for video");
+					}
+				}
 #ifdef Q_OS_UNIX
 				int val = 0xe0;
 				if (setsockopt(sock, IPPROTO_IP, IP_TOS, &val, sizeof(val))) {
@@ -373,6 +387,8 @@ void Server::readParams() {
 	iMessageBurst                      = Meta::mp->iMessageBurst;
 	iPluginMessageLimit                = Meta::mp->iPluginMessageLimit;
 	iPluginMessageBurst                = Meta::mp->iPluginMessageBurst;
+	iVideoMessageLimit                 = Meta::mp->iVideoMessageLimit;
+	iVideoMessageBurst                 = Meta::mp->iVideoMessageBurst;
 	broadcastListenerVolumeAdjustments = Meta::mp->broadcastListenerVolumeAdjustments;
 	m_suggestVersion                   = Meta::mp->m_suggestVersion;
 	m_suggestPositional                = Meta::mp->suggestPositional;
@@ -493,6 +509,14 @@ void Server::readParams() {
 	m_dbWrapper.getConfigurationTo(iServerNum, "pluginmessageburst", iPluginMessageBurst);
 	if (iPluginMessageBurst < 1) { // Prevent disabling messages entirely
 		iPluginMessageBurst = 1;
+	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videomessagelimit", iVideoMessageLimit);
+	if (iVideoMessageLimit < 1) { // Prevent disabling video control entirely
+		iVideoMessageLimit = 1;
+	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videomessageburst", iVideoMessageBurst);
+	if (iVideoMessageBurst < 1) { // Prevent disabling video control entirely
+		iVideoMessageBurst = 1;
 	}
 	m_dbWrapper.getConfigurationTo(iServerNum, "broadcastlistenervolumeadjustments",
 								   broadcastListenerVolumeAdjustments);
@@ -1607,10 +1631,118 @@ bool Server::mayReceiveVideo(unsigned int subscriberSession, unsigned int sender
 	// subscription was made. Both parties move, and the question a receiver is really asking is "may I
 	// see what is happening in that room", which only that channel can answer.
 	//
+	// And "that room" is taken literally, as it is for voice: the subscriber has to actually be in the
+	// sender's channel, or in one linked to it. Permission to enter a room is not the same as being in
+	// it - on a default server everyone may enter everywhere, and judging by permission alone put every
+	// stream on the server in front of every user on it regardless of channel.
+	if (!subscriber->cChannel) {
+		return false;
+	}
+
+	if (subscriber->cChannel != sender->cChannel && !sender->cChannel->allLinks().contains(subscriber->cChannel)) {
+		return false;
+	}
+
 	// Enter is required as well as ReceiveVideo, so that video can never reach somewhere its recipient
 	// could not go and simply listen.
 	return hasPermission(subscriber, sender->cChannel, ChanACL::Enter)
 		   && hasPermission(subscriber, sender->cChannel, ChanACL::ReceiveVideo);
+}
+
+Server::VideoVisibility Server::videoVisibilityFor(ServerUser *user) {
+	VideoVisibility visibility;
+
+	if (!user) {
+		return visibility;
+	}
+
+	for (const auto &entry : m_videoAnnouncements) {
+		const unsigned int sender = entry.first.first;
+
+		if (sender == user->uiSession) {
+			std::set< unsigned int > &viewers = visibility.viewers[entry.first];
+
+			for (ServerUser *other : qhUsers) {
+				if (other == user || other->sState != ServerUser::Authenticated) {
+					continue;
+				}
+
+				if (mayReceiveVideo(other->uiSession, sender)) {
+					viewers.insert(other->uiSession);
+				}
+			}
+		} else if (mayReceiveVideo(user->uiSession, sender)) {
+			visibility.receivable.insert(entry.first);
+		}
+	}
+
+	return visibility;
+}
+
+void Server::syncVideoVisibility(ServerUser *user, const VideoVisibility &before) {
+	if (!user || user->sState != ServerUser::Authenticated) {
+		return;
+	}
+
+	const VideoVisibility after = videoVisibilityFor(user);
+
+	const auto endOfStream = [](const std::pair< unsigned int, unsigned int > &key) {
+		MumbleProto::VideoState end;
+		end.set_session(key.first);
+		end.set_stream_id(key.second);
+		end.set_active(false);
+
+		return end;
+	};
+
+	// Streams from other people the mover can no longer see are ended for it, and ones it can now see
+	// are announced to it as though they had just started. The former matters as much as the latter: a
+	// stream the client is merely previewing, unwatched, holds no subscription for revalidation to drop,
+	// so nothing else would ever tell it the placeholder is for a stream it cannot watch any more.
+	for (const auto &key : before.receivable) {
+		if (after.receivable.find(key) == after.receivable.end()) {
+			sendMessage(user, endOfStream(key));
+		}
+	}
+
+	for (const auto &key : after.receivable) {
+		if (before.receivable.find(key) == before.receivable.end()) {
+			const auto announcement = m_videoAnnouncements.find(key);
+
+			if (announcement != m_videoAnnouncements.end()) {
+				sendMessage(user, announcement->second);
+			}
+		}
+	}
+
+	// The mover's own streams, seen from everyone else's side.
+	for (const auto &entry : after.viewers) {
+		const auto announcement = m_videoAnnouncements.find(entry.first);
+
+		if (announcement == m_videoAnnouncements.end()) {
+			continue;
+		}
+
+		const auto previous = before.viewers.find(entry.first);
+		static const std::set< unsigned int > none;
+		const std::set< unsigned int > &viewersBefore = previous == before.viewers.end() ? none : previous->second;
+
+		for (const unsigned int session : viewersBefore) {
+			if (entry.second.find(session) == entry.second.end()) {
+				if (ServerUser *viewer = qhUsers.value(session)) {
+					sendMessage(viewer, endOfStream(entry.first));
+				}
+			}
+		}
+
+		for (const unsigned int session : entry.second) {
+			if (viewersBefore.find(session) == viewersBefore.end()) {
+				if (ServerUser *viewer = qhUsers.value(session)) {
+					sendMessage(viewer, announcement->second);
+				}
+			}
+		}
+	}
 }
 
 void Server::log(ServerUser *u, const QString &str) const {
@@ -2311,6 +2443,9 @@ void Server::userEnterChannel(User *p, Channel *c, MumbleProto::UserState &mpus)
 
 	Channel *old = p->cChannel;
 
+	// Who could see what before the move, for syncVideoVisibility() at the end to diff against.
+	const VideoVisibility videoBefore = videoVisibilityFor(static_cast< ServerUser * >(p));
+
 	{
 		QWriteLocker wl(&qrwlVoiceThread);
 		c->addUser(p);
@@ -2347,8 +2482,10 @@ void Server::userEnterChannel(User *p, Channel *c, MumbleProto::UserState &mpus)
 		sendClientPermission(static_cast< ServerUser * >(p), c->cParent);
 
 	// Moving into a channel where somebody is already sharing is the same problem as connecting into
-	// one: the announcement happened before this user could receive it, so it has to be repeated.
-	sendActiveVideoStreams(static_cast< ServerUser * >(p));
+	// one: the announcement happened before this user could receive it, so it has to be repeated. The
+	// reverse cases - the mover is the one sharing, or is leaving a stream behind - are the same problem
+	// seen from the other side, and were not handled at all before this went through a proper diff.
+	syncVideoVisibility(static_cast< ServerUser * >(p), videoBefore);
 }
 
 bool Server::hasPermission(ServerUser *p, Channel *c, QFlags< ChanACL::Perm > perm) {

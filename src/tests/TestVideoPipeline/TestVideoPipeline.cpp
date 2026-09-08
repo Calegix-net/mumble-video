@@ -20,6 +20,7 @@
 #include <QtTest>
 
 #include <cstdint>
+#include <set>
 #include <vector>
 
 using namespace Mumble::Protocol;
@@ -94,6 +95,7 @@ private slots:
 	void oversizeTilesAreRequantisedNotDropped();
 	void every128PxTileFitsOneTransportUnit();
 	void periodicRefreshIsStaggeredNotBurst();
+	void aFullFrameLargerThanTheBurstCapIsSpreadOverFramesWithoutLoss();
 };
 
 void TestVideoPipeline::syntheticSourceProducesDistinctFrames() {
@@ -407,3 +409,57 @@ void TestVideoPipeline::periodicRefreshIsStaggeredNotBurst() {
 
 QTEST_MAIN(TestVideoPipeline)
 #include "TestVideoPipeline.moc"
+
+// A keyframe of a large screen used to go out as one burst of every tile - 135 units for 1080p, 510
+// for 4K - and whatever that burst overran was dropped and, its hash already recorded as sent, stayed
+// a black rectangle on every viewer's screen until the periodic refresh. The encoder now caps one
+// call's output at MAX_UNITS_PER_FRAME and carries the rest over to the next call, without losing any.
+void TestVideoPipeline::aFullFrameLargerThanTheBurstCapIsSpreadOverFramesWithoutLoss() {
+	// 1920x1088 at 128px tiles is 15x9 = 135 tiles - more than the cap, but not by a whole multiple of
+	// it, so the last frame of the spread is a partial one.
+	SyntheticVideoSource source(1920, 1088);
+	TiledImageEncoder encoder;
+
+	const QImage frame = source.render(0);
+
+	std::set< std::pair< unsigned int, unsigned int > > covered;
+	std::size_t maxUnitsInOneFrame = 0;
+	int framesUntilComplete        = 0;
+
+	// The first call is a keyframe (nothing was hashed yet); the following ones are fed the identical
+	// frame, so anything they emit is the deferred remainder of that keyframe - plus, from the second
+	// call on, whichever tiles the staggered periodic refresh happens to fall on, which is why the loop
+	// counts calls until every tile has been covered rather than until a call emits nothing.
+	unsigned int tileCount = 0;
+	unsigned int unitsEmitted = 0;
+
+	for (int i = 0; i < 8 && (tileCount == 0 || covered.size() < tileCount); ++i) {
+		const std::vector< EncodedVideoUnit > units =
+			encoder.encode(frame, STREAM, static_cast< std::uint64_t >(1 + i), static_cast< std::uint64_t >(1 + i));
+
+		tileCount = encoder.lastStats().tilesConsidered;
+
+		++framesUntilComplete;
+		maxUnitsInOneFrame = std::max(maxUnitsInOneFrame, units.size());
+		unitsEmitted += static_cast< unsigned int >(units.size());
+
+		for (const EncodedVideoUnit &unit : units) {
+			covered.emplace(unit.header.x, unit.header.y);
+		}
+	}
+
+	QCOMPARE(tileCount, 135u);
+
+	QVERIFY2(maxUnitsInOneFrame <= TiledImageEncoder::MAX_UNITS_PER_FRAME, "one frame exceeded the burst cap");
+	QVERIFY2(framesUntilComplete == 2, "135 tiles should take exactly two calls under a cap of 128");
+
+	// Every tile went out across the spread - nothing lost. At most a handful more than the grid, since
+	// the second call also carries its share of the periodic refresh.
+	QCOMPARE(static_cast< unsigned int >(covered.size()), tileCount);
+	QVERIFY(unitsEmitted < tileCount + 8);
+
+	// And a subsequent unchanged frame emits nothing beyond its share of the periodic refresh - the
+	// deferred tiles are not still marked as pending.
+	const std::vector< EncodedVideoUnit > settled = encoder.encode(frame, STREAM, 20, 20);
+	QVERIFY(settled.size() < TiledImageEncoder::MAX_UNITS_PER_FRAME / 4);
+}

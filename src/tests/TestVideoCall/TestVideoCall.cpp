@@ -227,6 +227,7 @@ private slots:
 	void aKeyframeRequestReachesTheSenderOnceASecond();
 	void aDeniedSubscriptionGetsAnExplicitReply();
 	void recoveryRequestsDoNotKeepASilentStreamAlive();
+	void aRapidlyToggledShareStillReachesViewers();
 
 private:
 	QTemporaryDir m_dir;
@@ -613,6 +614,65 @@ void TestVideoCall::anUnsubscribedClientReceivesNothing() {
 
 	QCOMPARE(received, 0);
 	QVERIFY(!complete);
+}
+
+
+void TestVideoCall::aRapidlyToggledShareStillReachesViewers() {
+	TestClient alice;
+	QVERIFY2(alice.connectAndAuthenticate("alice-toggle", m_port), "alice could not authenticate");
+	TestClient bob;
+	QVERIFY2(bob.connectAndAuthenticate("bob-toggle", m_port), "bob could not authenticate");
+
+	// Alice toggles a share on and off faster than the server's message bucket refills. Each "on" is a
+	// fresh stream id - a genuine start - and the "off" frees it, so she never holds more than one live
+	// stream and never approaches the per-sender cap. The final "on" must still reach Bob. Before the fix,
+	// active=true was charged to the general message leaky-bucket (burst 5, 1/s); once it emptied, the
+	// later starts were dropped silently, and the share that was actually live was invisible to every
+	// viewer - exactly the "loses track of whose camera/screen is on" failure a fast toggle produced.
+	const int cycles              = 8;
+	std::uint32_t lastStreamId    = 0;
+	for (int i = 0; i < cycles; ++i) {
+		const std::uint32_t id = 1000 + static_cast< std::uint32_t >(i);
+		lastStreamId           = id;
+
+		MumbleProto::VideoState on;
+		on.set_stream_id(id);
+		on.set_active(true);
+		on.set_codec(MumbleProto::VideoState_Codec_VP8);
+		on.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+		on.set_width(640);
+		on.set_height(480);
+		alice.sendTcp(on, TCPMessageType::VideoState);
+
+		MumbleProto::VideoState off;
+		off.set_stream_id(id);
+		off.set_active(false);
+		alice.sendTcp(off, TCPMessageType::VideoState);
+	}
+
+	// Bob must have been told the final stream started - not merely one of the first few before the bucket
+	// ran dry.
+	bool sawFinalStart = false;
+	QElapsedTimer timer;
+	timer.start();
+	while (timer.elapsed() < 4000) {
+		QByteArray body;
+		if (!bob.waitFor(TCPMessageType::VideoState, body, 500)) {
+			continue;
+		}
+
+		MumbleProto::VideoState state;
+		if (!state.ParseFromArray(body.constData(), static_cast< int >(body.size()))) {
+			continue;
+		}
+
+		if (state.active() && state.stream_id() == lastStreamId) {
+			sawFinalStart = true;
+			break;
+		}
+	}
+
+	QVERIFY2(sawFinalStart, "the final toggled-on share never reached the viewer - a genuine start was rate-limited away");
 }
 
 QTEST_MAIN(TestVideoCall)

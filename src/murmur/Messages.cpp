@@ -2587,13 +2587,40 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 	ZoneScoped;
 
 	MSG_SETUP(ServerUser::Authenticated);
-	RATELIMIT(uSource);
+
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
 
 	const auto streamKey =
 		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
+
+	// Metering is deliberately narrow: only a *redundant* re-announcement of a stream this sender already
+	// has announced as active. An end-of-stream is never metered - dropping one leaves the stream
+	// announced forever, replayed to every later joiner, the classic "dead share that will not go away".
+	// A genuine start - a stream_id not currently announced - is never metered either, and that is the fix
+	// for the symmetric failure: RATELIMIT drops silently, so a start dropped that way leaves a live share
+	// invisible to everyone. It surfaced as a camera or screen toggled off and back on faster than the
+	// message bucket refills (each toggle-on is a fresh stream_id) simply never reappearing for any viewer.
+	// Both directions of a real state change must get through; abuse is bounded elsewhere - a sender may
+	// hold at most MAX_STREAMS_PER_SENDER distinct live streams (announceStream caps it), and re-announcing
+	// one it already holds is exactly what this meters.
+	const bool alreadyAnnounced = m_videoAnnouncements.find(streamKey) != m_videoAnnouncements.end();
+
+	if (msg.active() && alreadyAnnounced) {
+		if (uSource->m_videoControlBucket.ratelimit(1)) {
+			return;
+		}
+	}
+
+	if (!msg.active() && m_videoAnnouncements.find(streamKey) == m_videoAnnouncements.end()) {
+		// Ending a stream nobody was ever told about: nothing to relay, and - being the one message a
+		// client may send without earning a rate-limit token - nothing worth fanning out to every user
+		// on the server for a client that just keeps sending it.
+		m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), false);
+
+		return;
+	}
 
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are
@@ -2634,15 +2661,18 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe &msg) {
 	ZoneScoped;
 
-	// Rate-limited like every other control message. It is NOT free: subscribe runs two ACL walks
-	// (Enter + ReceiveVideo) per call, and an authenticated client without ReceiveVideo can never
-	// satisfy them, so it is never inserted and the idempotent early-out never fires - every repeat
-	// re-runs both walks and earns a reflected reply. Leaving it unmetered was an unbounded-work DoS.
-	// The freeze that first motivated removing the limit is handled at the source instead: the client
-	// asks for a keyframe at most once per second per stream, and both encoders emit a keyframe on
-	// their own schedule regardless, so a conforming client stays well under the bucket.
+	// Metered, because subscribe is NOT free: it runs two ACL walks (Enter + ReceiveVideo) per call, and
+	// an authenticated client without ReceiveVideo can never satisfy them, so it is never inserted and the
+	// idempotent early-out never fires - every repeat re-runs both walks and earns a reflected reply.
+	// Leaving it unmetered was an unbounded-work DoS. But it is metered on the dedicated video bucket, not
+	// the small chat one: a client legitimately watching many streams asks each for a keyframe up to once
+	// a second, and an auto-resume across a toggle re-subscribes, so on the chat bucket (burst 5, 1/s) a
+	// heavy but entirely conforming watcher starved and its watch/keyframe requests were dropped - tiles
+	// that never painted. The video bucket is sized for that traffic; see Meta::iVideoMessageLimit.
 	MSG_SETUP(ServerUser::Authenticated);
-	RATELIMIT(uSource);
+	if (uSource->m_videoControlBucket.ratelimit(1)) {
+		return;
+	}
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	const unsigned int sender = msg.session();

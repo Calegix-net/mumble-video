@@ -15,12 +15,15 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QPaintEvent>
+#include <QtWidgets/QApplication>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QToolButton>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -33,50 +36,155 @@ namespace {
  * the video dock happened to have, which on any window smaller than the monitor is not "fullscreen" by
  * any definition a user watching, say, someone else's gameplay would recognise.
  *
- * Deliberately dumb: it owns no state of its own beyond what setContent() was last called with, and reacts
- * to Esc or a double-click by asking its owner to leave fullscreen rather than closing itself - m_focus is
- * the single source of truth for what is fullscreened, in VideoGrid, and this window is just one of the
- * things relayout() brings into line with it.
+ * Deliberately dumb: it owns no picture of its own. It is handed a provider that reads the focused tile's
+ * current picture straight out of the grid at paint time, and reacts to Esc or a double-click by asking its
+ * owner to leave fullscreen rather than closing itself - m_focus is the single source of truth for what is
+ * fullscreened, in VideoGrid, and this window is just one of the things relayout() brings into line with it.
+ *
+ * Not holding a QImage of its own is a performance matter, not a stylistic one. An earlier version kept a
+ * copy of the surface's canvas here, which - QImage being implicitly shared - meant the grid's own canvas
+ * had two owners. The very next tile painted into that canvas then had to detach it: a full deep copy of
+ * a canvas that for a screen share is the sender's entire desktop, up to MAX_SURFACE_WIDTH x
+ * MAX_SURFACE_HEIGHT, some 30 MB. A busy screen share delivers dozens of tiles a second, so watching one
+ * fullscreen cost the viewer's machine on the order of a gigabyte of memcpy per second plus the allocator
+ * churn to match - which is exactly the "watching a screen share fullscreen grinds the machine to a halt"
+ * report that led here. Reading the canvas at paint time only, through a handle that lives no longer than
+ * the paint itself, never leaves a second owner behind for the next tile to trip over.
+ *
+ * Two further costs are kept in check for the same reason. Repaints are coalesced to at most
+ * REPAINT_INTERVAL_MSEC apart (Qt's own update() coalescing only collapses requests made within one turn
+ * of the event loop, and each incoming tile is its own turn), and each repaint is confined to the screen
+ * region the changed tiles actually map to, so a 128-pixel tile changing on a 4K share re-scales a
+ * 128-pixel patch of the monitor, not the whole monitor.
  */
 class FullscreenVideoWindow : public QWidget {
 public:
-	explicit FullscreenVideoWindow(VideoGrid *owner) : QWidget(owner, Qt::Window), m_owner(owner) {
+	/// Fills in the picture and label to show right now. The image handed back must be treated as a
+	/// short-lived read-only view - see the class comment.
+	using ContentProvider = std::function< void(QImage &image, QString &label) >;
+
+	/// About 30 repaints a second at most. Screen shares are rarely sent faster than that, and a paint
+	/// here is a real, CPU-side scale of the sender's whole desktop onto the whole monitor when everything
+	/// is dirty - not something worth doing more often than the eye can tell apart.
+	static constexpr int REPAINT_INTERVAL_MSEC = 33;
+
+	explicit FullscreenVideoWindow(VideoGrid *owner, ContentProvider provider)
+		: QWidget(owner, Qt::Window), m_owner(owner), m_provider(std::move(provider)) {
 		setWindowTitle(tr("Mumble"));
 
 		QPalette pal = palette();
 		pal.setColor(QPalette::Window, Qt::black);
 		setPalette(pal);
 		setAutoFillBackground(true);
+
+		m_repaintTimer = new QTimer(this);
+		m_repaintTimer->setSingleShot(true);
+		m_repaintTimer->setInterval(REPAINT_INTERVAL_MSEC);
+		connect(m_repaintTimer, &QTimer::timeout, this, &FullscreenVideoWindow::flushRepaint);
 	}
 
-	void setContent(const QImage &image, const QString &label) {
-		m_image = image;
-		m_label = label;
-		update();
+	/// The whole picture is different - a different tile was focused, or the stream restarted. Everything
+	/// is repainted, on the next coalesced repaint.
+	void contentReplaced() {
+		m_wholeDirty = true;
+		scheduleRepaint();
+	}
+
+	/// Only the given rectangle of the picture, in the picture's own pixel coordinates, changed.
+	void contentChanged(const QRect &sourceRect) {
+		if (!m_wholeDirty) {
+			m_dirtySource |= sourceRect;
+		}
+
+		scheduleRepaint();
 	}
 
 protected:
-	void paintEvent(QPaintEvent *) override {
-		QPainter painter(this);
-		painter.fillRect(rect(), Qt::black);
+	/// Where the picture of the given size lands on this window - centred, letterboxed, never distorted.
+	/// One function, used by both paintEvent() and flushRepaint(), so the region a dirty tile is mapped to
+	/// and the region that tile is then painted into can never disagree.
+	QRect targetRectFor(const QSize &imageSize) const {
+		const QSize scaled = imageSize.scaled(size(), Qt::KeepAspectRatio);
 
-		if (!m_image.isNull()) {
-			const QSize scaled = m_image.size().scaled(size(), Qt::KeepAspectRatio);
-			const QRect target((width() - scaled.width()) / 2, (height() - scaled.height()) / 2, scaled.width(),
-							   scaled.height());
+		return QRect((width() - scaled.width()) / 2, (height() - scaled.height()) / 2, scaled.width(),
+					 scaled.height());
+	}
 
-			painter.drawImage(target, m_image);
+	void scheduleRepaint() {
+		if (!m_repaintTimer->isActive()) {
+			m_repaintTimer->start();
 		}
+	}
+
+	void flushRepaint() {
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		const bool whole = m_wholeDirty || image.isNull() || image.size() != m_paintedImageSize;
+
+		m_wholeDirty = false;
+
+		if (whole) {
+			m_dirtySource = QRect();
+			update();
+
+			return;
+		}
+
+		if (m_dirtySource.isEmpty()) {
+			return;
+		}
+
+		// Map the dirty picture rectangle onto the window, and pad it by a couple of pixels either side:
+		// the scale is fractional, and the raster engine's sampling at a patch's edge has to agree with what
+		// was painted last time around it, which it does as long as the patch is repainted a little wider
+		// than the rounding could possibly have moved it.
+		const QRect target = targetRectFor(image.size());
+		const double scaleX = static_cast< double >(target.width()) / image.width();
+		const double scaleY = static_cast< double >(target.height()) / image.height();
+
+		const QRect dirty(static_cast< int >(std::floor(target.x() + m_dirtySource.x() * scaleX)) - 2,
+						  static_cast< int >(std::floor(target.y() + m_dirtySource.y() * scaleY)) - 2,
+						  static_cast< int >(std::ceil(m_dirtySource.width() * scaleX)) + 4,
+						  static_cast< int >(std::ceil(m_dirtySource.height() * scaleY)) + 4);
+
+		m_dirtySource = QRect();
+		update(dirty.intersected(rect()));
+	}
+
+	void paintEvent(QPaintEvent *event) override {
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		QPainter painter(this);
+		painter.fillRect(event->rect(), Qt::black);
+
+		if (!image.isNull()) {
+			// Always the whole image at its full target rect, never a sub-rect of it: the clip region
+			// paintEvent() is delivered with is what confines the work to the dirty patch, and drawing with
+			// the same transform every time is what guarantees a patch's pixels are identical to those the
+			// surrounding, untouched area was painted with.
+			painter.drawImage(targetRectFor(image.size()), image);
+		}
+
+		m_paintedImageSize = image.size();
 
 		const QRect margin = rect().adjusted(16, 12, -16, -12);
 
-		if (!m_label.isEmpty()) {
+		if (!label.isEmpty()) {
 			painter.setPen(Qt::white);
-			painter.drawText(margin, Qt::AlignTop | Qt::AlignLeft, m_label);
+			painter.drawText(margin, Qt::AlignTop | Qt::AlignLeft, label);
 		}
 
 		painter.setPen(QColor(200, 200, 200));
 		painter.drawText(margin, Qt::AlignBottom | Qt::AlignRight, tr("Esc or double-click to exit fullscreen"));
+	}
+
+	void resizeEvent(QResizeEvent *event) override {
+		QWidget::resizeEvent(event);
+		m_wholeDirty = true;
 	}
 
 	void keyPressEvent(QKeyEvent *event) override {
@@ -93,8 +201,16 @@ protected:
 
 private:
 	VideoGrid *m_owner;
-	QImage m_image;
-	QString m_label;
+	ContentProvider m_provider;
+	QTimer *m_repaintTimer = nullptr;
+
+	/// Accumulated since the last repaint, in picture pixels. Ignored while m_wholeDirty is set.
+	QRect m_dirtySource;
+	bool m_wholeDirty = true;
+
+	/// The picture size the last paint used. A picture that has since changed size - a surface growing to
+	/// fit a tile at its edge, say - moves the whole target rect, so nothing painted before it is reusable.
+	QSize m_paintedImageSize;
 };
 
 } // namespace
@@ -298,6 +414,9 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	const bool isNewSurface = m_surfaces.find(key) == m_surfaces.end();
 	bool resumeWatching     = false;
 
+	// Stream ids of replaced surfaces this client was still subscribed to - see below.
+	std::vector< unsigned int > replacedWatchedStreams;
+
 	if (isNewSurface) {
 		bool senderAlreadyPresent = false;
 
@@ -307,7 +426,11 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 				// and if the end of the old one never reached us - the control message was dropped, or
 				// the sender's client died - the old surface would sit there as a stuck last frame next
 				// to the live one, forever. The newer announcement wins.
-				resumeWatching       = resumeWatching || it->second.watching;
+				if (it->second.watching) {
+					resumeWatching = true;
+					replacedWatchedStreams.push_back(it->second.streamID);
+				}
+
 				it                   = m_surfaces.erase(it);
 				senderAlreadyPresent = true;
 				continue;
@@ -326,6 +449,21 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		if (!senderAlreadyPresent && distinctSenderCount() >= static_cast< std::size_t >(MAX_SENDERS)) {
 			return;
 		}
+
+		// The common toggle case: the old stream's end already arrived, so the loop above found nothing
+		// to resume from, but the viewer was watching this sender's camera (or screen) moments ago. A
+		// restart of the same kind within the grace window resumes watching - see m_recentlyWatched.
+		if (!resumeWatching) {
+			const auto recent = m_recentlyWatched.find({ senderSession, sourceKind });
+
+			if (recent != m_recentlyWatched.end()) {
+				if (QDateTime::currentMSecsSinceEpoch() - recent->second <= RESUME_WATCH_GRACE_MSEC) {
+					resumeWatching = true;
+				}
+
+				m_recentlyWatched.erase(recent);
+			}
+		}
 	}
 
 	Surface &surface = m_surfaces[key];
@@ -337,6 +475,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		surface.pendingTiles.clear();
 		surface.canvas = QImage();
 		surface.vp8.reset();
+		surface.tileFrameNumbers.clear();
 		surface.lastFrameNumber    = 0;
 		surface.hasDecodedFrame    = false;
 		surface.awaitingKeyframe   = false;
@@ -363,6 +502,17 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		// The watch button must be available before the first frame: an unwatched stream receives none.
 		emit senderCountChanged(tileCount());
 		relayout();
+
+		// The old stream's surface is gone, but the server was never told to stop relaying it: that is
+		// precisely the case this replacement exists for - the old stream's end never arrived - so as far
+		// as the server knows this client is still subscribed. Left alone, every silent restart leaks one
+		// subscription that keeps costing bandwidth for a picture nothing is painting any more, until the
+		// per-user cap is hit and a genuinely wanted stream is refused. Withdrawn before the new one is
+		// requested, so the two never race for the same slot under that cap.
+		for (const unsigned int oldStreamID : replacedWatchedStreams) {
+			emit watchToggled(senderSession, oldStreamID, false);
+		}
+
 		if (resumeWatching)
 			emit watchToggled(senderSession, streamID, true);
 	}
@@ -591,14 +741,27 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 		return;
 	}
 
-	// Reassembly order can differ from network frame order. Dropping a late tile may
-	// leave a gap until refresh, but it must never overwrite newer pixels. Apply the
-	// watermark after decoding so invalid JPEGs cannot move it forward.
-	if (surface.hasDecodedFrame && frameNumber < surface.lastFrameNumber)
+	// Reassembly order can differ from network frame order. Dropping a late tile may leave a gap until
+	// refresh, but it must never overwrite newer pixels. Applied after decoding so invalid JPEGs cannot
+	// move it forward.
+	//
+	// The watermark is per tile position, not per surface. TiledImage only ever sends the tiles that
+	// changed, so frame N+1 typically carries a handful of tiles and frame N's stragglers cover other
+	// parts of the screen entirely: a surface-wide watermark threw those away the moment any tile of
+	// N+1 landed first, and a region that had never been painted before stayed a black rectangle until
+	// the periodic refresh got round to it. Only a tile that a newer frame has actually painted at the
+	// same spot has anything to protect.
+	const auto tileKey = (static_cast< std::uint64_t >(x) << 32) | y;
+	const auto painted = surface.tileFrameNumbers.find(tileKey);
+
+	if (painted != surface.tileFrameNumbers.end() && frameNumber < painted->second) {
 		return;
-	surface.hasDecodedFrame     = true;
-	surface.lastFrameNumber     = frameNumber;
-	surface.consecutiveFailures = 0;
+	}
+
+	surface.tileFrameNumbers[tileKey] = frameNumber;
+	surface.hasDecodedFrame           = true;
+	surface.lastFrameNumber           = std::max(surface.lastFrameNumber, frameNumber);
+	surface.consecutiveFailures       = 0;
 
 	applyDecodedTile(existing->first, surface, x, y, tile);
 }
@@ -636,10 +799,22 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 	}
 
 	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
-		updateFullscreenWindow();
+		// Just the rectangle this tile covers, in canvas pixels: the fullscreen window maps that onto the
+		// monitor and repaints only that patch. Repainting the whole monitor for every 128-pixel tile of
+		// a screen share was, alongside the canvas copy described on FullscreenVideoWindow, what made
+		// watching one fullscreen so expensive.
+		notifyFullscreenContentChanged(QRect(static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height()));
 	}
 
-	update();
+	// Likewise only this tile's own cell here, not the whole grid: paintEvent() is clipped to the region
+	// it is asked for, so every other tile's scaling is skipped rather than redone on each incoming unit.
+	const int slot = slotForSurface(key);
+
+	if (slot >= 0) {
+		update(cellRect(currentLayout(), slot));
+	} else {
+		update();
+	}
 }
 
 void VideoGrid::setSelfCameraFrame(const QImage &frame) {
@@ -657,10 +832,11 @@ void VideoGrid::setSelfCameraFrame(const QImage &frame) {
 	}
 
 	if (m_focus == FocusTarget::SelfCamera) {
-		updateFullscreenWindow();
+		notifyFullscreenContentChanged(frame.rect());
 	}
 
-	update();
+	// Own camera is always the first cell, when present.
+	update(cellRect(currentLayout(), 0));
 }
 
 void VideoGrid::clearSelfCameraFrame() {
@@ -687,10 +863,11 @@ void VideoGrid::setSelfScreenFrame(const QImage &frame) {
 	}
 
 	if (m_focus == FocusTarget::SelfScreen) {
-		updateFullscreenWindow();
+		notifyFullscreenContentChanged(frame.rect());
 	}
 
-	update();
+	// Own screen sits after own camera, if there is one.
+	update(cellRect(currentLayout(), m_selfCameraFrame.isNull() ? 0 : 1));
 }
 
 void VideoGrid::clearSelfScreenFrame() {
@@ -705,10 +882,21 @@ void VideoGrid::clearSelfScreenFrame() {
 }
 
 void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) {
-	if (m_surfaces.erase(surfaceKey(senderSession, streamID)) > 0) {
-		emit senderCountChanged(tileCount());
-		relayout();
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+
+	if (it == m_surfaces.end()) {
+		return;
 	}
+
+	// Remember a watched stream's sender+kind so a restart within the grace window resumes watching
+	// rather than dropping the viewer back to a placeholder - see m_recentlyWatched.
+	if (it->second.watching) {
+		m_recentlyWatched[{ senderSession, it->second.sourceKind }] = QDateTime::currentMSecsSinceEpoch();
+	}
+
+	m_surfaces.erase(it);
+	emit senderCountChanged(tileCount());
+	relayout();
 }
 
 void VideoGrid::removeSender(unsigned int senderSession) {
@@ -724,6 +912,11 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 	}
 
 	m_senderNames.erase(senderSession);
+
+	// The sender is gone entirely - do not resume watching them if some later stream reuses the session.
+	for (auto it = m_recentlyWatched.begin(); it != m_recentlyWatched.end();) {
+		it = (it->first.first == senderSession) ? m_recentlyWatched.erase(it) : std::next(it);
+	}
 
 	if (removedAny) {
 		emit senderCountChanged(tileCount());
@@ -1166,37 +1359,65 @@ void VideoGrid::updateFullscreenWindow() {
 		return;
 	}
 
-	QImage image;
-	QString label;
-
-	if (m_focus == FocusTarget::SelfCamera) {
-		image = m_selfCameraFrame;
-		label = tr("You");
-	} else if (m_focus == FocusTarget::SelfScreen) {
-		image = m_selfScreenFrame;
-		label = tr("You (screen)");
-	} else if (m_focus == FocusTarget::Surface) {
-		const auto it = m_surfaces.find(m_focusedSurfaceKey);
-
-		if (it != m_surfaces.end()) {
-			image = it->second.canvas;
-			label = labelForSurface(it->second);
-		}
-	}
-
-	if (image.isNull()) {
-		return;
-	}
-
+	// validateFocus() has already run by the time relayout() gets here, so whatever is focused has a
+	// picture - but the window is created lazily and reads that picture for itself, at paint time, rather
+	// than being handed a copy. See FullscreenVideoWindow's class comment for why the copy was the whole
+	// problem.
 	if (!m_fullscreenWindow) {
-		m_fullscreenWindow = new FullscreenVideoWindow(this);
+		m_fullscreenWindow = new FullscreenVideoWindow(this, [this](QImage &image, QString &label) {
+			if (m_focus == FocusTarget::SelfCamera) {
+				image = m_selfCameraFrame;
+				label = tr("You");
+			} else if (m_focus == FocusTarget::SelfScreen) {
+				image = m_selfScreenFrame;
+				label = tr("You (screen)");
+			} else if (m_focus == FocusTarget::Surface) {
+				const auto it = m_surfaces.find(m_focusedSurfaceKey);
+
+				if (it != m_surfaces.end()) {
+					image = it->second.canvas;
+					label = labelForSurface(it->second);
+				}
+			}
+		});
 	}
 
-	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setContent(image, label);
+	// A relayout() is the "something structural changed" path - a different tile focused, a stream
+	// re-announced, the picture appearing for the first time - so the whole window is repainted. The
+	// per-tile path, applyDecodedTile(), goes through notifyFullscreenContentChanged() with just the
+	// changed rectangle instead.
+	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
 
 	if (!m_fullscreenWindow->isVisible()) {
 		m_fullscreenWindow->showFullScreen();
 	}
+}
+
+void VideoGrid::notifyFullscreenContentChanged(const QRect &changed) {
+	if (!m_fullscreenWindow || m_focus == FocusTarget::None) {
+		return;
+	}
+
+	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentChanged(changed);
+}
+
+int VideoGrid::slotForSurface(std::uint64_t key) const {
+	// Same walk order as paintEvent(), relayoutControls(), updateHoveredBar() and the mouse handlers.
+	int index = (m_selfCameraFrame.isNull() ? 0 : 1) + (m_selfScreenFrame.isNull() ? 0 : 1);
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (it->second.watching && it->second.canvas.isNull()) {
+			continue;
+		}
+
+		if (it->first == key) {
+			return index;
+		}
+
+		++index;
+	}
+
+	return -1;
 }
 
 QString VideoGrid::labelForSurface(const Surface &surface) const {
@@ -1296,11 +1517,35 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	// A placeholder for a tile whose stream is not currently being watched - dark, labelled, and with
 	// nothing decoded into it drawn, so it is obvious at a glance that this is a deliberate "not watching"
 	// state rather than a stalled or broken picture.
+	//
+	// The eyeball is drawn large and dead centre, as the button it now actually is: a single click
+	// anywhere on the placeholder starts watching (see mouseReleaseEvent()), so the picture should look
+	// like something to click rather than a caption. The name sits above it in the ordinary text size.
 	const auto drawPlaceholder = [&](const QRect &cell, const QString &label) {
 		painter.fillRect(cell, QColor(32, 32, 32));
+
+		const QFont normalFont = painter.font();
+		QFont eyeFont          = normalFont;
+		eyeFont.setPointSize(std::max(normalFont.pointSize() * 2, std::min(cell.width(), cell.height()) / 5));
+
+		painter.setFont(eyeFont);
+		painter.setPen(QColor(210, 210, 210));
+		painter.drawText(cell, Qt::AlignCenter, QStringLiteral("👁"));
+
+		const int eyeHeight = painter.fontMetrics().height();
+		painter.setFont(normalFont);
 		painter.setPen(QColor(180, 180, 180));
-		painter.drawText(cell, Qt::AlignCenter | Qt::TextWordWrap,
-						 label.isEmpty() ? tr("👁 Click to watch") : tr("%1\n👁 Click to watch").arg(label));
+
+		// Name above the eye, caption below it - each in the half of the cell the eye is not in.
+		const QRect above(cell.x(), cell.y(), cell.width(), (cell.height() - eyeHeight) / 2);
+		const QRect below(cell.x(), cell.y() + (cell.height() + eyeHeight) / 2, cell.width(),
+						  (cell.height() - eyeHeight) / 2);
+
+		if (!label.isEmpty()) {
+			painter.drawText(above, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, label);
+		}
+
+		painter.drawText(below, Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap, tr("Click to watch"));
 	};
 
 	// The grid always shows every tile in its own cell now, fullscreen or not - a fullscreened tile is
@@ -1344,7 +1589,88 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	}
 }
 
+const VideoGrid::Surface *VideoGrid::surfaceAtSlot(int slot) const {
+	if (slot < 0) {
+		return nullptr;
+	}
+
+	// Same walk order as paintEvent(): own camera, own screen, then m_surfaces in key order.
+	int index = (m_selfCameraFrame.isNull() ? 0 : 1) + (m_selfScreenFrame.isNull() ? 0 : 1);
+
+	if (slot < index) {
+		return nullptr;
+	}
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (it->second.watching && it->second.canvas.isNull()) {
+			continue;
+		}
+
+		if (index == slot) {
+			return &it->second;
+		}
+
+		++index;
+	}
+
+	return nullptr;
+}
+
+void VideoGrid::mousePressEvent(QMouseEvent *event) {
+	m_pressedSlot = event->button() == Qt::LeftButton ? slotAt(event->pos(), currentLayout()) : -1;
+
+	if (m_pressedSlot >= 0) {
+		event->accept();
+
+		return;
+	}
+
+	QWidget::mousePressEvent(event);
+}
+
+void VideoGrid::mouseReleaseEvent(QMouseEvent *event) {
+	const int pressedSlot = m_pressedSlot;
+	m_pressedSlot         = -1;
+
+	// A click is a press and a release on the same tile - a drag that ends somewhere else is not one.
+	if (event->button() != Qt::LeftButton || pressedSlot < 0 || slotAt(event->pos(), currentLayout()) != pressedSlot) {
+		QWidget::mouseReleaseEvent(event);
+
+		return;
+	}
+
+	const Surface *surface = surfaceAtSlot(pressedSlot);
+
+	if (!surface || surface->watching) {
+		// Watched tiles, and your own, act on double-click (fullscreen) and on their control bar, not on
+		// a plain click - a single click on a live picture doing something would make it far too easy to
+		// fullscreen a tile by accident while reaching for its volume slider.
+		QWidget::mouseReleaseEvent(event);
+
+		return;
+	}
+
+	// The placeholder is the button: "click to watch" means exactly that, not "find the small eyeball
+	// in the hover bar at the bottom right of this tile and click that". The bar's eyeball still works
+	// too, and is what stops watching again.
+	m_lastClickWatchMsec = QDateTime::currentMSecsSinceEpoch();
+	setWatching(surface->senderSession, surface->streamID, true);
+
+	event->accept();
+}
+
 void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
+	// A double-click is delivered as press, release, double-click, release - so by the time it arrives,
+	// the release before it has already started watching the placeholder that was clicked, and that
+	// placeholder has already left the layout (a watched-but-blank stream holds no cell until its first
+	// frame lands). Whatever tile reflowed into that slot is not what the user meant to fullscreen.
+	if (m_lastClickWatchMsec != 0
+		&& QDateTime::currentMSecsSinceEpoch() - m_lastClickWatchMsec <= QApplication::doubleClickInterval()) {
+		event->accept();
+
+		return;
+	}
+
 	const Layout layout = currentLayout();
 	const int slot      = slotAt(event->pos(), layout);
 

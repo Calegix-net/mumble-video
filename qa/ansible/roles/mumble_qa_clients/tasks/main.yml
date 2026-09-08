@@ -1,0 +1,83 @@
+---
+- name: Install client runtime dependencies (Debian/Ubuntu)
+  become: true
+  ansible.builtin.apt:
+    name: [flatpak, xvfb, procps, openssl, sqlite3]
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install client runtime dependencies (Fedora/RHEL)
+  become: true
+  ansible.builtin.dnf:
+    name: [flatpak, xorg-x11-server-Xvfb, procps-ng, openssl, sqlite]
+    state: present
+    install_weak_deps: false
+  when: ansible_os_family == "RedHat"
+
+- name: Ensure the Flathub remote exists (for the KDE runtime)
+  ansible.builtin.command:
+    cmd: flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  changed_when: false
+
+- name: Clear a stale/empty flatpak deploy stub before (re)install
+  # flatpak install --bundle --reinstall while another instance is running can
+  # leave an empty ~/.local/share/flatpak/app/<id> directory that then fails the
+  # next install with "Directory not empty". Removing it when it holds no active
+  # deploy is safe.
+  ansible.builtin.shell: >-
+    set -e;
+    d="{{ ansible_env.HOME }}/.local/share/flatpak/app/{{ qa_flatpak_id }}";
+    if [ -d "$d" ] && ! flatpak info --user {{ qa_flatpak_id }} >/dev/null 2>&1; then rm -rf "$d"; echo removed; else echo kept; fi
+  register: qa_stub_clean
+  changed_when: "'removed' in qa_stub_clean.stdout"
+  when: qa_flatpak_bundle | length > 0
+
+- name: Install/refresh the client bundle when one is provided
+  ansible.builtin.command:
+    cmd: "flatpak install --user --bundle --reinstall --noninteractive -y {{ qa_flatpak_bundle }}"
+  when: qa_flatpak_bundle | length > 0
+  changed_when: true
+
+- name: Verify the client is installed
+  ansible.builtin.command:
+    cmd: "flatpak info --user {{ qa_flatpak_id }}"
+  register: qa_flatpak_info
+  changed_when: false
+  failed_when: qa_flatpak_info.rc != 0
+
+- name: Install the client launcher/stopper scripts
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ qa_run_dir }}/{{ item.dest }}"
+    mode: "0755"
+  loop:
+    - { src: "seed-clients.sh.j2", dest: "seed-clients.sh" }
+    - { src: "launch-clients.sh.j2", dest: "launch-clients.sh" }
+    - { src: "stop-clients.sh.j2", dest: "stop-clients.sh" }
+
+- name: Seed client certs, settings and server-trust (headless, no wizards)
+  ansible.builtin.command:
+    cmd: "{{ qa_run_dir }}/seed-clients.sh"
+  changed_when: true
+
+- name: Stop any previously launched QA clients
+  ansible.builtin.command:
+    cmd: "{{ qa_run_dir }}/stop-clients.sh"
+  changed_when: false
+
+- name: Launch the QA clients
+  ansible.builtin.command:
+    cmd: "{{ qa_run_dir }}/launch-clients.sh"
+  changed_when: true
+
+- name: Report launched clients
+  ansible.builtin.command:
+    cmd: "pgrep -af 'config/qa-mv'"
+  register: qa_clients_running
+  changed_when: false
+  failed_when: false
+
+- name: Show client PIDs
+  ansible.builtin.debug:
+    var: qa_clients_running.stdout_lines

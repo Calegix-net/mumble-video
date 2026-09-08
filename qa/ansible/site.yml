@@ -1,0 +1,15 @@
+---
+# Stand up a self-contained mumble-video QA rig on the target host: a loopback
+# server built from a chosen branch, plus N headless mock clients pointed at it.
+# Idempotent - safe to re-run to pick up a new commit or restart the rig.
+#
+#   ansible-playbook site.yml                    # server + clients
+#   ansible-playbook site.yml --tags server      # just (re)build/restart the server
+#   ansible-playbook site.yml --tags clients     # just relaunch the clients
+#   ansible-playbook site.yml -e mumble_video_ref=main
+- name: mumble-video loopback QA rig
+  hosts: qa
+  gather_facts: true
+  roles:
+    - { role: mumble_qa_server, tags: ["server"] }
+    - { role: mumble_qa_clients, tags: ["clients"] }

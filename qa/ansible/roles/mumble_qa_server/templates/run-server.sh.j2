@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Managed by Ansible (qa/ansible). Start the loopback QA server as a supervised
+# background process (no systemd needed). Idempotent: stops any prior instance.
+set -u
+RUN_DIR="{{ qa_run_dir }}"
+BIN="{{ qa_build_dir }}/mumble-server"
+INI="{{ qa_data_dir }}/mumble-server.ini"
+PIDFILE="${RUN_DIR}/mumble-qa-server.pid"
+LOG="${RUN_DIR}/mumble-qa-server.out"
+mkdir -p "${RUN_DIR}"
+
+"${RUN_DIR}/stop-server.sh" 2>/dev/null || true
+
+# A tiny supervisor: restart the server if it exits, so a crash under test does not
+# silently leave the rig without a relay. Logs its own restarts.
+setsid bash -c '
+  while true; do
+    "'"${BIN}"'" --foreground -i "'"${INI}"'" >>"'"${LOG}"'" 2>&1
+    echo "[supervisor] mumble-server exited $? at $(date -Is); restarting in 2s" >>"'"${LOG}"'"
+    sleep 2
+  done
+' >/dev/null 2>&1 < /dev/null &
+echo $! > "${PIDFILE}"
+echo "started supervisor pid $(cat "${PIDFILE}") -> {{ qa_server_host }}:{{ qa_server_port }} (log ${LOG})"
