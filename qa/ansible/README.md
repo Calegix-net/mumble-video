@@ -63,9 +63,8 @@ user's own Mumble client on the same host is left alone.
   so a client can't actually go fullscreen; the fullscreen-CPU lane still yields useful
   per-client CPU numbers but not a real fullscreen window. Run the clients under a
   nested compositor (sway/cage) if you need to exercise the fullscreen path itself.
-- **Client auto-seeding is partial.** Launching a Mumble client fully unattended needs
-  a pre-existing `mumble_settings.json` carrying a base64 PKCS12 certificate, the
-  trusted server-cert digest for the loopback server, and the wizard-suppression flags
-  - otherwise the cert/consent wizards block a headless start. The playbook creates the
-  per-client config dir and passes `-m --filesystem=<qa_base_dir>`; seeding the settings
-  file itself is the remaining turnkey step (tracked in loopback-qa notes).
+- **Fullscreen** aside, the rig is now fully headless: `seed-clients.sh` generates a
+  per-client PKCS12 identity, writes a `mumble_settings.json` with the audio/video/ping
+  wizards pre-dismissed, and pre-trusts the loopback server's certificate (SHA1 digest
+  in the client's own `cert` sqlite table), so no cert/consent/trust dialog blocks a
+  launch. Clients run with `-m --filesystem=<qa_base_dir>`.

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Managed by Ansible (qa/ansible). Seed each QA client so it starts fully headless:
+# a self-signed PKCS12 identity, a settings file with the wizards pre-dismissed, and
+# a trust row for the loopback server's certificate - so no cert/consent/trust dialog
+# ever blocks a launch. Idempotent: regenerates nothing that already exists, and the
+# trust row is upserted each run (the server cert changes if its data dir is wiped).
+set -euo pipefail
+RUN_DIR="{{ qa_run_dir }}"
+CFG_DIR="${RUN_DIR}/configs"
+mkdir -p "${CFG_DIR}"
+
+# The loopback server presents its cert on the TLS handshake - read it straight from
+# there rather than reaching into murmur's own database schema.
+server_fp="$(echo | openssl s_client -connect {{ qa_server_host }}:{{ qa_server_port }} 2>/dev/null \
+  | openssl x509 -fingerprint -sha1 -noout | sed 's/.*=//; s/://g' | tr 'A-Z' 'a-z')"
+if [ -z "${server_fp}" ]; then
+  echo "seed: could not read server cert from {{ qa_server_host }}:{{ qa_server_port }} - is the server up?" >&2
+  exit 1
+fi
+echo "seed: server SHA1 = ${server_fp}"
+
+for i in $(seq 1 {{ qa_client_count }}); do
+  name="qa-mv${i}"
+  cfg="${CFG_DIR}/${name}"
+  mkdir -p "${cfg}"
+
+  # Per-client identity (once).
+  if [ ! -f "${cfg}/${name}.p12" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "${cfg}/${name}-key.pem" -out "${cfg}/${name}-cert.pem" -days 3650 \
+      -subj "/CN=${name}/O=MumbleVideoQA/C=US" >/dev/null 2>&1
+    openssl pkcs12 -export -inkey "${cfg}/${name}-key.pem" -in "${cfg}/${name}-cert.pem" \
+      -out "${cfg}/${name}.p12" -name "${name}" -passout pass: >/dev/null 2>&1
+  fi
+  cert_b64="$(base64 -w0 "${cfg}/${name}.p12")"
+
+  # Settings: PKCS12 identity inline, wizards pre-dismissed. Shape confirmed against a
+  # real qa-mv client on the box (top-level `certificate` string, misc/ui/video flags).
+  cat > "${cfg}/mumble_settings.json" <<JSON
+{
+  "certificate": "${cert_b64}",
+  "misc": {
+    "database_location": "${cfg}/mumble.sqlite",
+    "audio_wizard_has_been_shown": true,
+    "viewed_server_ping_consent_message": true
+  },
+  "mumble_has_quit_normally": true,
+  "settings_version": 1,
+  "ui": { "prevent_window_states": true },
+  "video": { "video_wizard_shown": true }
+}
+JSON
+
+  # Trust the loopback server up front: the client keeps accepted server-cert digests
+  # in its own sqlite `cert` table (hostname/port/digest), not in the JSON.
+  sqlite3 "${cfg}/mumble.sqlite" \
+    "CREATE TABLE IF NOT EXISTS cert (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT, port INTEGER, digest TEXT);
+     DELETE FROM cert WHERE hostname='{{ qa_server_host }}' AND port={{ qa_server_port }};
+     INSERT INTO cert (hostname, port, digest) VALUES ('{{ qa_server_host }}', {{ qa_server_port }}, '${server_fp}');"
+  echo "seed: ${name} ready (cert + trust)"
+done

@@ -2,7 +2,7 @@
 - name: Install client runtime dependencies (Debian/Ubuntu)
   become: true
   ansible.builtin.apt:
-    name: [flatpak, xvfb, procps]
+    name: [flatpak, xvfb, procps, openssl, sqlite3]
     state: present
     update_cache: true
   when: ansible_os_family == "Debian"
@@ -10,7 +10,7 @@
 - name: Install client runtime dependencies (Fedora/RHEL)
   become: true
   ansible.builtin.dnf:
-    name: [flatpak, xorg-x11-server-Xvfb, procps-ng]
+    name: [flatpak, xorg-x11-server-Xvfb, procps-ng, openssl, sqlite]
     state: present
     install_weak_deps: false
   when: ansible_os_family == "RedHat"
@@ -52,8 +52,14 @@
     dest: "{{ qa_run_dir }}/{{ item.dest }}"
     mode: "0755"
   loop:
+    - { src: "seed-clients.sh.j2", dest: "seed-clients.sh" }
     - { src: "launch-clients.sh.j2", dest: "launch-clients.sh" }
     - { src: "stop-clients.sh.j2", dest: "stop-clients.sh" }
+
+- name: Seed client certs, settings and server-trust (headless, no wizards)
+  ansible.builtin.command:
+    cmd: "{{ qa_run_dir }}/seed-clients.sh"
+  changed_when: true
 
 - name: Stop any previously launched QA clients
   ansible.builtin.command:
