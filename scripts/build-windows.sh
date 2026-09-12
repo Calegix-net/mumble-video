@@ -14,6 +14,10 @@ set -euo pipefail
 SRC_DIR="${1:-/src}"
 BUILD_DIR="${2:-/build}"
 
+# LTO is off here specifically, not just for build speed: with it on, mumble.exe crashes on launch
+# with an access violation (jumping into unmapped memory) inside os_init(), on every Windows build
+# tested against this toolchain. CMakeLists.txt already defaults it off for MINGW; this is belt and
+# braces, and the place to look when a Windows build starts faulting at startup.
 mingw64-cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=/usr/bin/x86_64-w64-mingw32-gcc \
@@ -22,6 +26,7 @@ mingw64-cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -Dserver=OFF -Dtests=OFF -Dbenchmarks=OFF -Dice=OFF \
     -Doverlay=OFF -Doverlay-xcompile=OFF \
     -Dg15=OFF -Dasio=OFF -Dupdate=OFF -Dzeroconf=OFF -Djackaudio=OFF -Dspeechd=OFF \
-    -Dtranslations=OFF
+    -Dtranslations=OFF \
+    -Dlto=OFF
 
 cmake --build "${BUILD_DIR}" -j"$(nproc)"

@@ -457,7 +457,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 			const auto recent = m_recentlyWatched.find({ senderSession, sourceKind });
 
 			if (recent != m_recentlyWatched.end()) {
-				if (QDateTime::currentMSecsSinceEpoch() - recent->second <= RESUME_WATCH_GRACE_MSEC) {
+				if (!recent->second.hasExpired()) {
 					resumeWatching = true;
 				}
 
@@ -891,7 +891,7 @@ void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) 
 	// Remember a watched stream's sender+kind so a restart within the grace window resumes watching
 	// rather than dropping the viewer back to a placeholder - see m_recentlyWatched.
 	if (it->second.watching) {
-		m_recentlyWatched[{ senderSession, it->second.sourceKind }] = QDateTime::currentMSecsSinceEpoch();
+		m_recentlyWatched[{ senderSession, it->second.sourceKind }] = QDeadlineTimer(RESUME_WATCH_GRACE_MSEC);
 	}
 
 	m_surfaces.erase(it);
