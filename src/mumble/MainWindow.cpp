@@ -83,6 +83,10 @@
 #	include "PipeWireScreenVideoSource.h"
 #endif
 
+#ifdef USE_SCREEN_SHARE_X11
+#	include "X11ScreenVideoSource.h"
+#endif
+
 #include "Global.h"
 
 #ifdef Q_OS_WIN
@@ -763,11 +767,28 @@ void MainWindow::setupScreenShare() {
 	// connection below stays unconditional.
 #if defined(Q_OS_WIN)
 	const bool nativeScreenCaptureAvailable = true;
-#elif defined(USE_SCREEN_SHARE_PIPEWIRE)
-	const bool nativeScreenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
 #else
-	const bool nativeScreenCaptureAvailable = false;
+	bool nativeScreenCaptureAvailable = false;
+#	ifdef USE_SCREEN_SHARE_PIPEWIRE
+	nativeScreenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
+#	endif
+#	ifdef USE_SCREEN_SHARE_X11
+	// The fallback counts towards the button being offered at all: on a desktop with no ScreenCast
+	// portal it is the only thing that can capture, and hiding the action there is what left XFCE users
+	// with no screen sharing and no explanation.
+	if (!nativeScreenCaptureAvailable) {
+		nativeScreenCaptureAvailable = X11ScreenVideoSource::isAvailable();
+	}
+#	endif
 #endif
+
+	// Says out loud why the action is missing when it is. Silently hiding it is indistinguishable, from
+	// the user's side, from a build with no screen sharing compiled in at all.
+	if (!nativeScreenCaptureAvailable && qEnvironmentVariableIsEmpty("MUMBLE_MOCK_SCREEN")) {
+		qWarning("MainWindow: no screen capture backend is available - no ScreenCast portal answered on "
+				 "the session bus (xdg-desktop-portal-gtk does not implement it) and no X11 display can "
+				 "be grabbed. Share Screen is hidden.");
+	}
 
 	// MUMBLE_MOCK_SCREEN streams a synthetic desktop instead of capturing one - see toggleScreenShare().
 	// The action has to be visible for that to be reachable, portal or no portal.
@@ -807,7 +828,7 @@ void MainWindow::setupScreenShare() {
 	// slots are what fire senderCountChanged and make the dock visible, and nothing else does. Its own
 	// reserved cell, separate from the camera's - see the connect() for m_videoBroadcaster above.
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, m_videoGrid, &VideoGrid::setSelfScreenFrame);
-#ifdef USE_SCREEN_SHARE_PIPEWIRE
+#if defined(USE_SCREEN_SHARE_PIPEWIRE) || defined(USE_SCREEN_SHARE_X11)
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::previewFrame, this, [this](const QImage &frame) {
 		if (!m_screenAwaitingFrame || !Global::get().sh || !Global::get().sh->isRunning())
 			return;
@@ -1050,19 +1071,86 @@ void MainWindow::toggleScreenShare(bool share) {
 	}
 
 #ifndef Q_OS_WIN
-#	ifdef USE_SCREEN_SHARE_PIPEWIRE
-	// No picker of our own: the desktop portal shows its own, and asking twice would be both redundant
-	// and misleading, since the portal's answer is the one that decides what is captured.
+#	if defined(USE_SCREEN_SHARE_PIPEWIRE) || defined(USE_SCREEN_SHARE_X11)
 	const Settings &pwSettings = Global::get().s;
+
+	std::unique_ptr< VideoSource > screenSource;
+
+#		ifdef USE_SCREEN_SHARE_PIPEWIRE
+	// No picker of our own on this path: the desktop portal shows its own, and asking twice would be
+	// both redundant and misleading, since the portal's answer is the one that decides what is captured.
+	if (PipeWireScreenVideoSource::isAvailable()) {
+		screenSource = std::make_unique< PipeWireScreenVideoSource >(PortalScreenCast::SourceType::Any, true);
+	}
+#		endif
+
+#		ifdef USE_SCREEN_SHARE_X11
+	if (!screenSource) {
+		// No portal to ask, so this asks instead. A direct grab has no consent step of its own, and a
+		// share that silently took every monitor because nobody was asked would be the wrong behaviour
+		// even on X11, where any client could read the root window anyway.
+		const QList< QScreen * > screens = QGuiApplication::screens();
+		QScreen *chosen                  = screens.isEmpty() ? nullptr : screens.first();
+
+		if (screens.size() > 1) {
+			QStringList labels;
+
+			for (const QScreen *screen : screens) {
+				labels << tr("%1 (%2x%3)")
+							  .arg(screen->name().isEmpty() ? tr("Screen") : screen->name())
+							  .arg(screen->geometry().width())
+							  .arg(screen->geometry().height());
+			}
+
+			bool picked            = false;
+			const QString selected = QInputDialog::getItem(this, tr("Share Screen"),
+														   tr("Which screen do you want to share?"), labels, 0, false,
+														   &picked);
+
+			if (!picked) {
+				m_shareScreenAction->setChecked(false);
+
+				return;
+			}
+
+			chosen = screens.at(std::max< qsizetype >(0, labels.indexOf(selected)));
+		}
+
+		if (!chosen) {
+			Global::get().l->log(Log::Warning, tr("No screen to share."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		// Qt reports screen geometry in device-independent pixels; the X grab wants X pixels. They are
+		// the same thing on an unscaled X11 session, which is the overwhelmingly common case, and this
+		// keeps a scaled one from capturing a quarter of the screen.
+		const qreal ratio   = chosen->devicePixelRatio();
+		const QRect logical = chosen->geometry();
+		const QRect region(qRound(logical.x() * ratio), qRound(logical.y() * ratio),
+						   qRound(logical.width() * ratio), qRound(logical.height() * ratio));
+
+		const int interval = pwSettings.iVideoFramerate > 0 ? std::max(1, 1000 / pwSettings.iVideoFramerate) : 66;
+
+		screenSource = std::make_unique< X11ScreenVideoSource >(
+			region, tr("%1 (X11)").arg(chosen->name().isEmpty() ? tr("Screen") : chosen->name()), interval);
+	}
+#		endif
+
+	if (!screenSource) {
+		Global::get().l->log(Log::Warning, tr("No screen capture backend is available."));
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
 
 	m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(pwSettings.iVideoBitrate),
 										static_cast< unsigned int >(pwSettings.iVideoFramerate),
 										pwSettings.iVideoTileQuality, pwSettings.iVideoTileSize);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
-	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(PortalScreenCast::SourceType::Any, true);
-
-	if (!m_screenVideoBroadcaster->start(std::move(pipeWireSource))) {
+	if (!m_screenVideoBroadcaster->start(std::move(screenSource))) {
 		Global::get().l->log(Log::Warning, tr("Could not start screen capture."));
 		m_shareScreenAction->setChecked(false);
 

@@ -40,9 +40,13 @@ struct spa_buffer;
  * is showing changes how it is read.
  *
  * Works on Wayland, where nothing else can: the compositor will not let a client read the screen, and
- * the portal exists precisely to mediate that. It works on X11 too, through the same path, which is
- * deliberate - an XGetImage fallback would capture without the consent step and there is no good
- * reason to have one.
+ * the portal exists precisely to mediate that. It is also the preferred path on X11, because the
+ * portal's picker is the desktop's own consent step - so this is tried first wherever it answers.
+ *
+ * X11ScreenVideoSource is the fallback when it does not answer at all, which on XFCE, MATE, Cinnamon
+ * and most tiling window managers is the normal case rather than an edge one: their only portal backend
+ * is xdg-desktop-portal-gtk, which does not implement ScreenCast. That fallback asks the user which
+ * screen to share itself, rather than grabbing everything silently.
  *
  * PipeWire runs its own thread. Buffers arrive on it, are converted to QImage there, and are handed
  * over under a mutex; frameReady is emitted on the owning thread by a coalesced queued invocation, so nothing

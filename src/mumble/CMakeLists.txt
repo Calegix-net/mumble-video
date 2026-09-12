@@ -883,8 +883,8 @@ else()
 	target_sources(mumble_client_object_lib PRIVATE "TextToSpeech_unix.cpp")
 
 	# Screen sharing on Linux: permission through the XDG desktop portal, frames from PipeWire. This is
-	# the only way to capture under Wayland, where a client cannot read the screen at all, and it is
-	# used on X11 too rather than adding an XGetImage path that would skip the consent prompt.
+	# the only way to capture under Wayland, where a client cannot read the screen at all, and it is the
+	# preferred path on X11 too - the portal's own picker is the desktop's consent step.
 	if(screen-share-pipewire)
 		find_package(PkgConfig REQUIRED)
 		pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
@@ -913,6 +913,41 @@ else()
 
 		target_compile_definitions(mumble_client_object_lib PUBLIC "USE_SCREEN_SHARE_PIPEWIRE")
 		target_link_libraries(mumble_client_object_lib PUBLIC PkgConfig::PIPEWIRE Qt6::DBus)
+	endif()
+
+	# The X11 fallback, for desktops whose only portal backend is xdg-desktop-portal-gtk - XFCE, MATE,
+	# Cinnamon, most tiling window managers - which implements ten portals and not ScreenCast. Without
+	# this, Share Screen is hidden on those desktops with nothing to say why. Reached only when the
+	# portal does not answer; see the comment on X11ScreenVideoSource.
+	# Not REQUIRED: a build environment without the X11 development files should lose the fallback and
+	# say so, not fail to produce a client at all. The flatpak SDK is the case that matters - if this
+	# warning shows up in its build log, the manifest needs libX11 and libXext adding, because the
+	# desktops this fallback exists for are exactly where that flatpak gets installed.
+	if(screen-share-x11)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(X11SHM IMPORTED_TARGET x11 xext)
+	endif()
+
+	if(screen-share-x11 AND NOT X11SHM_FOUND)
+		message(WARNING "screen-share-x11 is on but the x11/xext development files were not found - "
+						"building without the X11 screen-capture fallback. Desktops with no ScreenCast "
+						"portal (XFCE, MATE, most tiling WMs) will have no Share Screen button.")
+	endif()
+
+	if(screen-share-x11 AND X11SHM_FOUND)
+		target_sources(mumble_client_object_lib
+			PRIVATE
+				"X11ScreenVideoSource.cpp"
+				"X11ScreenVideoSource.h"
+		)
+
+		# Kept out of the unity build: X11/Xlib.h defines None, Status, KeyPress and Bool as macros, and
+		# in a shared blob they rewrite unrelated code - the same reason GlobalShortcut_unix.h has to
+		# #undef several of them.
+		set_source_files_properties("X11ScreenVideoSource.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
+
+		target_compile_definitions(mumble_client_object_lib PUBLIC "USE_SCREEN_SHARE_X11")
+		target_link_libraries(mumble_client_object_lib PUBLIC PkgConfig::X11SHM)
 	endif()
 
 	if(speechd)
