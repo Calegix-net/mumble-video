@@ -55,11 +55,16 @@ GlobalShortcutX::GlobalShortcutX() {
 	bRunning  = false;
 	m_enabled = true;
 
+	// The XInput2 and polled backends need a dedicated display connection, but
+	// evdev does not: it reads /dev/input directly. Opening the display is
+	// therefore allowed to fail, and init() decides what is still possible
+	// without one. Returning early here instead took evdev - the only backend
+	// that works on a pure Wayland session, where there is no display to open -
+	// down together with X.
 	display = XOpenDisplay(nullptr);
 
 	if (!display) {
-		qWarning("GlobalShortcutX: Unable to open dedicated display connection.");
-		return;
+		qWarning("GlobalShortcutX: Unable to open dedicated display connection, X-based shortcuts unavailable.");
 	}
 
 	init();
@@ -110,6 +115,13 @@ bool GlobalShortcutX::init() {
 		}
 	}
 #endif
+
+	// Everything past this point needs the display connection, so without one
+	// there is nothing left to fall back to (ScreenCount() would dereference it).
+	if (!display) {
+		qWarning("GlobalShortcutX: No display connection and no usable evdev device, global shortcuts are disabled.");
+		return false;
+	}
 
 	qsRootWindows.clear();
 	for (int i = 0; i < ScreenCount(display); ++i)
@@ -414,12 +426,17 @@ GlobalShortcutX::ButtonInfo GlobalShortcutX::buttonInfo(const QVariant &v) {
 		// old function as long as possible. The replacement function
 		// XkbKeycodeToKeysym requires the XKB extension which isn't
 		// guaranteed to be present.
-		KeySym ks = XKeycodeToKeysym(display, static_cast< KeyCode >(key), 0);
+		// Evdev reports keycodes with no display open, so a keycode can only be
+		// named when there is a connection to ask. XKeycodeToKeysym dereferences
+		// the display straight away, which made naming a shortcut in the UI a
+		// hard crash rather than a missing name.
+		KeySym ks = display ? XKeycodeToKeysym(display, static_cast< KeyCode >(key), 0) : NoSymbol;
 		if (ks == NoSymbol) {
 			info.name = QLatin1String("0x") + QString::number(key, 16);
 		} else {
+			// Null for a keysym X has no name for, not just the empty string.
 			const char *str = XKeysymToString(ks);
-			if (str[0] == '\0') {
+			if (!str || str[0] == '\0') {
 				info.name = QLatin1String("KS0x") + QString::number(ks, 16);
 			} else {
 				info.name = QLatin1String(str);
