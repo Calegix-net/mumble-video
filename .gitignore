@@ -52,5 +52,9 @@ __pycache__/
 CMakeSettings.json
 CLAUDE.md
 .idea
-build-win/
+# Every out-of-tree build directory, not two of them by name. build-rel/ and build-full/ are already
+# in use (the flatpak manifest skips them), build-client/ and build-server/ get created by hand, and
+# none of them were covered - so a plain "git add -A" would happily commit a whole CMake tree, which
+# is how the 825 files under build-server/ got into the repository.
+build*/
 out/
