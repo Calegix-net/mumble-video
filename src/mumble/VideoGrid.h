@@ -13,6 +13,7 @@
 #include <QtCore/QRect>
 #include <QtCore/QString>
 #include <QtGui/QImage>
+#include <QtCore/QDeadlineTimer>
 #include <QtWidgets/QWidget>
 
 #include <cstdint>
@@ -401,13 +402,15 @@ protected:
 	std::unordered_map< unsigned int, QString > m_senderNames;
 
 	/// A viewer who was watching a sender's camera or screen keeps watching it across a clean toggle:
-	/// when the stream ends its (senderSession, sourceKind) is recorded here with the time it ended, and
-	/// a new stream from the same sender of the same kind announced within RESUME_WATCH_GRACE_MSEC starts
+	/// when the stream ends its (senderSession, sourceKind) is recorded here against a deadline
+	/// RESUME_WATCH_GRACE_MSEC away - monotonic, so that an NTP correction or a resume from suspend
+	/// cannot expire a toggle that happened a moment ago nor hold one open long past the window - and
+	/// a new stream from the same sender of the same kind announced before that deadline expires starts
 	/// watched rather than as a placeholder the viewer has to click again. Distinct from the resume that
 	/// setStreamCodec already does when the *old* surface is still present (its end never arrived): this
 	/// covers the ordinary case where the end did arrive and the surface is already gone. Keyed on
 	/// sourceKind (camera vs screen) so resuming a camera does not resume a screen the viewer had closed.
-	std::map< std::pair< unsigned int, int >, qint64 > m_recentlyWatched;
+	std::map< std::pair< unsigned int, int >, QDeadlineTimer > m_recentlyWatched;
 
 	/// How long after a watched stream ends a same-sender, same-kind restart still auto-resumes. Long
 	/// enough to cover a deliberate off/on toggle, short enough that watching is not silently re-armed

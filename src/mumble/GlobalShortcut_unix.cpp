@@ -55,11 +55,16 @@ GlobalShortcutX::GlobalShortcutX() {
 	bRunning  = false;
 	m_enabled = true;
 
+	// The XInput2 and polled backends need a dedicated display connection, but
+	// evdev does not: it reads /dev/input directly. Opening the display is
+	// therefore allowed to fail, and init() decides what is still possible
+	// without one. Returning early here instead took evdev - the only backend
+	// that works on a pure Wayland session, where there is no display to open -
+	// down together with X.
 	display = XOpenDisplay(nullptr);
 
 	if (!display) {
-		qWarning("GlobalShortcutX: Unable to open dedicated display connection.");
-		return;
+		qWarning("GlobalShortcutX: Unable to open dedicated display connection, X-based shortcuts unavailable.");
 	}
 
 	init();
@@ -73,9 +78,29 @@ GlobalShortcutX::~GlobalShortcutX() {
 	}
 }
 
+// Closes every /dev/input device this engine opened. Deleting the QFile takes its QSocketNotifier
+// with it - the notifier is parented to the file - so this is what actually stops evdev delivering
+// key events, as opposed to merely forgetting about the devices.
+void GlobalShortcutX::closeInputDevices() {
+#ifdef Q_OS_LINUX
+	for (QFile *f : qmInputDevices) {
+		delete f;
+	}
+
+	qmInputDevices.clear();
+	qsKeyboards.clear();
+#endif
+}
+
 void GlobalShortcutX::stop() {
 	bRunning = false;
 	wait();
+
+	// Evdev devices are part of what init() started, so stopping has to close them too. Leaving them
+	// open meant disabling global shortcuts stopped none of the evdev ones: the notifiers stayed live
+	// and every keystroke was still read and dispatched, which for a feature whose whole point is
+	// reading the keyboard globally is not a cosmetic difference.
+	closeInputDevices();
 
 	if (m_watcher) {
 		m_watcher->deleteLater();
@@ -88,6 +113,12 @@ void GlobalShortcutX::stop() {
 }
 
 bool GlobalShortcutX::init() {
+	// setEnabled() re-enters this, so whatever a previous run left running is torn down first. Without
+	// it a re-enable overwrote m_watcher with a second QFileSystemWatcher while the first stayed
+	// connected (duplicate directoryChanged deliveries), and called start() on an already running
+	// polling thread. A no-op on the constructor's call, where there is nothing to stop yet.
+	stop();
+
 #ifdef Q_OS_LINUX
 	if (Global::get().s.bEnableEvdev) {
 		QString dir = QLatin1String("/dev/input");
@@ -96,20 +127,28 @@ bool GlobalShortcutX::init() {
 		directoryChanged(dir);
 
 		if (qsKeyboards.isEmpty()) {
-			for (QFile *f : qmInputDevices) {
-				delete f;
-			}
-			qmInputDevices.clear();
+			closeInputDevices();
 
 			delete m_watcher;
 			m_watcher = nullptr;
 			qWarning(
 				"GlobalShortcutX: Unable to open any keyboard input devices under /dev/input, falling back to XInput");
 		} else {
-			return false;
+			// Evdev is up, and that counts as enabled: setEnabled() stores this into m_enabled, so
+			// returning false here left enabled() reporting "off" while evdev was busily capturing -
+			// and, because the stored state then disagreed with reality, the next enable attempt ran
+			// init() a second time over the top of the live one.
+			return true;
 		}
 	}
 #endif
+
+	// Everything past this point needs the display connection, so without one
+	// there is nothing left to fall back to (ScreenCount() would dereference it).
+	if (!display) {
+		qWarning("GlobalShortcutX: No display connection and no usable evdev device, global shortcuts are disabled.");
+		return false;
+	}
 
 	qsRootWindows.clear();
 	for (int i = 0; i < ScreenCount(display); ++i)
@@ -242,7 +281,11 @@ bool GlobalShortcutX::enabled() {
 }
 
 void GlobalShortcutX::setEnabled(bool enabled) {
-	if (enabled == m_enabled && (enabled != bRunning)) {
+	// bRunning is only ever true for the polled backend, so testing it here made the "already in this
+	// state" check answer differently depending on which backend was in use - re-running init() over a
+	// live polling thread, while correctly short-circuiting for evdev and XI2. m_enabled alone is the
+	// state, now that init() reports it faithfully.
+	if (enabled == m_enabled) {
 		return;
 	}
 
@@ -258,6 +301,12 @@ void GlobalShortcutX::setEnabled(bool enabled) {
 // XInput2 event is ready on socketnotifier.
 void GlobalShortcutX::displayReadyRead(int) {
 #ifndef NO_XINPUT2
+	// The notifier is deleted when shortcuts are disabled, but an activation already queued for it is
+	// still delivered afterwards, and acting on that would fire a shortcut the user has switched off.
+	if (!m_enabled) {
+		return;
+	}
+
 	XEvent evt;
 
 	if (bNeedRemap)
@@ -295,7 +344,7 @@ void GlobalShortcutX::displayReadyRead(int) {
 // One of the raw /dev/input devices has ready input
 void GlobalShortcutX::inputReadyRead(int) {
 #ifdef Q_OS_LINUX
-	if (!Global::get().s.bEnableEvdev) {
+	if (!Global::get().s.bEnableEvdev || !m_enabled) {
 		return;
 	}
 
@@ -414,12 +463,17 @@ GlobalShortcutX::ButtonInfo GlobalShortcutX::buttonInfo(const QVariant &v) {
 		// old function as long as possible. The replacement function
 		// XkbKeycodeToKeysym requires the XKB extension which isn't
 		// guaranteed to be present.
-		KeySym ks = XKeycodeToKeysym(display, static_cast< KeyCode >(key), 0);
+		// Evdev reports keycodes with no display open, so a keycode can only be
+		// named when there is a connection to ask. XKeycodeToKeysym dereferences
+		// the display straight away, which made naming a shortcut in the UI a
+		// hard crash rather than a missing name.
+		KeySym ks = display ? XKeycodeToKeysym(display, static_cast< KeyCode >(key), 0) : NoSymbol;
 		if (ks == NoSymbol) {
 			info.name = QLatin1String("0x") + QString::number(key, 16);
 		} else {
+			// Null for a keysym X has no name for, not just the empty string.
 			const char *str = XKeysymToString(ks);
-			if (str[0] == '\0') {
+			if (!str || str[0] == '\0') {
 				info.name = QLatin1String("KS0x") + QString::number(ks, 16);
 			} else {
 				info.name = QLatin1String(str);

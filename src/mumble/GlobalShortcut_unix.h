@@ -57,6 +57,7 @@ protected:
 
 	bool init();
 	void stop();
+	void closeInputDevices();
 };
 
 // These are macros that X11/X.h defines and that are causing problems in unity builds
