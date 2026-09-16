@@ -43,6 +43,7 @@
 #include <cassert>
 #include <chrono>
 #include <span>
+#include <utility>
 
 #ifdef Q_OS_WIN
 // <delayimp.h> is not protected with an include guard on MinGW, resulting in
@@ -1000,6 +1001,20 @@ void ServerHandler::serverConnectionConnected() {
 		// before.
 		qusUdp->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
 		qusUdp->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
+		// The request silently succeeds even when the kernel caps it, and on a stock Linux box it
+		// is capped to ~416 KB: a keyframe burst then overflows the receive buffer and every lost
+		// tile is a black rectangle until the next refresh. Read the effective sizes back so the
+		// cap shows up in the log instead of on the screen. Linux reports twice the effective size.
+		for (const auto &[opt, name] :
+			 { std::pair{ QAbstractSocket::ReceiveBufferSizeSocketOption, "receive" },
+			   std::pair{ QAbstractSocket::SendBufferSizeSocketOption, "send" } }) {
+			const int got = qusUdp->socketOption(opt).toInt();
+			if (got > 0 && got < VIDEO_UDP_BUFFER_BYTES) {
+				qWarning("ServerHandler: UDP %s buffer for video is %d bytes, wanted %d (raise net.core.rmem_max/"
+						 "wmem_max on Linux); bursts of tiles may be dropped",
+						 name, got, VIDEO_UDP_BUFFER_BYTES);
+			}
+		}
 
 		QObject::connect(qusUdp, &QUdpSocket::readyRead, this, &ServerHandler::udpReady);
 

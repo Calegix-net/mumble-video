@@ -53,6 +53,7 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <utility>
 
 #ifdef Q_OS_WIN
 #	include <qos2.h>
@@ -211,6 +212,26 @@ Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &conne
 						|| setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast< const char * >(&bufferBytes),
 									  sizeof(bufferBytes))) {
 						log("Server: Failed to enlarge UDP socket buffers for video");
+					}
+					// setsockopt reports success even when the kernel clamps the value (Linux:
+					// net.core.rmem_max / wmem_max, default 212992 -> an effective 416 KB), so the
+					// branch above never fired on the one host where it mattered: a frame burst of
+					// up to ~400 datagrams overflowed the buffer every time and 0.35% of video was
+					// dropped at the socket with nothing in this log. Read the size back and say so.
+					// Linux reports double the effective value (bookkeeping), so compare against the
+					// request itself, not 2x.
+					for (const auto &[opt, name] : { std::pair{ SO_RCVBUF, "receive" }, std::pair{ SO_SNDBUF, "send" } }) {
+						int got       = 0;
+						socklen_t len = sizeof(got);
+						if (getsockopt(sock, SOL_SOCKET, opt, reinterpret_cast< char * >(&got), &len) == 0
+							&& got < bufferBytes) {
+							log(QString::fromLatin1("Server: UDP %1 buffer for video is %2 bytes, wanted %3. Frame "
+													"bursts will overflow it and tiles will be dropped; raise "
+													"net.core.rmem_max/wmem_max to at least %3 on this host.")
+									.arg(QLatin1String(name))
+									.arg(got)
+									.arg(bufferBytes));
+						}
 					}
 				}
 #ifdef Q_OS_UNIX

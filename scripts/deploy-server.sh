@@ -11,6 +11,22 @@
 # entrypoint expects it. Host networking is used so UDP source addresses match the client's flow.
 set -euo pipefail
 
+# Host networking means the HOST's socket limits apply to the server's UDP socket. The server asks
+# for 4 MB buffers so a whole frame burst (up to ~400 datagrams) fits; a stock Linux host clamps
+# that to ~416 KB via net.core.rmem_max/wmem_max (default 212992) without any error, and the
+# result is 0.35% of video dropped at the socket and black tiles on every viewer. Refuse to leave
+# that silent. Fix: sysctl net.core.rmem_max=8388608 net.core.wmem_max=8388608 (persist it in
+# /etc/sysctl.d/), then re-run this script so the new container's socket picks it up.
+WANT_BUF=$((4 * 1024 * 1024))
+for k in net.core.rmem_max net.core.wmem_max; do
+    have=$(sysctl -n "$k" 2>/dev/null || echo 0)
+    if [ "${have:-0}" -lt "$WANT_BUF" ]; then
+        echo "WARNING: $k=$have is below the ${WANT_BUF} bytes the server requests for video bursts;" >&2
+        echo "         the kernel will clamp the socket silently and viewers will see dropped tiles." >&2
+        echo "         sudo sysctl -w $k=8388608   (and persist it under /etc/sysctl.d/)" >&2
+    fi
+done
+
 IMAGE="${IMAGE:-ghcr.io/calegix-net/mumble-video-server:dev-latest}"
 NAME="${NAME:-mumble-fork-server}"
 DATA_DIR="${DATA_DIR:-$HOME/mumble-fork/server-data}"
