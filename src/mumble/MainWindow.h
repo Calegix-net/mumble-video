@@ -288,6 +288,11 @@ protected:
 
 	std::unordered_map< std::uint64_t, ScreenShareAudioEntry > m_screenShareAudioBuffers;
 
+	/// The volume each sender's screen-share audio should play at, as last set from that sender's tile.
+	/// Kept apart from the buffers because a buffer is only created when the first audio packet arrives,
+	/// which can be after the slider has already been moved.
+	std::unordered_map< unsigned int, float > m_screenShareVolumes;
+
 	/// No-op if (senderSession, streamID) is not currently a screen-share audio stream - callers do not
 	/// need to know whether a given ending stream was one before asking this to check.
 	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);

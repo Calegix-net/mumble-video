@@ -11,6 +11,7 @@
 #include <speex/speex_resampler.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -243,11 +244,36 @@ bool AudioOutputScreenShare::prepareSampleBuffer(unsigned int frameCount) {
 
 	m_readPos += consumed * CHANNELS;
 
+	applyVolume(produced * CHANNELS);
+
 	if (skipped) {
 		m_statsDriftSkipped.fetch_add(skipped, std::memory_order_relaxed);
 	}
 
 	return true;
+}
+
+void AudioOutputScreenShare::applyVolume(std::size_t sampleCount) {
+	const float volume = m_volume.load(std::memory_order_relaxed);
+
+	if (volume == 1.0f) {
+		return;
+	}
+
+	constexpr float knee = 1.0f - LIMITER_THRESHOLD;
+
+	for (std::size_t i = 0; i < sampleCount; ++i) {
+		const float sample    = pfBuffer[i] * volume;
+		const float magnitude = std::fabs(sample);
+
+		if (magnitude <= LIMITER_THRESHOLD) {
+			pfBuffer[i] = sample;
+		} else {
+			// Continuous with the linear part at the threshold, and never quite reaching full scale.
+			const float limited = LIMITER_THRESHOLD + knee * std::tanh((magnitude - LIMITER_THRESHOLD) / knee);
+			pfBuffer[i]         = std::copysign(limited, sample);
+		}
+	}
 }
 
 void AudioOutputScreenShare::maybeLogStats() {

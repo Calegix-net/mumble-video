@@ -275,9 +275,9 @@ signals:
 	/// unwatching is a subscription a listener can drop, not something that touches the sender at all.
 	void watchToggled(unsigned int senderSession, unsigned int streamID, bool wantToWatch);
 
-	/// The volume slider on a remote sender's screen-share tile moved. 0.0 is silent, 1.0 is unity gain -
-	/// the grid has no audio of its own to apply this to, so the owner is what forwards it to whichever
-	/// buffer is actually playing that sender's screen-share audio.
+	/// The volume slider on a remote sender's screen-share tile moved. 0.0 is silent, 1.0 is unity gain,
+	/// up to 2.0 - the grid has no audio of its own to apply this to, so the owner is what forwards it to
+	/// whichever buffer is actually playing that sender's screen-share audio.
 	void volumeChanged(unsigned int senderSession, float multiplier);
 
 	/// A watched stream stopped producing units for long enough to be treated as dead and dropped - see
@@ -486,6 +486,10 @@ protected:
 	/// Drawn on a sender's tile. Kept apart from Surface because a name belongs to the person, not to any
 	/// one of their streams.
 	std::unordered_map< unsigned int, QString > m_senderNames;
+
+	/// Where this viewer last left each sender's screen-share volume slider, in percent, so stopping and
+	/// restarting a share - a new stream and a new tile - does not reset it. Per person, like the name.
+	std::unordered_map< unsigned int, int > m_shareVolumePercent;
 
 	/// A viewer who was watching a sender's camera or screen keeps watching it across a clean toggle:
 	/// when the stream ends its (senderSession, sourceKind) is recorded here against a deadline

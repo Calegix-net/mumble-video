@@ -1190,6 +1190,18 @@ void ServerHandler::serverConnectionConnected() {
 		// before.
 		qusUdp->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
 		qusUdp->setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, VIDEO_UDP_BUFFER_BYTES);
+#ifdef Q_OS_WIN
+		// Qt (6.10/6.11) silently leaves SO_SNDBUF at the Windows default of 64 KB for a UDP socket while
+		// applying the receive size just fine; setting it directly works.
+		{
+			const int sendBufferBytes = VIDEO_UDP_BUFFER_BYTES;
+			if (setsockopt(static_cast< SOCKET >(qusUdp->socketDescriptor()), SOL_SOCKET, SO_SNDBUF,
+						   reinterpret_cast< const char * >(&sendBufferBytes), sizeof(sendBufferBytes))
+				!= 0) {
+				qWarning("ServerHandler: Failed to set the UDP send buffer size: %d", WSAGetLastError());
+			}
+		}
+#endif
 		// The request silently succeeds even when the kernel caps it, and on a stock Linux box it
 		// is capped to ~416 KB: a keyframe burst then overflows the receive buffer and every lost
 		// tile is a black rectangle until the next refresh. Read the effective sizes back so the

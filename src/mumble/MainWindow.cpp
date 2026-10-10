@@ -1407,6 +1407,11 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		qWarning("MainWindow: first screen-share audio unit received (session %u, stream %u, mixer %u Hz)",
 				 senderSession, streamID, mixerFreq);
 
+		const auto volume = m_screenShareVolumes.find(senderSession);
+		if (volume != m_screenShareVolumes.end()) {
+			buffer->setVolume(volume->second);
+		}
+
 		ScreenShareAudioEntry entry;
 		entry.token  = token;
 		entry.buffer = buffer;
@@ -1515,6 +1520,7 @@ void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSessi
 	const std::uint64_t hi = static_cast< std::uint64_t >(senderSession) << 32;
 
 	forgetScreenAudioSubscription(senderSession, std::nullopt);
+	m_screenShareVolumes.erase(senderSession);
 
 	for (auto it = m_lastKeyframeRequestMsec.begin(); it != m_lastKeyframeRequestMsec.end();) {
 		it = ((it->first >> 32) == senderSession) ? m_lastKeyframeRequestMsec.erase(it) : std::next(it);
@@ -1570,6 +1576,8 @@ void MainWindow::pruneDepartedVideoSenders() {
 }
 
 void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float multiplier) {
+	m_screenShareVolumes[senderSession] = multiplier;
+
 	// A sender only ever holds one screen-share audio stream at a time - screen sharing is one share at
 	// a time per the picker's own design - so matching on the sender half of the key alone, rather than
 	// needing the exact stream id VideoGrid's slider does not itself know, is correct here, not just
@@ -4816,6 +4824,7 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	// the same as it does for every other buffer in its map. This just stops this class from holding
 	// onto pointers that are about to become dangling.
 	m_screenShareAudioBuffers.clear();
+	m_screenShareVolumes.clear();
 
 	// clear ChannelListener
 	Global::get().channelListenerManager->clear();

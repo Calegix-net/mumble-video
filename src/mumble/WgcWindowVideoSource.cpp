@@ -410,20 +410,14 @@ void WgcWindowVideoSource::pollFrame() {
 		frame->Release();
 		return;
 	}
-	if (contentSize.Width != m_poolSize.Width || contentSize.Height != m_poolSize.Height) {
-		qInfo("Window capture resizing from %dx%d to %dx%d", m_poolSize.Width, m_poolSize.Height, contentSize.Width,
-			  contentSize.Height);
-		closeCaptureObject(frame);
-		frame->Release();
-		// Rebuild the pool and session together. Recreate can discard the only
-		// update from a static resized window, and a closed session cannot reliably
-		// be replaced on the same pool on every Windows capture implementation.
-		if (!acquireSession()) {
-			m_pollTimer.stop();
-			m_running = false;
-		}
-		return;
-	}
+	// The content can differ from the pool's buffer size without the window ever being resized: the
+	// capture item's size counts the window's invisible resize borders and the content does not (e.g.
+	// 1685x1047 vs 1671x1040), and the first frame of every new pool shows the same mismatch again. So
+	// this frame is used as it is - the copy below takes the overlap of buffer and content - and the
+	// pool is then resized in place to the content size. Rebuilding the item and session here instead
+	// looped forever on such windows: no frame was ever sent (viewers saw black) and the capture border
+	// flashed with every rebuild.
+	const bool resizePool = contentSize.Width != m_poolSize.Width || contentSize.Height != m_poolSize.Height;
 
 	IDirect3DSurface *surface = nullptr;
 	hr                        = frame->get_Surface(&surface);
@@ -541,6 +535,18 @@ void WgcWindowVideoSource::pollFrame() {
 	m_context->Unmap(m_stagingTexture, 0);
 	closeCaptureObject(frame);
 	frame->Release();
+
+	if (resizePool) {
+		qInfo("Window capture resizing buffers from %dx%d to %dx%d", m_poolSize.Width, m_poolSize.Height,
+			  contentSize.Width, contentSize.Height);
+		hr = m_framePool->Recreate(m_captureDevice, DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, contentSize);
+		if (FAILED(hr)) {
+			stop();
+			emit failed(tr("Could not resize the window capture"));
+			return;
+		}
+		m_poolSize = contentSize;
+	}
 
 	emit frameReady(image, static_cast< std::uint64_t >(m_clock.elapsed().count()));
 }

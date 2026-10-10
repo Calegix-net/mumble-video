@@ -5,6 +5,7 @@
 
 #include "VideoGrid.h"
 
+#include "AudioOutputScreenShare.h"
 #include "Mumble.pb.h"
 
 #include <QtConcurrent/QtConcurrentRun>
@@ -1169,6 +1170,7 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 	}
 
 	m_senderNames.erase(senderSession);
+	m_shareVolumePercent.erase(senderSession);
 
 	// The sender is gone entirely - do not resume watching them if some later stream reuses the session.
 	for (auto it = m_recentlyWatched.begin(); it != m_recentlyWatched.end();) {
@@ -1245,6 +1247,7 @@ void VideoGrid::clear() {
 
 	m_surfaces.clear();
 	m_senderNames.clear();
+	m_shareVolumePercent.clear();
 	m_selfCameraFrame = QImage();
 	m_selfScreenFrame = QImage();
 
@@ -1361,16 +1364,30 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	// has been, from the user list. Only a screen share carries a second, independent audio stream worth
 	// a slider of its own.
 	if (hasAudio) {
-		controls->volumeSlider = new QSlider(Qt::Horizontal, controls->bar);
-		controls->volumeSlider->setRange(0, 100);
-		controls->volumeSlider->setValue(100);
-		controls->volumeSlider->setFixedWidth(80);
-		controls->volumeSlider->setToolTip(tr("Volume"));
-		layout->addWidget(controls->volumeSlider);
+		const auto remembered = m_shareVolumePercent.find(senderSession);
+		const int percent     = remembered != m_shareVolumePercent.end()
+									? remembered->second
+									: static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
 
-		connect(controls->volumeSlider, &QSlider::valueChanged, this, [this, senderSession](int value) {
+		QSlider *slider = new QSlider(Qt::Horizontal, controls->bar);
+		slider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
+		slider->setSingleStep(5);
+		slider->setPageStep(25);
+		slider->setValue(percent);
+		slider->setFixedWidth(100);
+		slider->setToolTip(tr("Volume: %1%").arg(percent));
+		layout->addWidget(slider);
+		controls->volumeSlider = slider;
+
+		connect(slider, &QSlider::valueChanged, this, [this, senderSession, slider](int value) {
+			m_shareVolumePercent[senderSession] = value;
+			slider->setToolTip(tr("Volume: %1%").arg(value));
 			emit volumeChanged(senderSession, static_cast< float >(value) / 100.0f);
 		});
+
+		// The audio buffer for this share may already exist at another level - a share restarted after
+		// the slider was moved - so say where the slider stands rather than assume the buffer agrees.
+		emit volumeChanged(senderSession, static_cast< float >(percent) / 100.0f);
 	}
 
 	layout->addStretch();

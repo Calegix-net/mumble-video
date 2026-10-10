@@ -67,11 +67,17 @@ public:
 	/// is handled by removing this buffer from AudioOutput directly rather than through this return value.
 	bool prepareSampleBuffer(unsigned int frameCount) override;
 
-	float volumeMultiplier() const override { return m_volume.load(std::memory_order_relaxed); }
-
-	/// Set from the UI thread - a per-tile volume slider in the video grid - and read from the audio
-	/// mixing thread via volumeMultiplier() above.
+	/// Set from the UI thread - a per-tile volume slider in the video grid - and applied on the audio mixing
+	/// thread in prepareSampleBuffer(), together with a soft limiter, rather than handed to the mixer as a
+	/// plain multiplier: above 1.0 a plain multiplier makes loud passages hard-clip in the final mix.
 	void setVolume(float multiplier) { m_volume.store(multiplier, std::memory_order_relaxed); }
+
+	/// Shared audio is captured at whatever level the shared application plays at, which next to voice
+	/// usually sounds quiet; viewers start at 150% and can go from 0 to 200% on the tile's slider.
+	static constexpr float DEFAULT_VOLUME = 1.5f;
+	static constexpr float MAX_VOLUME     = 2.0f;
+	/// Samples below this level pass unchanged; above it the limiter bends them smoothly towards 1.0.
+	static constexpr float LIMITER_THRESHOLD = 0.8f;
 
 	static constexpr unsigned int PREBUFFER_MSEC  = 60;
 	static constexpr unsigned int HIGH_WATER_MSEC = 140;
@@ -96,6 +102,9 @@ protected:
 	void queueDecoded(const float *frames, int frameCount);
 	/// Logs the counters below, at most every couple of seconds, when MUMBLE_VIDEO_STATS is set.
 	void maybeLogStats();
+	/// Scales the first sampleCount samples of pfBuffer by the current volume, soft-limiting above
+	/// LIMITER_THRESHOLD so a boost cannot hard-clip.
+	void applyVolume(std::size_t sampleCount);
 
 	OpusDecoder *m_opusState         = nullptr;
 	SpeexResamplerState *m_resampler = nullptr;
@@ -123,7 +132,7 @@ protected:
 	bool m_playing               = false;
 	unsigned int m_skipCountdown = DRIFT_SKIP_INTERVAL;
 
-	std::atomic< float > m_volume{ 1.0f };
+	std::atomic< float > m_volume{ DEFAULT_VOLUME };
 
 	// Counters for MUMBLE_VIDEO_STATS; reset each time they are logged.
 	bool m_statsEnabled               = false;
