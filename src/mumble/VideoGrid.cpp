@@ -15,16 +15,19 @@
 #include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
-#include <QtGui/QPainter>
 #include <QtGui/QPaintEvent>
+#include <QtGui/QPainter>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QSlider>
+#include <QtWidgets/QStyle>
 #include <QtWidgets/QToolButton>
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -1318,11 +1321,42 @@ int VideoGrid::slotAt(const QPoint &point, const Layout &layout) const {
 	return slot < layout.count ? slot : -1;
 }
 
+/// The translucent strip along the bottom of a tile that holds its buttons and volume slider.
+///
+/// The dark background is scoped to the strip itself by object name; applied as a bare property, a style
+/// sheet cascades into every child widget as well.
+///
+/// The slider is styled completely rather than left to the theme, after Discord's stream volume: a thin
+/// rounded track, the filled part in Discord's blurple, a round white knob. Every property the bundled
+/// themes set on sliders is overridden here, because they are not meant for a slider on top of video: the
+/// Dark and Lite themes give every QSlider 30px of margin on each side (which squeezed a 110px slider to a
+/// 50px track) and a 4.5em-wide bordered grey handle (which looked like a blob).
+static QWidget *makeTileControlStrip(QWidget *parent) {
+	auto *strip = new QWidget(parent);
+	strip->setObjectName(QStringLiteral("tileControls"));
+	strip->setAttribute(Qt::WA_StyledBackground, true);
+	strip->setStyleSheet(QStringLiteral(
+		"#tileControls { background-color: rgba(0, 0, 0, 140); }"
+		"#tileControls QLabel, #tileControls QToolButton { color: white; background: transparent; }"
+		"#tileControls QSlider { background: transparent; margin: 0px; padding: 0px; }"
+		"#tileControls QSlider::groove:horizontal {"
+		"  height: 4px; margin: 0px; border: none; border-radius: 2px; background: rgba(255, 255, 255, 70); }"
+		"#tileControls QSlider::sub-page:horizontal {"
+		"  height: 4px; border: none; border-radius: 2px; background: #5865F2; }"
+		"#tileControls QSlider::add-page:horizontal {"
+		"  height: 4px; border: none; border-radius: 2px; background: rgba(255, 255, 255, 70); }"
+		"#tileControls QSlider::handle:horizontal {"
+		"  width: 12px; height: 12px; margin: -4px 0px; border: none; border-radius: 6px; background: white; }"
+		"#tileControls QSlider::handle:horizontal:hover,"
+		"#tileControls QSlider::handle:horizontal:focus,"
+		"#tileControls QSlider::handle:horizontal:pressed { background: #e3e5ff; border: none; }"));
+	return strip;
+}
+
 std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusTarget target) {
 	auto controls = std::make_unique< TileControlBar >();
 
-	controls->bar = new QWidget(this);
-	controls->bar->setStyleSheet(QStringLiteral("background-color: rgba(0, 0, 0, 140);"));
+	controls->bar = makeTileControlStrip(this);
 
 	auto *layout = new QHBoxLayout(controls->bar);
 	layout->setContentsMargins(4, 2, 4, 2);
@@ -1353,8 +1387,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 																			 unsigned int streamID, bool hasAudio) {
 	auto controls = std::make_unique< TileControlBar >();
 
-	controls->bar = new QWidget(this);
-	controls->bar->setStyleSheet(QStringLiteral("background-color: rgba(0, 0, 0, 140);"));
+	controls->bar = makeTileControlStrip(this);
 
 	auto *layout = new QHBoxLayout(controls->bar);
 	layout->setContentsMargins(4, 2, 4, 2);
@@ -1364,26 +1397,62 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	// has been, from the user list. Only a screen share carries a second, independent audio stream worth
 	// a slider of its own.
 	if (hasAudio) {
-		const auto remembered = m_shareVolumePercent.find(senderSession);
-		const int percent     = remembered != m_shareVolumePercent.end()
-									? remembered->second
-									: static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+		// Laid out like Discord's stream volume: a speaker button that mutes and unmutes, the slider, and the
+		// level as a percentage.
+		const int defaultPercent = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+		const auto remembered    = m_shareVolumePercent.find(senderSession);
+		const int percent        = remembered != m_shareVolumePercent.end() ? remembered->second : defaultPercent;
 
-		QSlider *slider = new QSlider(Qt::Horizontal, controls->bar);
+		auto *muteButton = new QToolButton(controls->bar);
+		muteButton->setAutoRaise(true);
+		muteButton->setIconSize(QSize(16, 16));
+		muteButton->setFocusPolicy(Qt::NoFocus);
+		layout->addWidget(muteButton);
+
+		auto *slider = new QSlider(Qt::Horizontal, controls->bar);
 		slider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
 		slider->setSingleStep(5);
 		slider->setPageStep(25);
-		slider->setValue(percent);
-		slider->setFixedWidth(100);
-		slider->setToolTip(tr("Volume: %1%").arg(percent));
+		slider->setFixedWidth(110);
+		slider->setFocusPolicy(Qt::NoFocus);
+		slider->setToolTip(tr("Stream volume"));
 		layout->addWidget(slider);
-		controls->volumeSlider = slider;
 
-		connect(slider, &QSlider::valueChanged, this, [this, senderSession, slider](int value) {
+		auto *label = new QLabel(controls->bar);
+		label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+		// Wide enough for "200%", so the slider does not shift while dragging.
+		label->setFixedWidth(label->fontMetrics().horizontalAdvance(QStringLiteral("200%")) + 4);
+		layout->addWidget(label);
+
+		controls->muteButton   = muteButton;
+		controls->volumeSlider = slider;
+		controls->volumeLabel  = label;
+
+		// Where unmuting returns to. Shared by the two handlers below rather than kept in the
+		// TileControlBar, which can be destroyed while these widgets are still waiting on deleteLater().
+		auto volumeBeforeMute = std::make_shared< int >(percent > 0 ? percent : defaultPercent);
+
+		const auto showLevel = [this, muteButton, label](int value) {
+			label->setText(tr("%1%").arg(value));
+			muteButton->setIcon(
+				style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
+			muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+		};
+
+		slider->setValue(percent);
+		showLevel(percent);
+
+		connect(slider, &QSlider::valueChanged, slider, [this, senderSession, volumeBeforeMute, showLevel](int value) {
 			m_shareVolumePercent[senderSession] = value;
-			slider->setToolTip(tr("Volume: %1%").arg(value));
+			if (value > 0) {
+				*volumeBeforeMute = value;
+			}
+			showLevel(value);
 			emit volumeChanged(senderSession, static_cast< float >(value) / 100.0f);
 		});
+
+		connect(muteButton, &QToolButton::clicked, slider,
+				[slider, volumeBeforeMute]() { slider->setValue(slider->value() == 0 ? *volumeBeforeMute : 0); });
 
 		// The audio buffer for this share may already exist at another level - a share restarted after
 		// the slider was moved - so say where the slider stands rather than assume the buffer agrees.

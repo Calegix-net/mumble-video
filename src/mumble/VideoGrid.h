@@ -26,6 +26,7 @@
 
 class QEnterEvent;
 class QKeyEvent;
+class QLabel;
 class QMouseEvent;
 class QResizeEvent;
 class QSlider;
@@ -533,6 +534,10 @@ protected:
 		QToolButton *fullscreenButton = nullptr;
 		QToolButton *watchButton      = nullptr;
 		QSlider *volumeSlider         = nullptr;
+		/// Speaker icon left of the slider: shows the level at a glance, and mutes/unmutes on click.
+		QToolButton *muteButton = nullptr;
+		/// The slider's value as a percentage, right of it.
+		QLabel *volumeLabel = nullptr;
 
 		/// bar owns fullscreenButton/watchButton/volumeSlider through Qt's own parent-child ownership - they
 		/// are all constructed with bar as their parent - but bar itself is a plain QWidget*, not something
