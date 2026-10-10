@@ -229,6 +229,11 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setMinimumSize(160, 90);
 	setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
+	m_gridRepaintTimer = new QTimer(this);
+	m_gridRepaintTimer->setSingleShot(true);
+	m_gridRepaintTimer->setInterval(GRID_REPAINT_INTERVAL_MSEC);
+	connect(m_gridRepaintTimer, &QTimer::timeout, this, &VideoGrid::flushGridRepaint);
+
 	// Strong rather than the default NoFocus: Esc only reaches keyPressEvent() below if this widget
 	// actually holds keyboard focus, and a click is the only way a user has told it they mean to interact
 	// with a particular tile rather than whatever else is on screen.
@@ -1028,7 +1033,8 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 								 const QImage &tile) {
 	// A surface exists from the announcement onwards but holds no picture until now, so this is what
 	// makes the sender count - and with it the video panel - appear.
-	const bool wasBlank = surface.canvas.isNull();
+	const bool wasBlank    = surface.canvas.isNull();
+	const QSize sizeBefore = surface.canvas.size();
 
 	if (!growToFit(surface.canvas, static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height())) {
 		return;
@@ -1064,15 +1070,72 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 		notifyFullscreenContentChanged(QRect(static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height()));
 	}
 
-	// Likewise only this tile's own cell here, not the whole grid: paintEvent() is clipped to the region
-	// it is asked for, so every other tile's scaling is skipped rather than redone on each incoming unit.
+	// Likewise only the patch of this tile's cell the tile covers, not the whole cell or grid: paintEvent()
+	// is clipped to the region it is asked for, so everything else is neither rescaled nor handed to the
+	// compositor again. Repainting the whole cell for every 128-pixel tile meant a viewer's window sent the
+	// compositor a full-cell shared-memory buffer at the display's refresh rate - on a 3440x1440 desktop,
+	// about 260 MB/s for the compositor to upload, which kept the GPU busy enough to lag the whole desktop.
 	const int slot = slotForSurface(key);
 
-	if (slot >= 0) {
-		update(cellRect(currentLayout(), slot));
+	if (slot < 0) {
+		scheduleGridRepaint(rect());
+	} else if (surface.canvas.size() != sizeBefore) {
+		// The picture grew, so the letterboxed target moved: none of what was painted is still in place.
+		scheduleGridRepaint(cellRect(currentLayout(), slot));
 	} else {
-		update();
+		markTileDirty(cellRect(currentLayout(), slot), surface.canvas.size(),
+					  QRect(static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height()));
 	}
+}
+
+QRect VideoGrid::pictureRect(const QRect &cell, const QSize &imageSize) {
+	const QSize scaled = imageSize.scaled(cell.size(), Qt::KeepAspectRatio);
+
+	return QRect(cell.x() + (cell.width() - scaled.width()) / 2, cell.y() + (cell.height() - scaled.height()) / 2,
+				 scaled.width(), scaled.height());
+}
+
+void VideoGrid::markTileDirty(const QRect &cell, const QSize &imageSize, const QRect &tileRect) {
+	const QRect target = pictureRect(cell, imageSize);
+
+	if (imageSize.isEmpty() || target.isEmpty()) {
+		scheduleGridRepaint(cell);
+
+		return;
+	}
+
+	const double scaleX = static_cast< double >(target.width()) / imageSize.width();
+	const double scaleY = static_cast< double >(target.height()) / imageSize.height();
+
+	// Padded by a couple of pixels either side, as FullscreenVideoWindow::flushRepaint() does: the scale is
+	// fractional, and a patch has to be repainted a little wider than rounding could have moved its edge.
+	const QRect dirty(static_cast< int >(std::floor(target.x() + tileRect.x() * scaleX)) - 2,
+					  static_cast< int >(std::floor(target.y() + tileRect.y() * scaleY)) - 2,
+					  static_cast< int >(std::ceil(tileRect.width() * scaleX)) + 4,
+					  static_cast< int >(std::ceil(tileRect.height() * scaleY)) + 4);
+
+	scheduleGridRepaint(dirty.intersected(cell));
+}
+
+void VideoGrid::scheduleGridRepaint(const QRect &dirty) {
+	if (dirty.isEmpty()) {
+		return;
+	}
+
+	m_gridDirty |= dirty;
+
+	if (!m_gridRepaintTimer->isActive()) {
+		m_gridRepaintTimer->start();
+	}
+}
+
+void VideoGrid::flushGridRepaint() {
+	if (m_gridDirty.isEmpty()) {
+		return;
+	}
+
+	update(m_gridDirty);
+	m_gridDirty = QRegion();
 }
 
 void VideoGrid::setSelfCameraFrame(const QImage &frame) {
@@ -1094,7 +1157,7 @@ void VideoGrid::setSelfCameraFrame(const QImage &frame) {
 	}
 
 	// Own camera is always the first cell, when present.
-	update(cellRect(currentLayout(), 0));
+	scheduleGridRepaint(cellRect(currentLayout(), 0));
 }
 
 void VideoGrid::clearSelfCameraFrame() {
@@ -1125,7 +1188,7 @@ void VideoGrid::setSelfScreenFrame(const QImage &frame) {
 	}
 
 	// Own screen sits after own camera, if there is one.
-	update(cellRect(currentLayout(), m_selfCameraFrame.isNull() ? 0 : 1));
+	scheduleGridRepaint(cellRect(currentLayout(), m_selfCameraFrame.isNull() ? 0 : 1));
 }
 
 void VideoGrid::clearSelfScreenFrame() {
@@ -1764,10 +1827,7 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	// Scaled to fit inside its cell without distorting it. Letterboxing is the honest presentation:
 	// stretching somebody's screen share to fill a cell makes text unreadable.
 	const auto drawInto = [&](const QImage &image, const QRect &cell, const QString &label) {
-		const QSize scaled = image.size().scaled(cell.size(), Qt::KeepAspectRatio);
-
-		const QRect target(cell.x() + (cell.width() - scaled.width()) / 2,
-						   cell.y() + (cell.height() - scaled.height()) / 2, scaled.width(), scaled.height());
+		const QRect target = pictureRect(cell, image.size());
 
 		painter.drawImage(target, image);
 
