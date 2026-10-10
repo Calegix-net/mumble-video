@@ -112,8 +112,24 @@ void initLog(QTextBrowser *textBox = nullptr) {
 	static constexpr std::size_t maxFiles = 3;
 
 #ifndef Q_OS_MACOS
+	// Console.txt can be held open by another process sharing this data directory - on Windows, a regular
+	// Mumble running at the same time keeps its own Console.txt locked - and spdlog reports that by throwing.
+	// Uncaught, that aborted the whole client at startup. Fall back to a log of this process's own, and
+	// failing that run without a file log: logging must never be the reason the client cannot start.
 	const auto filePath = Global::get().qdBasePath.filePath(QLatin1String("Console.txt")).toStdString();
-	log::addSink(std::make_shared< FileSink >(filePath, maxSize, maxFiles));
+	try {
+		log::addSink(std::make_shared< FileSink >(filePath, maxSize, maxFiles));
+	} catch (const spdlog::spdlog_ex &) {
+		const auto fallbackPath =
+			Global::get()
+				.qdBasePath.filePath(QString::fromLatin1("Console-%1.txt").arg(QCoreApplication::applicationPid()))
+				.toStdString();
+		try {
+			log::addSink(std::make_shared< FileSink >(fallbackPath, maxSize, 1));
+		} catch (const spdlog::spdlog_ex &) {
+			// No file log at all; the console and the in-app log still work.
+		}
+	}
 #else
 	std::string filePath = "/Library/Logs/Mumble.log";
 	if (const char *homePath = std::getenv("HOME")) {
