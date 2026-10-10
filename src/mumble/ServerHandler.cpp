@@ -324,6 +324,12 @@ void ServerHandler::udpReady() {
 					assert(false);
 					break;
 				};
+				case Mumble::Protocol::UDPMessageType::VideoNack: {
+					// Unreachable for the same reason as Video: it travels only on the video channel, handled
+					// in handleVideoDatagram(), and UDPDecoder::decode rejects it.
+					assert(false);
+					break;
+				};
 			}
 		}
 	}
@@ -524,7 +530,9 @@ void ServerHandler::resendVideoUnits(const MumbleUDP::VideoNack &request) {
 void ServerHandler::sendVideoNack(const MumbleUDP::VideoNack &nack) {
 	std::vector< Mumble::Protocol::byte > packet(1 + nack.ByteSizeLong());
 	packet[0] = static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack);
-	nack.SerializeToArray(packet.data() + 1, static_cast< int >(packet.size() - 1));
+	if (!nack.SerializeToArray(packet.data() + 1, static_cast< int >(packet.size() - 1))) {
+		return;
+	}
 
 	sendVideoPacket(packet);
 }

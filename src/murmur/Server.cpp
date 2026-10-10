@@ -1118,6 +1118,12 @@ void Server::run() {
 							assert(false);
 							break;
 						}
+						case Mumble::Protocol::UDPMessageType::VideoNack: {
+							// Unreachable for the same reason as Video: it travels only on the video channel,
+							// handled in relayVideo(), and UDPDecoder::decode rejects it.
+							assert(false);
+							break;
+						}
 					}
 				}
 #ifdef Q_OS_UNIX
@@ -1683,7 +1689,9 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 
 	std::vector< Mumble::Protocol::byte > forwarded(1 + m_relayedNack.ByteSizeLong());
 	forwarded[0] = static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack);
-	m_relayedNack.SerializeToArray(forwarded.data() + 1, static_cast< int >(forwarded.size() - 1));
+	if (!m_relayedNack.SerializeToArray(forwarded.data() + 1, static_cast< int >(forwarded.size() - 1))) {
+		return;
+	}
 
 	std::vector< Mumble::Protocol::byte > outgoing;
 	sendVideoPlaintext(sender, forwarded, outgoing);

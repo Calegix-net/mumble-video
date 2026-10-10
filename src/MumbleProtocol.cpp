@@ -674,6 +674,10 @@ namespace Protocol {
 					// this is not merely a stub: a peer must never send video to a peer that has not advertised
 					// FEATURE_VIDEO, so receiving one here always indicates a broken or malicious sender.
 					return false;
+				case UDPMessageType::VideoNack:
+					// Travels only on the video channel (see ServerHandler / Server::relayVideo), never through
+					// this audio-channel decoder; arriving here it is as invalid as Video above.
+					return false;
 			}
 
 			// Unknown package type
