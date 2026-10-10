@@ -34,6 +34,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 
+#include <cstring>
 #include <limits>
 
 extern "C" {
@@ -79,6 +80,54 @@ static LONG WINAPI MumbleUnhandledExceptionFilter(struct _EXCEPTION_POINTERS *Ex
 
 	return EXCEPTION_CONTINUE_SEARCH;
 }
+
+#if defined(__MINGW32__) && defined(__x86_64__)
+// Qt's per-thread cleanup (destroy_current_thread_data() in qthread_win.cpp) runs from a thread_local
+// destructor when a thread exits and dereferences the thread's QThreadData without a null check. In
+// MinGW builds the emulated TLS of the exiting thread can already be torn down at that point, so the
+// pointer reads back as null and every exiting Qt thread (thread pool workers expiring, the server
+// thread on disconnect, audio threads on reconfigure) faults. Windows Error Reporting then suspends
+// the whole process for each fault, which shows up as stutter and a busy cursor, and the process can
+// hang on exit.
+//
+// This handler recognises exactly that fault - a null QThreadData in that function, identified by its
+// machine code - and resumes at the function's own "clear the pointer and return" tail, i.e. it does
+// what a null check would. Anything else, including a differently compiled Qt, is left alone.
+static LONG CALLBACK skipNullThreadDataCleanup(PEXCEPTION_POINTERS info) {
+	if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || info->ContextRecord->Rbx != 0) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	const auto *rip = reinterpret_cast< const unsigned char * >(info->ContextRecord->Rip);
+
+	HMODULE qtCore = GetModuleHandleW(L"Qt6Core.dll");
+	HMODULE owner  = nullptr;
+	if (!qtCore
+		|| !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+							   reinterpret_cast< LPCWSTR >(rip), &owner)
+		|| owner != qtCore) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	// mov (%rax),%rbx ; mov %rax,%rsi          - load the thread-local QThreadData pointer
+	static const unsigned char loadData[] = { 0x48, 0x8b, 0x18, 0x48, 0x89, 0xc6 };
+	// mov 0x50(%rbx),%rax ; cmpb $0,0x96(%rbx) - data->thread, data->isAdopted (faults here)
+	static const unsigned char useData[] = { 0x48, 0x8b, 0x43, 0x50, 0x80, 0xbb, 0x96, 0x00, 0x00, 0x00, 0x00 };
+	// movq $0,(%rsi) ; add $0x28,%rsp ; pop %rbx ; pop %rsi ; ret - currentThreadData = nullptr; return
+	static const unsigned char clearAndReturn[] = { 0x48, 0xc7, 0x06, 0x00, 0x00, 0x00, 0x00,
+													0x48, 0x83, 0xc4, 0x28, 0x5b, 0x5e, 0xc3 };
+	constexpr std::size_t clearAndReturnOffset  = 0x17;
+
+	if (std::memcmp(rip - sizeof(loadData), loadData, sizeof(loadData)) != 0
+		|| std::memcmp(rip, useData, sizeof(useData)) != 0
+		|| std::memcmp(rip + clearAndReturnOffset, clearAndReturn, sizeof(clearAndReturn)) != 0) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	info->ContextRecord->Rip += clearAndReturnOffset;
+	return EXCEPTION_CONTINUE_EXECUTION;
+}
+#endif
 
 static void enableCrashOnCrashes() {
 	// Makes sure the application actually crashes when one of its callbacks
@@ -189,6 +238,10 @@ decltype(__pfnDliNotifyHook2) __pfnDliNotifyHook2 = delayHook;
 #endif
 
 void os_init() {
+#if defined(__MINGW32__) && defined(__x86_64__)
+	AddVectoredExceptionHandler(1, skipNullThreadDataCleanup);
+#endif
+
 	__cpuid(cpuinfo, 1);
 
 #define MMXSSE 0x02800000
