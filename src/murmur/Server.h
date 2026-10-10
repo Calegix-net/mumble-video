@@ -267,6 +267,21 @@ public:
 	/// Scratch message for relayVideo, reused to keep the relay off the allocator. UDP-thread only.
 	MumbleUDP::Video m_relayedVideo;
 
+	/// Encrypts one plaintext video-channel datagram for @p recipient and sends it. @p outgoing is scratch.
+	void sendVideoPlaintext(ServerUser *recipient, const std::vector< Mumble::Protocol::byte > &plaintext,
+							std::vector< Mumble::Protocol::byte > &outgoing);
+
+	/// A subscriber asking for lost fragments of a stream again (MumbleUDP.VideoNack): checked, stamped
+	/// with the requester, and forwarded to the stream's sender. UDP thread only.
+	void relayVideoNack(ServerUser *requester, const std::vector< Mumble::Protocol::byte > &plaintext);
+	MumbleUDP::VideoNack m_relayedNack;
+	struct NackBudget {
+		quint64 windowStartMsec = 0;
+		unsigned int count      = 0;
+	};
+	/// Per requesting session. UDP thread only; entries are tiny and not worth pruning per departure.
+	std::unordered_map< unsigned int, NackBudget > m_videoNackBudget;
+
 
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Server > m_udpDecoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Server > m_tcpTunnelDecoder;

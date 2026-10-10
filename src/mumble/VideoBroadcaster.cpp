@@ -11,6 +11,42 @@
 #include <utility>
 
 VideoBroadcaster::VideoBroadcaster(QObject *parent) : QObject(parent) {
+	m_stats.enabled = !qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS");
+}
+
+void VideoBroadcaster::noteEncodeStats(bool keyframe, std::size_t units, std::uint64_t bytes,
+									   std::uint64_t encodeUsec) {
+	if (!m_stats.window.isValid()) {
+		m_stats.window.start();
+	}
+
+	++m_stats.frames;
+	m_stats.keyframes += keyframe ? 1 : 0;
+	m_stats.units += units;
+	m_stats.bytes += bytes;
+	m_stats.encodeUsec += encodeUsec;
+	m_stats.maxEncodeUsec    = std::max(m_stats.maxEncodeUsec, encodeUsec);
+	m_stats.maxUnitsPerFrame = std::max< std::uint64_t >(m_stats.maxUnitsPerFrame, units);
+
+	const qint64 elapsedMsec = m_stats.window.elapsed();
+	if (elapsedMsec < 2000) {
+		return;
+	}
+
+	const double seconds = static_cast< double >(elapsedMsec) / 1000.0;
+	qInfo("VideoStats tx stream=%u codec=%d fps=%.1f keyframes=%llu units/s=%.0f kbit/s=%.0f encodeMsAvg=%.2f "
+		  "encodeMsMax=%.2f maxUnitsPerFrame=%llu",
+		  m_streamID, m_codec, static_cast< double >(m_stats.frames) / seconds,
+		  static_cast< unsigned long long >(m_stats.keyframes), static_cast< double >(m_stats.units) / seconds,
+		  static_cast< double >(m_stats.bytes) * 8.0 / 1000.0 / seconds,
+		  static_cast< double >(m_stats.encodeUsec) / 1000.0 / static_cast< double >(m_stats.frames),
+		  static_cast< double >(m_stats.maxEncodeUsec) / 1000.0,
+		  static_cast< unsigned long long >(m_stats.maxUnitsPerFrame));
+
+	const bool enabled = m_stats.enabled;
+	m_stats            = EncodeStats();
+	m_stats.enabled    = enabled;
+	m_stats.window.start();
 }
 
 VideoBroadcaster::~VideoBroadcaster() {
@@ -168,9 +204,23 @@ void VideoBroadcaster::encodeFrame(const QImage &sourceFrame, std::uint64_t capt
 	}
 	emit previewFrame(frame);
 
+	QElapsedTimer encodeTimer;
+	if (m_stats.enabled) {
+		encodeTimer.start();
+	}
+
 	const std::vector< EncodedVideoUnit > units =
 		m_codec == 0 ? m_vp8.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe)
 					 : m_encoder.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe);
+
+	if (m_stats.enabled) {
+		std::uint64_t bytes = 0;
+		for (const EncodedVideoUnit &unit : units) {
+			bytes += unit.payload.size();
+		}
+		noteEncodeStats(m_forceKeyframe, units.size(), bytes,
+						static_cast< std::uint64_t >(encodeTimer.nsecsElapsed() / 1000));
+	}
 
 	m_forceKeyframe = false;
 	m_frameNumber++;

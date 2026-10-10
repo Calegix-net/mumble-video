@@ -31,9 +31,21 @@ void VideoStreamDispatcher::clear() {
 	m_streams.clear();
 }
 
-void VideoStreamDispatcher::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID,
-												quint64 /* frameNumber */, bool /* isKeyframe */,
-												unsigned int /* x */, unsigned int /* y */,
+std::vector< unsigned int > VideoStreamDispatcher::audioStreamsOf(unsigned int senderSession) const {
+	std::vector< unsigned int > streams;
+
+	for (const auto &entry : m_streams) {
+		if (entry.second.senderSession == senderSession
+			&& entry.second.codec == MumbleProto::VideoState_Codec_OpusAudio) {
+			streams.push_back(static_cast< unsigned int >(entry.first & 0xFFFFFFFFu));
+		}
+	}
+
+	return streams;
+}
+
+void VideoStreamDispatcher::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+												bool /* isKeyframe */, unsigned int /* x */, unsigned int /* y */,
 												const QByteArray &payload) {
 	const auto it = m_streams.find(streamKey(senderSession, streamID));
 
@@ -41,5 +53,5 @@ void VideoStreamDispatcher::onVideoUnitReceived(unsigned int senderSession, unsi
 		return;
 	}
 
-	emit opusUnitReceived(senderSession, streamID, payload);
+	emit opusUnitReceived(senderSession, streamID, frameNumber, payload);
 }

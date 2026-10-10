@@ -37,7 +37,11 @@
 #include "Timer.h"
 #include "VideoFragmentation.h"
 
+#include <deque>
+#include <map>
 #include <memory>
+#include <tuple>
+#include <vector>
 
 class Connection;
 class Database;
@@ -117,11 +121,54 @@ protected:
 	/// Fragmenter for the outbound video path. Its own instance, used only from the thread that sends.
 	Mumble::Protocol::VideoFragmenter m_videoFragmenter;
 
+	/// What was recently sent, as plaintext fragments per (stream, frame, unit), to answer retransmission
+	/// requests (MumbleProto::VideoNack) from. Bounded by VIDEO_RESEND_HISTORY_USEC and _BYTES. Only touched
+	/// from the thread that sends video (the GUI thread), as sendVideoUnit() and resendVideoUnits() are.
+	struct SentUnitKey {
+		std::uint32_t streamID;
+		std::uint64_t frameNumber;
+		std::uint32_t unitID;
+		bool operator<(const SentUnitKey &other) const {
+			return std::tie(streamID, frameNumber, unitID) < std::tie(other.streamID, other.frameNumber, other.unitID);
+		}
+	};
+	struct SentUnit {
+		std::vector< std::vector< Mumble::Protocol::byte > > fragments;
+		std::uint64_t sentUsec = 0;
+		std::size_t bytes      = 0;
+	};
+	std::map< SentUnitKey, SentUnit > m_sentHistory;
+	std::deque< SentUnitKey > m_sentOrder;
+	std::size_t m_sentHistoryBytes = 0;
+	/// Re-sent bytes in the current second, capped so a flood of requests cannot multiply the uplink.
+	std::uint64_t m_resendWindowStartUsec = 0;
+	std::size_t m_resendWindowBytes       = 0;
+
+	/// Encrypts and sends one plaintext video fragment. False if there is nowhere to send it.
+	bool sendVideoPacket(const std::vector< Mumble::Protocol::byte > &packet);
+
+	/// Receiver side: when retransmission requests were last collected, and how many went out this second.
+	/// UDP thread only.
+	std::uint64_t m_lastNackCollectUsec = 0;
+	std::uint64_t m_nackWindowStartUsec = 0;
+	unsigned int m_nackMessagesInWindow = 0;
+	/// Asks for re-sends of whatever m_videoReassembler has been missing for long enough. UDP thread only.
+	void sendPendingNacks(std::uint64_t nowUsec);
+
 public:
 	/// Fragments one encoded unit and sends it on the video channel. Silently does nothing when there is
 	/// no UDP path: video is never tunnelled over TCP, because it would head-of-line block the control
 	/// channel and the sender cannot slow down for one recipient.
 	void sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload);
+
+	/// Answers a retransmission request for one of this client's own streams, from the recent history.
+	void resendVideoUnits(const MumbleUDP::VideoNack &request);
+
+	/// Sends a retransmission request on the video channel.
+	void sendVideoNack(const MumbleUDP::VideoNack &nack);
+
+	/// Asks the sender of a stream to re-send one whole unit that never arrived (for VP8: a whole frame).
+	void requestVideoRetransmission(unsigned int senderSession, unsigned int streamID, quint64 frameNumber);
 
 protected:
 	/// Flag indicating whether the server we are currently connected to has
@@ -240,6 +287,9 @@ signals:
 	/// the decoder at all until the next keyframe.
 	void videoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
 						   unsigned int x, unsigned int y, const QByteArray &encodedTile);
+
+	/// A serialised MumbleUDP::VideoNack the server forwarded: a viewer wants parts of our stream again.
+	void videoNackReceived(const QByteArray &serializedNack);
 
 	void error(QAbstractSocket::SocketError, QString reason);
 	// This signal is basically the same as disconnected but it will be emitted

@@ -9,6 +9,7 @@
 #include <QtCore/QByteArray>
 
 #include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -16,25 +17,30 @@ namespace {
 constexpr int QUALITY_FLOOR = 20;
 constexpr int QUALITY_STEP  = 20;
 
-std::uint64_t hashImage(const QImage &image) {
-	// FNV-1a over the pixel rows. Rows are hashed individually because QImage may pad scanlines, and
-	// the padding is not meaningful.
-	std::uint64_t hash = 1469598103934665603ull;
+} // namespace
 
-	for (int y = 0; y < image.height(); ++y) {
-		const uchar *scan       = image.constScanLine(y);
-		const std::size_t bytes = static_cast< std::size_t >(image.width()) * 4u;
+bool TiledImageEncoder::regionMatchesReference(const QImage &source, int x, int y, int width, int height) const {
+	// Row by row, because scanlines may be padded and the padding is not meaningful.
+	const std::size_t offset = static_cast< std::size_t >(x) * 4u;
+	const std::size_t bytes  = static_cast< std::size_t >(width) * 4u;
 
-		for (std::size_t i = 0; i < bytes; ++i) {
-			hash ^= scan[i];
-			hash *= 1099511628211ull;
+	for (int row = y; row < y + height; ++row) {
+		if (std::memcmp(source.constScanLine(row) + offset, m_reference.constScanLine(row) + offset, bytes) != 0) {
+			return false;
 		}
 	}
 
-	return hash;
+	return true;
 }
 
-} // namespace
+void TiledImageEncoder::updateReference(const QImage &source, int x, int y, int width, int height) {
+	const std::size_t offset = static_cast< std::size_t >(x) * 4u;
+	const std::size_t bytes  = static_cast< std::size_t >(width) * 4u;
+
+	for (int row = y; row < y + height; ++row) {
+		std::memcpy(m_reference.scanLine(row) + offset, source.constScanLine(row) + offset, bytes);
+	}
+}
 
 void TiledImageEncoder::setTileSize(int pixels) {
 	m_tileSize = std::clamp(pixels, 16, 1024);
@@ -47,7 +53,8 @@ void TiledImageEncoder::setQuality(int quality) {
 }
 
 void TiledImageEncoder::reset() {
-	m_tileHashes.clear();
+	m_tileClean.clear();
+	m_reference     = QImage();
 	m_lastFrameSize = QSize();
 	m_nextTileStart = 0;
 }
@@ -168,7 +175,7 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 	// A resize invalidates the whole tile grid, so the comparison against the previous frame is
 	// meaningless and everything has to be re-sent.
 	if (frame.size() != m_lastFrameSize) {
-		m_tileHashes.clear();
+		m_tileClean.clear();
 		m_lastFrameSize = frame.size();
 		forceKeyframe   = true;
 	}
@@ -182,9 +189,15 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 
 	const std::size_t tileCount = static_cast< std::size_t >(columns) * static_cast< std::size_t >(rows);
 
-	if (m_tileHashes.size() != tileCount) {
-		m_tileHashes.assign(tileCount, 0);
+	if (m_tileClean.size() != tileCount) {
+		m_tileClean.assign(tileCount, 0);
 		forceKeyframe = true;
+	}
+
+	if (m_reference.size() != source.size() || m_reference.format() != QImage::Format_RGB32) {
+		// Contents are irrelevant until written: every tile starts unclean, so it is sent (and its part of
+		// the reference filled in) before it can ever be compared against.
+		m_reference = QImage(source.size(), QImage::Format_RGB32);
 	}
 
 	++m_frameCounter;
@@ -214,11 +227,7 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 		const int w = std::min(m_tileSize, source.width() - x);
 		const int h = std::min(m_tileSize, source.height() - y);
 
-		const QImage tile = source.copy(x, y, w, h);
-
 		m_lastStats.tilesConsidered++;
-
-		const std::uint64_t hash = hashImage(tile);
 
 		// Every tile gets its periodic re-send on a different frame from every other tile - see
 		// FULL_REFRESH_INTERVAL_FRAMES - a index-staggered schedule rather than the whole grid
@@ -227,17 +236,18 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 		const bool tileDueForPeriodicRefresh =
 			(static_cast< unsigned int >(index) + m_frameCounter) % FULL_REFRESH_INTERVAL_FRAMES == 0;
 
-		if (!forceKeyframe && !tileDueForPeriodicRefresh && m_tileHashes[index] == hash) {
+		if (!forceKeyframe && !tileDueForPeriodicRefresh && m_tileClean[index]
+			&& regionMatchesReference(source, x, y, w, h)) {
 			m_lastStats.tilesUnchanged++;
 			continue;
 		}
 
 		if (units.size() >= MAX_UNITS_PER_FRAME) {
-			// Over budget for this frame. Left for the next call, and its recorded hash cleared so that
-			// the next call sees it as changed regardless of whether this was a forced send (a keyframe
-			// or a periodic refresh) of content that has not actually changed - otherwise a deferred
-			// keyframe tile would simply never go out.
-			m_tileHashes[index] = 0;
+			// Over budget for this frame. Left for the next call, and marked unclean so that the next
+			// call sees it as changed regardless of whether this was a forced send (a keyframe or a
+			// periodic refresh) of content that has not actually changed - otherwise a deferred keyframe
+			// tile would simply never go out.
+			m_tileClean[index] = 0;
 			m_lastStats.tilesDeferred++;
 
 			if (!deferredAny) {
@@ -257,7 +267,10 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 			encodeRegionSplitting(source, x, y, w, h, streamID, frameNumber, captureTimestampUsec, nextUnitID, units);
 
 		if (fullyCovered) {
-			m_tileHashes[index] = hash;
+			m_tileClean[index] = 1;
+			updateReference(source, x, y, w, h);
+		} else {
+			m_tileClean[index] = 0;
 		}
 	}
 

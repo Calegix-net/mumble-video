@@ -172,6 +172,41 @@ void SocketRPCClient::processXml() {
 			if (iter != qmRequest.constEnd()) {
 				Global::get().mw->on_PushToTalk_triggered(false, QVariant());
 			}
+			if (qmRequest.contains(QLatin1String("sharescreen"))) {
+				Global::get().mw->remoteShareScreen(1);
+			}
+			if (qmRequest.contains(QLatin1String("unsharescreen"))) {
+				Global::get().mw->remoteShareScreen(0);
+			}
+			if (qmRequest.contains(QLatin1String("togglesharescreen"))) {
+				Global::get().mw->remoteShareScreen(-1);
+			}
+			if (qmRequest.contains(QLatin1String("sharecamera"))) {
+				Global::get().mw->remoteShareCamera(1);
+			}
+			if (qmRequest.contains(QLatin1String("unsharecamera"))) {
+				Global::get().mw->remoteShareCamera(0);
+			}
+			if (qmRequest.contains(QLatin1String("togglesharecamera"))) {
+				Global::get().mw->remoteShareCamera(-1);
+			}
+			if (qmRequest.contains(QLatin1String("watchall"))) {
+				Global::get().mw->remoteWatchAll(true);
+			}
+			if (qmRequest.contains(QLatin1String("unwatchall"))) {
+				Global::get().mw->remoteWatchAll(false);
+			}
+			if (qmRequest.contains(QLatin1String("quit"))) {
+				// Exactly the File > Quit path, minus the "are you sure" question: it was asked for explicitly.
+				// Queued so this reply goes out before the window starts tearing down.
+				QMetaObject::invokeMethod(
+					Global::get().mw,
+					[]() {
+						Global::get().mw->forceQuit = true;
+						Global::get().mw->close();
+					},
+					Qt::QueuedConnection);
+			}
 			ack = true;
 		} else if (request.nodeName() == QLatin1String("url")) {
 			if (Global::get().sh && Global::get().sh->isRunning() && Global::get().uiSession) {

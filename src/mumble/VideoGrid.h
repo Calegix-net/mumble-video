@@ -16,12 +16,13 @@
 #include <QtCore/QDeadlineTimer>
 #include <QtWidgets/QWidget>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <map>
-#include <vector>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 class QEnterEvent;
 class QKeyEvent;
@@ -215,6 +216,19 @@ public slots:
 	 */
 	void setWatching(unsigned int senderSession, unsigned int streamID, bool watching);
 
+	/// setWatching() for every advertised stream at once. Used by remote control (`mumble rpc watchall`).
+	void setWatchingAll(bool watching);
+
+	/// Whether this stream is a screen or window share (rather than a camera, or unknown).
+	bool isScreenStream(unsigned int senderSession, unsigned int streamID) const;
+
+	/// (sender session, source kind) of every stream currently being watched.
+	std::vector< std::pair< unsigned int, int > > watchedStreams() const;
+
+	/// Whether any screen or window share of this sender is being watched - which is what decides whether
+	/// that sender's screen-share audio is wanted.
+	bool isWatchingScreenOf(unsigned int senderSession) const;
+
 	/// Consumes the server's reply to a local unwatch without removing the advertised stream.
 	/// Counts outstanding requests so a delayed reply cannot cancel a subsequent watch.
 	bool consumeUnsubscribeAcknowledgement(unsigned int senderSession, unsigned int streamID);
@@ -272,6 +286,10 @@ signals:
 	/// a normal unwatch sends, so the server stops relaying a stream nothing is looking at any more.
 	void streamWentStale(unsigned int senderSession, unsigned int streamID);
 
+	/// A VP8 frame never arrived at all: ask the sender to re-send it (see MumbleProto::VideoNack).
+	/// Partially arrived frames are asked for by ServerHandler, which can see which fragments are missing.
+	void retransmitNeeded(unsigned int senderSession, unsigned int streamID, quint64 frameNumber);
+
 protected:
 	struct PendingTile {
 		quint64 frameNumber = 0;
@@ -279,11 +297,21 @@ protected:
 		unsigned int y      = 0;
 		QImage image;
 		bool ready = false;
+		/// Set when a newer tile for the same position arrives before this one was decoded: whatever it
+		/// would show is already out of date, so the worker skips decoding it and nothing paints it.
+		std::atomic< bool > superseded{ false };
 	};
 
 	struct Surface {
 		QImage canvas;
 		std::deque< std::shared_ptr< PendingTile > > pendingTiles;
+		/// The newest not-yet-applied tile at each position ((x << 32) | y), so an older one can be marked
+		/// superseded. Entries are dropped once applied.
+		std::unordered_map< std::uint64_t, std::shared_ptr< PendingTile > > pendingByPosition;
+		/// Tiles were dropped because decoding could not keep up. One refresh is asked for once the
+		/// backlog has drained, rather than one per dropped tile while still overloaded - asking for a
+		/// keyframe (every tile at once) from a viewer that is already behind only deepened the overload.
+		bool refreshAfterOverload  = false;
 		unsigned int senderSession = 0;
 		unsigned int streamID      = 0;
 
@@ -345,7 +373,62 @@ protected:
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
 		std::unique_ptr< VP8Decoder > vp8;
+
+		/// VP8 frames that arrived after a gap, held (by frame number) while the frames missing before them
+		/// are re-sent - see onVp8UnitReceived(). Without this every lost frame froze the picture until a
+		/// keyframe, which at a couple of percent packet loss meant a frozen camera most of the time.
+		struct HeldVp8Unit {
+			QByteArray payload;
+			unsigned int x = 0;
+			unsigned int y = 0;
+		};
+		std::map< quint64, HeldVp8Unit > vp8Held;
+		/// When the current gap started (0: no gap), and the highest frame retransmission was asked for.
+		qint64 vp8GapSinceMsec      = 0;
+		quint64 vp8RequestedThrough = 0;
+		/// Gaps this stream has had that retransmission closed, and that it did not. A server or sender that
+		/// predates retransmission never answers; once a few gaps have all gone unanswered, gaps go straight
+		/// to a keyframe request as before rather than holding the picture for nothing first.
+		unsigned int vp8GapsRecovered = 0;
+		unsigned int vp8GapsAbandoned = 0;
+
+		/// MUMBLE_VIDEO_STATS: what this stream did since the last logStats() line. The newest* and
+		/// lastPaintMsec fields carry across lines; the rest are per line.
+		struct Stats {
+			quint64 units                    = 0;
+			quint64 tilesPainted             = 0;
+			quint64 framesPainted            = 0;
+			quint64 keyframeRequestsOverload = 0;
+			quint64 keyframeRequestsLoss     = 0;
+			quint64 keyframeRequestsFailure  = 0;
+			quint64 newestUnitFrame          = 0;
+			quint64 newestPaintedFrame       = 0;
+			qint64 lastPaintMsec             = 0;
+			qint64 maxPaintGapMsec           = 0;
+		} stats;
 	};
+
+	/// VP8 frames are held this long, and at most this many, waiting for a re-sent predecessor before the
+	/// gap is given up on and a keyframe asked for instead.
+	/// Long enough for a re-send to arrive when the request itself had to be retransmitted by TCP (200 ms at
+	/// the least) on top of the round trip; still a fraction of what waiting for a keyframe costs.
+	static constexpr qint64 VP8_HOLD_MSEC     = 700;
+	static constexpr std::size_t MAX_VP8_HELD = 30;
+
+	/// The VP8 half of onVideoUnitReceived(): continuity, holding across a gap, and decoding in order.
+	void onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 frameNumber, bool isKeyframe, unsigned int x,
+						   unsigned int y, const QByteArray &payload);
+	/// Decodes one VP8 unit and paints it. Returns whether it decoded.
+	bool decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frameNumber, unsigned int x, unsigned int y,
+					   const QByteArray &payload);
+	/// Decodes held frames that are now next in line.
+	void drainHeldVp8(std::uint64_t key, Surface &surface);
+
+	/// MUMBLE_VIDEO_STATS: records a tile about to be painted for frame @p frameNumber.
+	void noteStatsPaint(Surface &surface, quint64 frameNumber);
+	/// MUMBLE_VIDEO_STATS: one log line per watched stream, then resets the per-line counters.
+	void logStats();
+	QTimer *m_statsTimer = nullptr;
 
 	/// Combines a sender and their stream into one lookup key. A sender may hold several streams open at
 	/// once (camera, screen, screen audio), and nothing about the surfaces themselves may be conflated
@@ -388,7 +471,10 @@ protected:
 	// set of visible senders actually changes - and the map is capped at MAX_SENDERS entries, so the
 	// O(log n) it costs over a hash map is not worth worrying about.
 	std::map< std::uint64_t, Surface > m_surfaces;
-	static constexpr std::size_t MAX_PENDING_TILE_DECODES = 1024;
+	/// Tiles queued for decoding, in total and per stream, before new ones are dropped. A queue this deep
+	/// is already a couple of full 1080p frames behind; letting it grow further only makes the picture
+	/// lag further behind the sender rather than recover.
+	static constexpr std::size_t MAX_PENDING_TILE_DECODES = 256;
 	std::size_t m_pendingTileDecodes                      = 0;
 	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 

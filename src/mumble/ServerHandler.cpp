@@ -383,9 +383,13 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 }
 
 void ServerHandler::sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload) {
+	// Called on the GUI thread (the broadcasters live there), while qusUdp belongs to this handler's own
+	// thread: the audio thread writes to it too, and a disconnect deletes it. Every touch of the socket and
+	// of the address it sends to is therefore under qmUdp, exactly as in sendMessage(). The lock is taken per
+	// datagram rather than per unit so a keyframe burst of hundreds of datagrams never holds voice up.
 	ConnectionPtr connection(cConnection);
 
-	if (!connection || !connection->videoCrypt.isValid() || !qusUdp) {
+	if (!connection || !connection->videoCrypt.isValid()) {
 		return;
 	}
 
@@ -407,15 +411,176 @@ void ServerHandler::sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &heade
 		return;
 	}
 
-	std::vector< Mumble::Protocol::byte > datagram;
+	// Kept for a moment in case a receiver asks for some of it again - see resendVideoUnits().
+	const std::uint64_t nowUsec = static_cast< std::uint64_t >(tTimestamp.elapsed().count());
+	const SentUnitKey key{ header.streamID, header.frameNumber, header.unitID };
+
+	SentUnit sent;
+	sent.fragments = m_videoFragmenter.packets();
+	sent.sentUsec  = nowUsec;
+	for (const auto &fragment : sent.fragments) {
+		sent.bytes += fragment.size();
+	}
+
+	const auto previous = m_sentHistory.find(key);
+	if (previous != m_sentHistory.end()) {
+		m_sentHistoryBytes -= previous->second.bytes;
+		m_sentHistory.erase(previous);
+	}
+	m_sentHistoryBytes += sent.bytes;
+	m_sentHistory.emplace(key, std::move(sent));
+	m_sentOrder.push_back(key);
+
+	while (!m_sentOrder.empty()) {
+		const auto oldest = m_sentHistory.find(m_sentOrder.front());
+		if (oldest != m_sentHistory.end()
+			&& nowUsec - oldest->second.sentUsec < Mumble::Protocol::VIDEO_RESEND_HISTORY_USEC
+			&& m_sentHistoryBytes <= Mumble::Protocol::VIDEO_RESEND_HISTORY_BYTES) {
+			break;
+		}
+		if (oldest != m_sentHistory.end() && oldest->second.sentUsec <= nowUsec) {
+			m_sentHistoryBytes -= oldest->second.bytes;
+			m_sentHistory.erase(oldest);
+		}
+		m_sentOrder.pop_front();
+	}
 
 	for (const std::vector< Mumble::Protocol::byte > &packet : m_videoFragmenter.packets()) {
-		if (!connection->videoCrypt.encrypt(packet, datagram)) {
+		if (!sendVideoPacket(packet)) {
+			// Disconnected mid-unit; the rest of it has nowhere to go.
 			return;
 		}
+	}
+}
 
-		qusUdp->writeDatagram(reinterpret_cast< const char * >(datagram.data()), static_cast< qint64 >(datagram.size()),
-							  qhaRemote, usResolvedPort);
+bool ServerHandler::sendVideoPacket(const std::vector< Mumble::Protocol::byte > &packet) {
+	ConnectionPtr connection(cConnection);
+
+	if (!connection || !connection->videoCrypt.isValid()) {
+		return false;
+	}
+
+	std::vector< Mumble::Protocol::byte > datagram;
+
+	// Encrypted under the lock too: video goes out from the GUI thread and retransmission requests from this
+	// handler's own thread, and the crypt state's sequence counter must not be advanced by both at once.
+	QMutexLocker qml(&qmUdp);
+
+	if (!qusUdp || !connection->videoCrypt.encrypt(packet, datagram)) {
+		return false;
+	}
+
+	qusUdp->writeDatagram(reinterpret_cast< const char * >(datagram.data()), static_cast< qint64 >(datagram.size()),
+						  qhaRemote, usResolvedPort);
+
+	return true;
+}
+
+void ServerHandler::resendVideoUnits(const MumbleUDP::VideoNack &request) {
+	// Re-sent bytes per second, at most: answering requests must never be able to multiply this client's
+	// uplink, whatever a misbehaving receiver asks for. Well above what real loss rates need.
+	constexpr std::size_t MAX_RESEND_BYTES_PER_SECOND = 1024 * 1024;
+
+	if (!bUdp) {
+		return;
+	}
+
+	const std::uint64_t nowUsec = static_cast< std::uint64_t >(tTimestamp.elapsed().count());
+	if (nowUsec - m_resendWindowStartUsec >= 1000 * 1000) {
+		m_resendWindowStartUsec = nowUsec;
+		m_resendWindowBytes     = 0;
+	}
+
+	int units = 0;
+	for (const MumbleUDP::VideoNack::Unit &unit : request.units()) {
+		if (++units > Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
+			break;
+		}
+
+		const auto sent = m_sentHistory.find(SentUnitKey{ request.stream_id(), unit.frame_number(), unit.unit_id() });
+		if (sent == m_sentHistory.end()) {
+			// Already gone from the history: too old to be worth sending now anyway.
+			continue;
+		}
+
+		const std::uint64_t missing = unit.missing_fragments();
+		for (std::size_t i = 0; i < sent->second.fragments.size(); ++i) {
+			if (missing != 0 && (i >= 64 || !(missing & (std::uint64_t{ 1 } << i)))) {
+				continue;
+			}
+
+			const std::vector< Mumble::Protocol::byte > &fragment = sent->second.fragments[i];
+			if (m_resendWindowBytes + fragment.size() > MAX_RESEND_BYTES_PER_SECOND) {
+				return;
+			}
+			if (!sendVideoPacket(fragment)) {
+				return;
+			}
+			m_resendWindowBytes += fragment.size();
+		}
+	}
+}
+
+void ServerHandler::sendVideoNack(const MumbleUDP::VideoNack &nack) {
+	std::vector< Mumble::Protocol::byte > packet(1 + nack.ByteSizeLong());
+	packet[0] = static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack);
+	nack.SerializeToArray(packet.data() + 1, static_cast< int >(packet.size() - 1));
+
+	sendVideoPacket(packet);
+}
+
+void ServerHandler::requestVideoRetransmission(unsigned int senderSession, unsigned int streamID, quint64 frameNumber) {
+	MumbleUDP::VideoNack nack;
+	nack.set_sender_session(senderSession);
+	nack.set_stream_id(streamID);
+
+	MumbleUDP::VideoNack::Unit *unit = nack.add_units();
+	unit->set_frame_number(frameNumber);
+	unit->set_unit_id(0);
+	// 0: the whole unit - nothing of it arrived, so which fragments it had is unknown here.
+	unit->set_missing_fragments(0);
+
+	sendVideoNack(nack);
+}
+
+void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
+	// Messages per second, at most, so a burst of loss costs the server's rate limit for this client a
+	// bounded amount, leaving room for its subscriptions and keyframe requests.
+	constexpr unsigned int MAX_NACK_MESSAGES_PER_SECOND = 30;
+
+	std::vector< Mumble::Protocol::VideoNackRequest > requests;
+	m_videoReassembler.collectNacks(nowUsec, requests);
+
+	if (requests.empty()) {
+		return;
+	}
+
+	if (nowUsec - m_nackWindowStartUsec >= 1000 * 1000) {
+		m_nackWindowStartUsec  = nowUsec;
+		m_nackMessagesInWindow = 0;
+	}
+
+	// One message per stream, carrying every unit of it that is missing something.
+	std::map< std::pair< std::uint32_t, std::uint32_t >, MumbleUDP::VideoNack > messages;
+	for (const Mumble::Protocol::VideoNackRequest &request : requests) {
+		MumbleUDP::VideoNack &nack = messages[{ request.senderSession, request.streamID }];
+		nack.set_sender_session(request.senderSession);
+		nack.set_stream_id(request.streamID);
+
+		if (nack.units_size() < Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
+			MumbleUDP::VideoNack::Unit *unit = nack.add_units();
+			unit->set_frame_number(request.frameNumber);
+			unit->set_unit_id(request.unitID);
+			unit->set_missing_fragments(request.missingFragments);
+		}
+	}
+
+	for (const auto &entry : messages) {
+		if (m_nackMessagesInWindow >= MAX_NACK_MESSAGES_PER_SECOND) {
+			return;
+		}
+		++m_nackMessagesInWindow;
+		sendVideoNack(entry.second);
 	}
 }
 
@@ -430,6 +595,15 @@ void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, 
 
 	if (connection->videoCrypt.decrypt(std::span< const Mumble::Protocol::byte >(datagram, len), plaintext)
 		!= Mumble::Protocol::VideoCryptState::Result::Ok) {
+		return;
+	}
+
+	if (plaintext.size() >= 2
+		&& plaintext[0] == static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack)) {
+		// A viewer asking for part of one of our streams again, forwarded by the server. Answered on the GUI
+		// thread, which owns the history of what was sent.
+		emit videoNackReceived(QByteArray(reinterpret_cast< const char * >(plaintext.data() + 1),
+										  static_cast< int >(plaintext.size() - 1)));
 		return;
 	}
 
@@ -455,9 +629,16 @@ void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, 
 	}
 
 	Mumble::Protocol::VideoUnit unit;
+	const std::uint64_t nowUsec = static_cast< std::uint64_t >(tTimestamp.elapsed().count());
 
-	if (m_videoReassembler.processPacket(plaintext, senderSession,
-										 static_cast< std::uint64_t >(tTimestamp.elapsed().count()), unit)
+	// Every 10 ms at most: ask for whatever has been incomplete for long enough. Driven by arriving packets,
+	// which is exactly when there is anything to ask about.
+	if (nowUsec - m_lastNackCollectUsec >= 10 * 1000) {
+		m_lastNackCollectUsec = nowUsec;
+		sendPendingNacks(nowUsec);
+	}
+
+	if (m_videoReassembler.processPacket(plaintext, senderSession, nowUsec, unit)
 		== Mumble::Protocol::VideoReassemblyResult::Complete) {
 		emit videoUnitReceived(
 			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,

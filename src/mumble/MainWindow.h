@@ -291,6 +291,34 @@ protected:
 	/// No-op if (senderSession, streamID) is not currently a screen-share audio stream - callers do not
 	/// need to know whether a given ending stream was one before asking this to check.
 	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);
+	/// Subscribes to a sender's screen-share audio exactly while one of their screen shares is watched.
+	void syncScreenShareAudioSubscription(unsigned int senderSession);
+	/// Linux: starts and announces the share's system audio if m_shareScreenAudioAction asks for it.
+	/// Must run before the picture is announced. @p sourceKind is a MumbleProto::VideoState::SourceKind.
+	void startScreenShareAudio(int sourceKind);
+	/// Linux only (the Windows picker asks instead); null elsewhere.
+	QAction *m_shareScreenAudioAction = nullptr;
+	/// Set when a connection dropped while sharing and a reconnect is pending: the shares are kept running
+	/// and reannounceSharesAfterReconnect() announces them again once the new connection is synchronised.
+	bool m_sharesSurvivingReconnect = false;
+	/// Stops camera, screen and screen-audio capture without announcing anything (there is no connection).
+	void stopAllSharesLocally();
+	void reannounceSharesAfterReconnect();
+	/// What this client was watching when its connection dropped, as (sender identity, source kind): a
+	/// reconnect gives everyone new session numbers, so the sender is remembered by certificate hash (or
+	/// name). A matching announcement before m_resumeWatchDeadlineMsec is watched again automatically.
+	std::vector< std::pair< QString, int > > m_resumeWatchAfterReconnect;
+	qint64 m_resumeWatchDeadlineMsec = 0;
+	static QString videoSenderIdentity(const ClientUser *user);
+	/// Screen-share audio streams this client is subscribed to, keyed like m_screenShareAudioBuffers - so
+	/// syncScreenShareAudioSubscription() only ever sends a change.
+	std::unordered_map< std::uint64_t, bool > m_subscribedScreenAudio;
+	/// Unsubscribes this client sent for screen-share audio and the server has not echoed yet. The echo is
+	/// a subscribe=false like a refusal; without this count it would be taken for one and the stream
+	/// forgotten, so that watching later had no audio stream left to subscribe to.
+	std::unordered_map< std::uint64_t, unsigned int > m_pendingScreenAudioUnsubscribes;
+	/// Forgets subscription bookkeeping for one audio stream, or every stream of a sender.
+	void forgetScreenAudioSubscription(unsigned int senderSession, std::optional< unsigned int > streamID);
 
 	/// Removes every screen-share audio buffer belonging to a sender, whatever its stream id - used when
 	/// the sender disconnects and no per-stream end message will arrive.
@@ -335,10 +363,20 @@ public slots:
 	/// no sensible default to fall back to.
 	void toggleScreenShare(bool share);
 
+	/// Remote control (`mumble rpc sharescreen` and friends): drives the Share Screen / Share Camera
+	/// actions exactly as a click does. @p mode is 1 to share, 0 to stop, -1 to toggle.
+	void remoteShareScreen(int mode);
+	void remoteShareCamera(int mode);
+	/// Remote control (`mumble rpc watchall` / `unwatchall`): watch or stop watching every advertised stream.
+	void remoteWatchAll(bool watching);
+	/// A viewer's retransmission request for one of our streams (see ServerHandler::videoNackReceived).
+	void onVideoNackReceived(const QByteArray &serializedNack);
+
 	/// One Opus packet belonging to some sender's screen-share audio, forwarded from
 	/// VideoStreamDispatcher::opusUnitReceived. Finds or creates that (sender, stream)'s
 	/// AudioOutputScreenShare and feeds it.
-	void onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, const QByteArray &opusPacket);
+	void onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 sequence,
+									   const QByteArray &opusPacket);
 
 	void updateWindowTitle();
 	/// updateToolbar updates the state of the toolbar depending on the current

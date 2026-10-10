@@ -250,7 +250,23 @@ struct CLIOptions {
 };
 
 const std::set< std::string > CLIOptions::knownRpcCommands = {
-	"mute", "unmute", "togglemute", "deaf", "undeaf", "toggledeaf", "starttalking", "stoptalking",
+	"mute",
+	"unmute",
+	"togglemute",
+	"deaf",
+	"undeaf",
+	"toggledeaf",
+	"starttalking",
+	"stoptalking",
+	"sharescreen",
+	"unsharescreen",
+	"togglesharescreen",
+	"sharecamera",
+	"unsharecamera",
+	"togglesharecamera",
+	"watchall",
+	"unwatchall",
+	"quit",
 };
 
 CLIOptions parseCLI(int argc, char **argv) {

@@ -217,6 +217,11 @@ private:
 
 VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	setAutoFillBackground(true);
+	// paintEvent() covers every pixel (it starts by filling the whole widget), so nothing behind the grid
+	// ever needs painting first. Without this, each incoming tile's update() also repainted the dock widget
+	// holding the grid - title bar included, which with the Fusion style re-reads the title bar's button
+	// icons from disk every time: measured as most of a viewer's GUI-thread time while watching a share.
+	setAttribute(Qt::WA_OpaquePaintEvent);
 
 	// Small floor, greedy ceiling: the panel must never be what stops the main window from being made
 	// smaller, and given room it should take it. Tiles scale to whatever they get (see paintEvent).
@@ -239,6 +244,65 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	m_staleCheckTimer = new QTimer(this);
 	connect(m_staleCheckTimer, &QTimer::timeout, this, &VideoGrid::checkForStaleStreams);
 	applyPollInterval();
+
+	// Measurement only, gated like the mock sources so production never pays for it.
+	if (!qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS")) {
+		m_statsTimer = new QTimer(this);
+		connect(m_statsTimer, &QTimer::timeout, this, &VideoGrid::logStats);
+		m_statsTimer->start(2000);
+	}
+}
+
+void VideoGrid::noteStatsPaint(Surface &surface, quint64 frameNumber) {
+	if (!m_statsTimer) {
+		return;
+	}
+
+	Surface::Stats &stats = surface.stats;
+	const qint64 now      = QDateTime::currentMSecsSinceEpoch();
+
+	++stats.tilesPainted;
+	if (frameNumber > stats.newestPaintedFrame) {
+		++stats.framesPainted;
+		stats.newestPaintedFrame = frameNumber;
+	}
+	if (stats.lastPaintMsec > 0) {
+		stats.maxPaintGapMsec = std::max(stats.maxPaintGapMsec, now - stats.lastPaintMsec);
+	}
+	stats.lastPaintMsec = now;
+}
+
+void VideoGrid::logStats() {
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+	for (auto &entry : m_surfaces) {
+		Surface &surface = entry.second;
+		if (!surface.watching) {
+			continue;
+		}
+
+		Surface::Stats &stats = surface.stats;
+		// A gap still open right now counts too: a stream that froze and stayed frozen never paints again
+		// to close it.
+		const qint64 openGap = stats.lastPaintMsec > 0 ? now - stats.lastPaintMsec : 0;
+
+		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
+			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d",
+			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
+			  static_cast< unsigned long long >(stats.tilesPainted),
+			  static_cast< unsigned long long >(stats.framesPainted),
+			  static_cast< unsigned long long >(stats.newestUnitFrame),
+			  static_cast< unsigned long long >(stats.newestPaintedFrame),
+			  static_cast< long long >(std::max(stats.maxPaintGapMsec, openGap)),
+			  static_cast< unsigned long long >(stats.keyframeRequestsOverload),
+			  static_cast< unsigned long long >(stats.keyframeRequestsLoss),
+			  static_cast< unsigned long long >(stats.keyframeRequestsFailure), surface.pendingTiles.size(),
+			  surface.awaitingKeyframe ? 1 : 0);
+
+		stats.units = stats.tilesPainted = stats.framesPainted = 0;
+		stats.keyframeRequestsOverload = stats.keyframeRequestsLoss = stats.keyframeRequestsFailure = 0;
+		stats.maxPaintGapMsec                                                                       = 0;
+	}
 }
 
 void VideoGrid::setStaleStreamTimeoutMsecForTesting(int msec) {
@@ -473,6 +537,11 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	// over - least of all a decoder holding reference frames from different content.
 	if (surface.streamID != streamID || surface.codec != codec) {
 		surface.pendingTiles.clear();
+		surface.pendingByPosition.clear();
+		surface.refreshAfterOverload = false;
+		surface.vp8Held.clear();
+		surface.vp8GapSinceMsec     = 0;
+		surface.vp8RequestedThrough = 0;
 		surface.canvas = QImage();
 		surface.vp8.reset();
 		surface.tileFrameNumbers.clear();
@@ -529,6 +598,11 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 	if (!watching) {
 		++it->second.pendingUnsubscriptions;
 		it->second.pendingTiles.clear();
+		it->second.pendingByPosition.clear();
+		it->second.refreshAfterOverload = false;
+		it->second.vp8Held.clear();
+		it->second.vp8GapSinceMsec     = 0;
+		it->second.vp8RequestedThrough = 0;
 		it->second.hasDecodedFrame = false;
 		it->second.lastFrameNumber = 0;
 	}
@@ -549,6 +623,49 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 
 	emit watchToggled(senderSession, streamID, watching);
 	relayout();
+}
+
+void VideoGrid::setWatchingAll(bool watching) {
+	// Collected first: setWatching() relayouts, and nothing here should depend on what that does to the map.
+	std::vector< std::pair< unsigned int, unsigned int > > streams;
+	for (const auto &entry : m_surfaces) {
+		streams.emplace_back(entry.second.senderSession, entry.second.streamID);
+	}
+
+	for (const auto &stream : streams) {
+		setWatching(stream.first, stream.second, watching);
+	}
+}
+
+static bool isScreenSourceKind(int sourceKind) {
+	return sourceKind == MumbleProto::VideoState_SourceKind_Display
+		   || sourceKind == MumbleProto::VideoState_SourceKind_Window;
+}
+
+bool VideoGrid::isScreenStream(unsigned int senderSession, unsigned int streamID) const {
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+	return it != m_surfaces.end() && isScreenSourceKind(it->second.sourceKind);
+}
+
+std::vector< std::pair< unsigned int, int > > VideoGrid::watchedStreams() const {
+	std::vector< std::pair< unsigned int, int > > watched;
+	for (const auto &entry : m_surfaces) {
+		if (entry.second.watching) {
+			watched.emplace_back(entry.second.senderSession, entry.second.sourceKind);
+		}
+	}
+	return watched;
+}
+
+bool VideoGrid::isWatchingScreenOf(unsigned int senderSession) const {
+	for (const auto &entry : m_surfaces) {
+		const Surface &surface = entry.second;
+		if (surface.senderSession == senderSession && surface.watching && isScreenSourceKind(surface.sourceKind)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 bool VideoGrid::consumeUnsubscribeAcknowledgement(unsigned int senderSession, unsigned int streamID) {
@@ -576,6 +693,9 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	surface.lastUnitMsec          = QDateTime::currentMSecsSinceEpoch();
 	surface.stallRefreshRequested = false;
 
+	++surface.stats.units;
+	surface.stats.newestUnitFrame = std::max(surface.stats.newestUnitFrame, static_cast< quint64 >(frameNumber));
+
 	if (!surface.watching) {
 		// Unwatched: the owner has already sent (or is about to send) a VideoSubscribe withdrawing this,
 		// so units are expected to stop arriving shortly, but a few in flight when the button was clicked
@@ -583,46 +703,9 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		return;
 	}
 
-	// VP8 inter-frames reference their predecessor, and decoding one whose reference is missing does
-	// not fail - it returns a plausible-looking corrupted image, classically green. The failure counter
-	// below never sees that, so frame continuity is enforced here, before the decoder is fed at all.
-	// TiledImage is exempt: its units are independently decodable by design, so late or missing tiles
-	// cost nothing beyond the pixels they carried.
-	if (surface.codec == MumbleProto::VideoState_Codec_VP8 && surface.hasDecodedFrame) {
-		if (frameNumber <= surface.lastFrameNumber) {
-			// A stale unit that reassembled after its successors - a keyframe included. Decoding it
-			// rewinds the decoder's reference state (and, for a keyframe, would rewind lastFrameNumber
-			// itself, making the next live frame look like a gap and triggering a needless freeze).
-			return;
-		}
-
-		if (surface.awaitingKeyframe && !isKeyframe) {
-			// Frozen: the last good picture stays up, which reads as a brief pause instead of a burst
-			// of green. Re-ask occasionally in case the first request was lost in the same loss burst
-			// that caused the gap.
-			if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
-				surface.unitsWhileAwaiting = 0;
-
-				emit keyframeNeeded(senderSession, streamID);
-			}
-
-			return;
-		}
-
-		if (!isKeyframe && frameNumber != surface.lastFrameNumber + 1) {
-			// The reference for this frame never arrived. Freeze and ask once; the counter above
-			// repeats the request if the stream keeps flowing without a keyframe.
-			surface.awaitingKeyframe   = true;
-			surface.unitsWhileAwaiting = 0;
-
-			qWarning("VideoGrid: stream %u/%u lost frame continuity (%llu -> %llu), frozen until a keyframe arrives",
-					 senderSession, streamID, static_cast< unsigned long long >(surface.lastFrameNumber),
-					 static_cast< unsigned long long >(frameNumber));
-
-			emit keyframeNeeded(senderSession, streamID);
-
-			return;
-		}
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8) {
+		onVp8UnitReceived(existing->first, surface, frameNumber, isKeyframe, x, y, encodedTile);
+		return;
 	}
 
 	if (surface.codec == MumbleProto::VideoState_Codec_TiledImage) {
@@ -639,13 +722,34 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		// promise the way a stateless JPEG tile can.
 		if (m_pendingTileDecodes >= MAX_PENDING_TILE_DECODES
 			|| surface.pendingTiles.size() >= MAX_PENDING_TILE_DECODES) {
-			emit keyframeNeeded(senderSession, streamID);
+			// Behind. Dropping is how this catches up; the refresh that repaints what was dropped is asked
+			// for once, when the queue has drained (see applyReadyTiles()). Asking now - for a keyframe, every
+			// tile at once - is what used to turn a viewer that had fallen behind into one that never caught
+			// up, and made the sender re-encode whole frames for everybody while it happened.
+			++surface.stats.keyframeRequestsOverload;
+			surface.refreshAfterOverload = true;
 			return;
 		}
+
 		auto pending         = std::make_shared< PendingTile >();
 		pending->frameNumber = frameNumber;
 		pending->x           = x;
 		pending->y           = y;
+
+		// Whichever of this tile and one still waiting at the same position belongs to the older frame is
+		// out of date: let its worker skip it. By frame number, not arrival - a late tile from an earlier
+		// frame can arrive after a newer one, and must lose to it.
+		std::shared_ptr< PendingTile > &newestHere =
+			surface.pendingByPosition[(static_cast< std::uint64_t >(x) << 32) | y];
+		if (!newestHere) {
+			newestHere = pending;
+		} else if (pending->frameNumber >= newestHere->frameNumber) {
+			newestHere->superseded.store(true, std::memory_order_relaxed);
+			newestHere = pending;
+		} else {
+			pending->superseded.store(true, std::memory_order_relaxed);
+		}
+
 		surface.pendingTiles.push_back(pending);
 		++m_pendingTileDecodes;
 		auto *watcher = new QFutureWatcher< QImage >(this);
@@ -659,30 +763,125 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 					watcher->deleteLater();
 				});
 
-		watcher->setFuture(QtConcurrent::run(&VideoGrid::decodeJpegTile, encodedTile));
+		watcher->setFuture(QtConcurrent::run([pending, encodedTile]() {
+			return pending->superseded.load(std::memory_order_relaxed) ? QImage() : decodeJpegTile(encodedTile);
+		}));
 
 		return;
 	}
 
-	const QImage tile = decodeUnit(surface, encodedTile);
+	// Any other codec is one this build cannot decode (CODEC_UNKNOWN, or one a newer build added). Its units
+	// are dropped; asking its sender for keyframes would be a request nothing here could ever satisfy.
+}
 
-	if (tile.isNull()) {
-		// Only for a codec this build can actually decode - TiledImage never reaches this line at all any
-		// more (dispatched off-thread above), so in practice this now only ever admits VP8, but the check
-		// stays explicit rather than assuming that: an unrecognised codec (CODEC_UNKNOWN, or one a future
-		// build added that this one predates) fails on every unit forever, and asking its sender for
-		// keyframes would be a request nothing can satisfy.
-		const bool decodable = surface.codec == MumbleProto::VideoState_Codec_VP8;
+void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 frameNumber, bool isKeyframe,
+								  unsigned int x, unsigned int y, const QByteArray &payload) {
+	const unsigned int senderSession = surface.senderSession;
+	const unsigned int streamID      = surface.streamID;
 
-		if (decodable && ++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
-			// Reset on emit, so a sender that ignores the request is asked again only after another full
-			// run of failures rather than on every subsequent unit.
-			surface.consecutiveFailures = 0;
+	// VP8 inter-frames reference their predecessor, and decoding one whose reference is missing does not
+	// fail - it returns a plausible-looking corrupted image, classically green. So frames are only ever
+	// decoded in order: a frame that arrives after a gap is held while the missing ones are re-sent.
+	if (!surface.hasDecodedFrame) {
+		decodeVp8Unit(key, surface, frameNumber, x, y, payload);
+		return;
+	}
 
+	if (frameNumber <= surface.lastFrameNumber) {
+		// A stale unit that reassembled after its successors - a keyframe included. Decoding it would rewind
+		// the decoder's reference state (and, for a keyframe, lastFrameNumber itself).
+		return;
+	}
+
+	if (surface.awaitingKeyframe && !isKeyframe) {
+		// Frozen: the last good picture stays up, which reads as a pause instead of a burst of green.
+		// Re-ask occasionally in case the request was lost in the same loss burst that caused the gap.
+		if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
+			surface.unitsWhileAwaiting = 0;
+
+			++surface.stats.keyframeRequestsLoss;
 			emit keyframeNeeded(senderSession, streamID);
 		}
 
 		return;
+	}
+
+	if (isKeyframe || frameNumber == surface.lastFrameNumber + 1) {
+		if (!isKeyframe && !surface.vp8Held.empty()) {
+			// The frame a gap was waiting for: retransmission works for this stream.
+			++surface.vp8GapsRecovered;
+		}
+		if (decodeVp8Unit(key, surface, frameNumber, x, y, payload)) {
+			drainHeldVp8(key, surface);
+		}
+		return;
+	}
+
+	// Nothing has ever come back for this stream - its sender or the server predates retransmission - so
+	// holding the picture first would only delay the keyframe it is going to need anyway.
+	if (surface.vp8GapsRecovered == 0 && surface.vp8GapsAbandoned >= 3) {
+		surface.awaitingKeyframe   = true;
+		surface.unitsWhileAwaiting = 0;
+
+		++surface.stats.keyframeRequestsLoss;
+		emit keyframeNeeded(senderSession, streamID);
+		return;
+	}
+
+	// A gap: the frames between were lost, or are late. Hold this one, ask for each missing frame once, and
+	// carry on in order as soon as they arrive - a retransmission costs about a round trip, where waiting for
+	// a keyframe cost seconds.
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (surface.vp8Held.empty()) {
+		surface.vp8GapSinceMsec = now;
+	}
+
+	Surface::HeldVp8Unit held;
+	held.payload                 = payload;
+	held.x                       = x;
+	held.y                       = y;
+	surface.vp8Held[frameNumber] = held;
+
+	const quint64 firstMissing = std::max(surface.lastFrameNumber + 1, surface.vp8RequestedThrough + 1);
+	for (quint64 missing = firstMissing; missing < frameNumber && missing <= surface.lastFrameNumber + MAX_VP8_HELD;
+		 ++missing) {
+		if (surface.vp8Held.find(missing) == surface.vp8Held.end()) {
+			emit retransmitNeeded(senderSession, streamID, missing);
+		}
+	}
+	surface.vp8RequestedThrough = std::max(surface.vp8RequestedThrough, frameNumber - 1);
+
+	if (surface.vp8Held.size() > MAX_VP8_HELD || now - surface.vp8GapSinceMsec > VP8_HOLD_MSEC) {
+		// Not coming back in time: fall back to freezing until a keyframe, as before retransmission.
+		qWarning("VideoGrid: stream %u/%u lost frame %llu for good, frozen until a keyframe arrives", senderSession,
+				 streamID, static_cast< unsigned long long >(surface.lastFrameNumber + 1));
+
+		surface.vp8Held.clear();
+		surface.vp8GapSinceMsec    = 0;
+		surface.awaitingKeyframe   = true;
+		surface.unitsWhileAwaiting = 0;
+		++surface.vp8GapsAbandoned;
+
+		++surface.stats.keyframeRequestsLoss;
+		emit keyframeNeeded(senderSession, streamID);
+	}
+}
+
+bool VideoGrid::decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frameNumber, unsigned int x, unsigned int y,
+							  const QByteArray &payload) {
+	const QImage tile = decodeUnit(surface, payload);
+
+	if (tile.isNull()) {
+		if (++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
+			// Reset on emit, so a sender that ignores the request is asked again only after another full run
+			// of failures rather than on every subsequent unit.
+			surface.consecutiveFailures = 0;
+
+			++surface.stats.keyframeRequestsFailure;
+			emit keyframeNeeded(surface.senderSession, surface.streamID);
+		}
+
+		return false;
 	}
 
 	surface.consecutiveFailures = 0;
@@ -691,7 +890,36 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	surface.awaitingKeyframe    = false;
 	surface.unitsWhileAwaiting  = 0;
 
-	applyDecodedTile(existing->first, surface, x, y, tile);
+	noteStatsPaint(surface, frameNumber);
+	applyDecodedTile(key, surface, x, y, tile);
+
+	return true;
+}
+
+void VideoGrid::drainHeldVp8(std::uint64_t key, Surface &surface) {
+	while (!surface.vp8Held.empty()) {
+		const auto next = surface.vp8Held.begin();
+
+		if (next->first <= surface.lastFrameNumber) {
+			// Overtaken - by a keyframe, typically.
+			surface.vp8Held.erase(next);
+			continue;
+		}
+
+		if (next->first != surface.lastFrameNumber + 1) {
+			return;
+		}
+
+		const Surface::HeldVp8Unit held = next->second;
+		const quint64 frameNumber       = next->first;
+		surface.vp8Held.erase(next);
+
+		if (!decodeVp8Unit(key, surface, frameNumber, held.x, held.y, held.payload)) {
+			return;
+		}
+	}
+
+	surface.vp8GapSinceMsec = 0;
 }
 
 void VideoGrid::applyReadyTiles(unsigned int senderSession, unsigned int streamID) {
@@ -699,11 +927,38 @@ void VideoGrid::applyReadyTiles(unsigned int senderSession, unsigned int streamI
 	// one. Re-look up after each paint because UI signals may remove or replace this surface.
 	for (;;) {
 		const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
-		if (it == m_surfaces.end() || it->second.pendingTiles.empty() || !it->second.pendingTiles.front()->ready) {
+		if (it == m_surfaces.end()) {
 			return;
 		}
-		const std::shared_ptr< PendingTile > tile = it->second.pendingTiles.front();
-		it->second.pendingTiles.pop_front();
+
+		Surface &surface = it->second;
+
+		if (surface.pendingTiles.empty()) {
+			if (surface.refreshAfterOverload) {
+				// Caught up after dropping tiles: now one refresh repaints whatever was dropped.
+				surface.refreshAfterOverload = false;
+				emit keyframeNeeded(senderSession, streamID);
+			}
+			return;
+		}
+
+		if (!surface.pendingTiles.front()->ready) {
+			return;
+		}
+
+		const std::shared_ptr< PendingTile > tile = surface.pendingTiles.front();
+		surface.pendingTiles.pop_front();
+
+		const auto position = surface.pendingByPosition.find((static_cast< std::uint64_t >(tile->x) << 32) | tile->y);
+		if (position != surface.pendingByPosition.end() && position->second == tile) {
+			surface.pendingByPosition.erase(position);
+		}
+
+		if (tile->superseded.load(std::memory_order_relaxed)) {
+			// A newer tile for the same spot is queued behind it; this one was (usually) never decoded.
+			continue;
+		}
+
 		onTiledImageTileDecoded(senderSession, streamID, tile->x, tile->y, tile->image, tile->frameNumber);
 	}
 }
@@ -735,6 +990,7 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 		if (++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
 			surface.consecutiveFailures = 0;
 
+			++surface.stats.keyframeRequestsFailure;
 			emit keyframeNeeded(senderSession, streamID);
 		}
 
@@ -763,6 +1019,7 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 	surface.lastFrameNumber           = std::max(surface.lastFrameNumber, frameNumber);
 	surface.consecutiveFailures       = 0;
 
+	noteStatsPaint(surface, frameNumber);
 	applyDecodedTile(existing->first, surface, x, y, tile);
 }
 

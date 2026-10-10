@@ -118,8 +118,19 @@ protected:
 	int m_quality  = 80;
 
 	QSize m_lastFrameSize;
-	// Hash per tile of the previous frame, in row-major tile order, used to skip unchanged tiles.
-	std::vector< std::uint64_t > m_tileHashes;
+	/// Per tile, in row-major tile order: whether receivers hold exactly what m_reference holds there. A
+	/// deferred or only partly sent tile is not clean, so it is sent again whatever its pixels do.
+	std::vector< std::uint8_t > m_tileClean;
+	/// What receivers were last sent, tile by tile. A tile is unchanged when it is clean and its pixels
+	/// still equal these. Compared with memcmp directly against the incoming frame - no copy of an
+	/// unchanged tile is ever made - which replaced a byte-at-a-time hash of every tile of every frame
+	/// (8 MB per 1080p frame, the larger part of the encode time).
+	QImage m_reference;
+
+	/// Whether @p source and m_reference hold identical pixels in the given rectangle.
+	bool regionMatchesReference(const QImage &source, int x, int y, int width, int height) const;
+	/// Copies the given rectangle of @p source into m_reference.
+	void updateReference(const QImage &source, int x, int y, int width, int height);
 
 	/// Counts encode() calls, used only to stagger the periodic per-tile refresh below - see encode(). Not
 	/// reset by an explicit forceKeyframe (a resize, a genuine keyframe request): those need every tile

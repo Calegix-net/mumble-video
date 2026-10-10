@@ -83,6 +83,10 @@
 #	include "PipeWireScreenVideoSource.h"
 #endif
 
+#ifdef USE_PULSEAUDIO
+#	include "PulseLoopbackSource.h"
+#endif
+
 #include "Global.h"
 
 #ifdef Q_OS_WIN
@@ -103,9 +107,13 @@
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
 #include <QtWidgets/QFileDialog>
+#include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QScrollBar>
+#include <QtWidgets/QStyle>
+#include <QtWidgets/QToolButton>
 #include <QtWidgets/QToolTip>
 #include <QtWidgets/QWhatsThis>
 
@@ -505,6 +513,40 @@ void MainWindow::setupVideoGrid() {
 	m_videoDock->setObjectName(QStringLiteral("qdwVideo"));
 	m_videoDock->setWidget(m_videoGrid);
 
+	// Our own title bar rather than the style-drawn one. Every tile a viewer receives repaints the dock, and
+	// the style-drawn title bar rebuilds its float/close button icons from scratch on each paint (QStyle::
+	// standardIcon, re-read from resources every call): measured at a third of a viewer's CPU while watching
+	// a 1080p share. These buttons load their icons once. Mouse events the bar itself does not handle still
+	// reach the dock, so dragging it around and undocking it work exactly as before.
+	{
+		auto *titleBar    = new QWidget(m_videoDock);
+		auto *titleLayout = new QHBoxLayout(titleBar);
+		titleLayout->setContentsMargins(6, 1, 1, 1);
+		titleLayout->setSpacing(1);
+		titleLayout->addWidget(new QLabel(m_videoDock->windowTitle(), titleBar));
+		titleLayout->addStretch();
+
+		const auto addTitleButton = [&](QStyle::StandardPixmap icon, const QString &tip) {
+			auto *button = new QToolButton(titleBar);
+			button->setIcon(style()->standardIcon(icon, nullptr, m_videoDock));
+			button->setIconSize(QSize(12, 12));
+			button->setAutoRaise(true);
+			button->setToolTip(tip);
+			button->setFocusPolicy(Qt::NoFocus);
+			titleLayout->addWidget(button);
+			return button;
+		};
+
+		QToolButton *floatButton =
+			addTitleButton(QStyle::SP_TitleBarNormalButton, tr("Detach or re-attach the video panel"));
+		QToolButton *closeButton = addTitleButton(QStyle::SP_TitleBarCloseButton, tr("Close the video panel"));
+		connect(floatButton, &QToolButton::clicked, m_videoDock,
+				[this]() { m_videoDock->setFloating(!m_videoDock->isFloating()); });
+		connect(closeButton, &QToolButton::clicked, m_videoDock, &QDockWidget::close);
+
+		m_videoDock->setTitleBarWidget(titleBar);
+	}
+
 	// Across the top rather than down one side: video is what people look at during a call, and a narrow
 	// column beside the user tree makes faces too small to read.
 	addDockWidget(Qt::TopDockWidgetArea, m_videoDock);
@@ -599,6 +641,18 @@ void MainWindow::setupVideoGrid() {
 				mpvs.set_request_keyframe(wantToWatch);
 
 				Global::get().sh->sendMessage(mpvs);
+
+				if (m_videoGrid->isScreenStream(senderSession, streamID)) {
+					syncScreenShareAudioSubscription(senderSession);
+				}
+			});
+
+	// A camera frame that never arrived at all: ask for it again rather than waiting for a keyframe.
+	connect(m_videoGrid, &VideoGrid::retransmitNeeded, this,
+			[](unsigned int senderSession, unsigned int streamID, quint64 frameNumber) {
+				if (Global::get().sh && Global::get().sh->isRunning()) {
+					Global::get().sh->requestVideoRetransmission(senderSession, streamID, frameNumber);
+				}
 			});
 
 	connect(m_videoGrid, &VideoGrid::volumeChanged, this, [this](unsigned int senderSession, float multiplier) {
@@ -732,6 +786,33 @@ void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKi
 	Global::get().sh->sendMessage(end);
 }
 
+static void driveShareAction(QAction *action, int mode) {
+	if (!action) {
+		return;
+	}
+
+	const bool share = mode < 0 ? !action->isChecked() : mode > 0;
+	if (share != action->isChecked()) {
+		// trigger() flips the checked state and emits triggered(checked), which is what a click does. Setting
+		// the checked state alone would only repaint the button and never start or stop anything.
+		action->trigger();
+	}
+}
+
+void MainWindow::remoteShareScreen(int mode) {
+	driveShareAction(m_shareScreenAction, mode);
+}
+
+void MainWindow::remoteShareCamera(int mode) {
+	driveShareAction(m_shareCameraAction, mode);
+}
+
+void MainWindow::remoteWatchAll(bool watching) {
+	if (m_videoGrid) {
+		m_videoGrid->setWatchingAll(watching);
+	}
+}
+
 void MainWindow::setupScreenShare() {
 	m_screenVideoBroadcaster = new VideoBroadcaster(this);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
@@ -756,6 +837,18 @@ void MainWindow::setupScreenShare() {
 	m_shareScreenAction->setIconVisibleInMenu(false);
 
 	qmSelf->addAction(m_shareScreenAction);
+
+#ifdef USE_PULSEAUDIO
+	// Windows asks in its own picker; on Linux the desktop portal's picker is the only one, and it knows
+	// nothing about audio, so the choice lives here. On by default, as the Windows picker's checkbox is.
+	m_shareScreenAudioAction = new QAction(tr("Include System &Audio in Screen Share"), this);
+	m_shareScreenAudioAction->setCheckable(true);
+	m_shareScreenAudioAction->setChecked(true);
+	m_shareScreenAudioAction->setStatusTip(
+		tr("Share what your computer is playing, apart from Mumble itself, along with your screen"));
+	m_shareScreenAudioAction->setVisible(PulseLoopbackSource::isAvailable());
+	qmSelf->addAction(m_shareScreenAudioAction);
+#endif
 
 	// Shown only where something can actually capture. On Linux that means a desktop portal is
 	// answering on the session bus - without one there is no way to ask for permission, so the control
@@ -794,12 +887,28 @@ void MainWindow::setupScreenShare() {
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Screen sharing stopped: %1").arg(reason));
 
+		const bool audioWasActive         = m_screenAudioBroadcaster && m_screenAudioBroadcaster->isActive();
+		const std::uint32_t audioStreamID = audioWasActive ? m_screenAudioBroadcaster->streamID() : 0;
+
+		// The share's audio belongs to the share: without its picture it would keep playing to watchers of a
+		// stream that no longer exists.
+		if (audioWasActive) {
+			m_screenAudioBroadcaster->stop();
+		}
+
 		// End any stream that was announced before the backend failed.
 		if (Global::get().sh && Global::get().sh->isRunning()) {
 			MumbleProto::VideoState end;
 			end.set_stream_id(m_screenVideoBroadcaster->streamID());
 			end.set_active(false);
 			Global::get().sh->sendMessage(end);
+
+			if (audioWasActive) {
+				MumbleProto::VideoState audioEnd;
+				audioEnd.set_stream_id(audioStreamID);
+				audioEnd.set_active(false);
+				Global::get().sh->sendMessage(audioEnd);
+			}
 		}
 	});
 
@@ -812,6 +921,8 @@ void MainWindow::setupScreenShare() {
 		if (!m_screenAwaitingFrame || !Global::get().sh || !Global::get().sh->isRunning())
 			return;
 		m_screenAwaitingFrame = false;
+		// Audio first, for the reason given where the Windows path does the same.
+		startScreenShareAudio(MumbleProto::VideoState_SourceKind_Display);
 		MumbleProto::VideoState state;
 		state.set_stream_id(m_screenVideoBroadcaster->streamID());
 		state.set_active(true);
@@ -866,6 +977,12 @@ void MainWindow::setupScreenShare() {
 
 void MainWindow::toggleCameraShare(bool share) {
 	if (!m_videoBroadcaster || !Global::get().sh || !Global::get().sh->isRunning()) {
+		// Stopping must work while disconnected too: a share kept alive for an automatic reconnect would
+		// otherwise quietly come back after the user had turned it off.
+		if (!share && m_videoBroadcaster) {
+			m_videoBroadcaster->stop();
+		}
+
 		if (m_shareCameraAction) {
 			m_shareCameraAction->setChecked(false);
 		}
@@ -958,6 +1075,14 @@ void MainWindow::toggleCameraShare(bool share) {
 
 void MainWindow::toggleScreenShare(bool share) {
 	if (!m_screenVideoBroadcaster || !Global::get().sh || !Global::get().sh->isRunning()) {
+		// See toggleCameraShare(): stopping has to work while waiting to reconnect.
+		if (!share && m_screenVideoBroadcaster) {
+			m_screenVideoBroadcaster->stop();
+			if (m_screenAudioBroadcaster) {
+				m_screenAudioBroadcaster->stop();
+			}
+		}
+
 		if (m_shareScreenAction) {
 			m_shareScreenAction->setChecked(false);
 		}
@@ -1032,6 +1157,10 @@ void MainWindow::toggleScreenShare(bool share) {
 		// the next timer tick.
 		m_screenAwaitingFrame = false;
 		m_screenSourceKind    = MumbleProto::VideoState_SourceKind_Display;
+
+		// Real system audio even with a synthetic picture: that is what lets a headless rig verify share
+		// audio end to end. Audio first, for the reason given on the Windows path below.
+		startScreenShareAudio(MumbleProto::VideoState_SourceKind_Display);
 
 		MumbleProto::VideoState state;
 		state.set_stream_id(m_screenVideoBroadcaster->streamID());
@@ -1230,7 +1359,7 @@ void MainWindow::toggleScreenShare(bool share) {
 #endif
 }
 
-void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID,
+void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 sequence,
 											   const QByteArray &opusPacket) {
 	if (!Global::get().ao) {
 		return;
@@ -1258,9 +1387,10 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		const unsigned int mixerFreq = Global::get().ao->getMixerFreq();
 
 		if (mixerFreq == 0) {
-			qWarning("MainWindow: screen-share audio for session %u arriving before the mixer has a "
-					 "frequency - the buffer will skip resampling and may play at the wrong pitch",
-					 senderSession);
+			// The output device has not started yet. A buffer created now could not know whether to
+			// resample, and would play at the wrong pitch for as long as it lived; dropping the few packets
+			// that arrive before the mixer is up costs a fraction of a second at most.
+			return;
 		}
 
 		auto *buffer                 = new AudioOutputScreenShare(mixerFreq);
@@ -1284,7 +1414,85 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		it = m_screenShareAudioBuffers.emplace(key, entry).first;
 	}
 
-	it->second.buffer->addOpusPacket(opusPacket);
+	it->second.buffer->addOpusPacket(sequence, opusPacket);
+}
+
+void MainWindow::startScreenShareAudio(int sourceKind) {
+#ifdef USE_PULSEAUDIO
+	if (!m_screenAudioBroadcaster || !m_shareScreenAudioAction || !m_shareScreenAudioAction->isVisible()
+		|| !m_shareScreenAudioAction->isChecked() || !Global::get().sh || !Global::get().sh->isRunning()) {
+		return;
+	}
+
+	m_screenAudioBroadcaster->configure(96);
+	const std::uint32_t audioStreamID = allocateStreamID();
+
+	if (!m_screenAudioBroadcaster->start(std::make_unique< PulseLoopbackSource >(), audioStreamID)) {
+		// The picture goes ahead without it, as on Windows.
+		Global::get().l->log(Log::Warning, tr("Could not capture system audio; sharing the screen without it."));
+		return;
+	}
+
+	MumbleProto::VideoState audioState;
+	audioState.set_stream_id(audioStreamID);
+	audioState.set_active(true);
+	audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
+	audioState.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
+	audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+
+	Global::get().sh->sendMessage(audioState);
+#else
+	Q_UNUSED(sourceKind);
+#endif
+}
+
+void MainWindow::syncScreenShareAudioSubscription(unsigned int senderSession) {
+	if (!m_videoGrid || !m_videoStreamDispatcher || !Global::get().sh) {
+		return;
+	}
+
+	// As in Discord: a share's sound is heard by the people watching that share, not by everyone in the
+	// channel. Re-sent on every change rather than tracked - subscribing is idempotent on the server, and
+	// this only runs when someone starts or stops watching, or a share's audio starts.
+	const bool wanted = m_videoGrid->isWatchingScreenOf(senderSession);
+
+	for (const unsigned int streamID : m_videoStreamDispatcher->audioStreamsOf(senderSession)) {
+		const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+
+		if (wanted == (m_subscribedScreenAudio.find(key) != m_subscribedScreenAudio.end())) {
+			continue;
+		}
+
+		MumbleProto::VideoSubscribe mpvs;
+		mpvs.set_session(senderSession);
+		mpvs.set_stream_id(streamID);
+		mpvs.set_subscribe(wanted);
+
+		Global::get().sh->sendMessage(mpvs);
+
+		if (wanted) {
+			m_subscribedScreenAudio[key] = true;
+		} else {
+			m_subscribedScreenAudio.erase(key);
+			++m_pendingScreenAudioUnsubscribes[key];
+			// Whatever is still queued would otherwise keep playing for a moment after the user stopped
+			// watching.
+			removeScreenShareAudioBuffer(senderSession, streamID);
+		}
+	}
+}
+
+void MainWindow::forgetScreenAudioSubscription(unsigned int senderSession, std::optional< unsigned int > streamID) {
+	const auto matches = [&](std::uint64_t key) {
+		return streamID ? key == screenShareAudioKey(senderSession, *streamID) : (key >> 32) == senderSession;
+	};
+
+	for (auto it = m_subscribedScreenAudio.begin(); it != m_subscribedScreenAudio.end();) {
+		it = matches(it->first) ? m_subscribedScreenAudio.erase(it) : std::next(it);
+	}
+	for (auto it = m_pendingScreenAudioUnsubscribes.begin(); it != m_pendingScreenAudioUnsubscribes.end();) {
+		it = matches(it->first) ? m_pendingScreenAudioUnsubscribes.erase(it) : std::next(it);
+	}
 }
 
 void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID) {
@@ -1305,6 +1513,8 @@ void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsign
 
 void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSession) {
 	const std::uint64_t hi = static_cast< std::uint64_t >(senderSession) << 32;
+
+	forgetScreenAudioSubscription(senderSession, std::nullopt);
 
 	for (auto it = m_lastKeyframeRequestMsec.begin(); it != m_lastKeyframeRequestMsec.end();) {
 		it = ((it->first >> 32) == senderSession) ? m_lastKeyframeRequestMsec.erase(it) : std::next(it);
@@ -4493,17 +4703,28 @@ void MainWindow::viewCertificate(bool) {
  * connection to the server is established but before the server Sync is complete.
  */
 void MainWindow::serverConnected() {
-	// Connected here rather than at construction because the ServerHandler is created per connection.
+	// Connected here rather than at construction because a ServerHandler is created per connection the user
+	// opens. An automatic reconnect reuses the same one, though, and connects it again: UniqueConnection is
+	// what keeps that from delivering every unit twice (then three times...) - doubling the decode work a
+	// viewer does after each network blip.
 	if (m_videoGrid && Global::get().sh) {
 		connect(Global::get().sh.get(), &ServerHandler::videoUnitReceived, m_videoGrid, &VideoGrid::onVideoUnitReceived,
-				Qt::QueuedConnection);
+				static_cast< Qt::ConnectionType >(Qt::QueuedConnection | Qt::UniqueConnection));
 	}
 
 	// Connected to the same signal as VideoGrid, in parallel: neither knows about the other, and each
 	// only acts on the codecs it cares about.
 	if (m_videoStreamDispatcher && Global::get().sh) {
 		connect(Global::get().sh.get(), &ServerHandler::videoUnitReceived, m_videoStreamDispatcher,
-				&VideoStreamDispatcher::onVideoUnitReceived, Qt::QueuedConnection);
+				&VideoStreamDispatcher::onVideoUnitReceived,
+				static_cast< Qt::ConnectionType >(Qt::QueuedConnection | Qt::UniqueConnection));
+	}
+
+	// Retransmission requests for our own streams arrive on the network thread; the history they are
+	// answered from belongs to this one.
+	if (Global::get().sh) {
+		connect(Global::get().sh.get(), &ServerHandler::videoNackReceived, this, &MainWindow::onVideoNackReceived,
+				static_cast< Qt::ConnectionType >(Qt::QueuedConnection | Qt::UniqueConnection));
 	}
 
 	m_reconnectSoundBlocker.reset();
@@ -4562,6 +4783,16 @@ void MainWindow::serverConnected() {
 
 void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString reason) {
 	if (m_videoGrid) {
+		// Remembered before the grid forgets it, so a viewer is not dropped back to "click to watch" by a
+		// blip: see msgVideoState(). Only acted on if the connection comes back within a minute.
+		m_resumeWatchAfterReconnect.clear();
+		for (const auto &watched : m_videoGrid->watchedStreams()) {
+			if (const ClientUser *sender = ClientUser::get(watched.first)) {
+				m_resumeWatchAfterReconnect.emplace_back(videoSenderIdentity(sender), watched.second);
+			}
+		}
+		m_resumeWatchDeadlineMsec = QDateTime::currentMSecsSinceEpoch() + 60000;
+
 		// Nobody's video survives the connection that carried it.
 		m_videoGrid->clear();
 	}
@@ -4570,17 +4801,15 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 		m_videoStreamDispatcher->clear();
 	}
 
-	if (m_videoBroadcaster) {
-		m_videoBroadcaster->stop();
-	}
+	m_subscribedScreenAudio.clear();
+	m_pendingScreenAudioUnsubscribes.clear();
 
-	if (m_screenVideoBroadcaster) {
-		m_screenVideoBroadcaster->stop();
-	}
-
-	if (m_screenAudioBroadcaster) {
-		m_screenAudioBroadcaster->stop();
-	}
+	// Shares are not stopped here. If this drop is about to be retried (decided at the end of this
+	// function), they keep capturing and are re-announced once the new connection is synchronised - see
+	// reannounceSharesAfterReconnect() - so a one-second blip does not silently end someone's share, and
+	// they do not have to pick their screen again. Otherwise they are stopped at the end.
+	m_sharesSurvivingReconnect = (m_videoBroadcaster && m_videoBroadcaster->isActive())
+								 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive());
 
 	// Not individually invalidated through AudioOutput here: the connection that carried these streams
 	// is already gone, and Global::get().ao's own teardown on disconnect is what actually frees them,
@@ -4805,7 +5034,115 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 		qdwMinimalViewNote->show();
 	}
 
+	if (!qtReconnect->isActive()) {
+		// Not coming back on its own: a deliberate disconnect, a rejection, or auto-reconnect is off.
+		stopAllSharesLocally();
+	}
+
 	emit disconnectedFromServer();
+}
+
+void MainWindow::onVideoNackReceived(const QByteArray &serializedNack) {
+	MumbleUDP::VideoNack nack;
+	if (!Global::get().sh
+		|| !nack.ParseFromArray(serializedNack.constData(), static_cast< int >(serializedNack.size()))) {
+		return;
+	}
+
+	if (nack.sender_session() == Global::get().uiSession) {
+		Global::get().sh->resendVideoUnits(nack);
+	}
+}
+
+QString MainWindow::videoSenderIdentity(const ClientUser *user) {
+	// The certificate hash survives a reconnect and cannot be claimed by someone else; the name is the
+	// fallback for a user without a certificate.
+	return user->qsHash.isEmpty() ? QLatin1String("name:") + user->qsName : user->qsHash;
+}
+
+void MainWindow::stopAllSharesLocally() {
+	m_sharesSurvivingReconnect = false;
+
+	if (m_videoBroadcaster) {
+		m_videoBroadcaster->stop();
+	}
+
+	if (m_screenVideoBroadcaster) {
+		m_screenVideoBroadcaster->stop();
+	}
+
+	if (m_screenAudioBroadcaster) {
+		m_screenAudioBroadcaster->stop();
+	}
+}
+
+void MainWindow::reannounceSharesAfterReconnect() {
+	if (!m_sharesSurvivingReconnect) {
+		return;
+	}
+	m_sharesSurvivingReconnect = false;
+
+	if (!Global::get().sh || !Global::get().sh->isRunning()) {
+		return;
+	}
+
+	bool resumed = false;
+
+	if (m_videoBroadcaster && m_videoBroadcaster->isActive()) {
+		const Settings &settings = Global::get().s;
+
+		MumbleProto::VideoState camera;
+		camera.set_stream_id(m_videoBroadcaster->streamID());
+		camera.set_active(true);
+		camera.set_codec(m_videoBroadcaster->codec() == 1 ? MumbleProto::VideoState_Codec_TiledImage
+														  : MumbleProto::VideoState_Codec_VP8);
+		camera.set_width(static_cast< unsigned int >(settings.iVideoWidth));
+		camera.set_height(static_cast< unsigned int >(settings.iVideoHeight));
+		camera.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
+		camera.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+		camera.set_source_name(u8(m_videoBroadcaster->describe()));
+		Global::get().sh->sendMessage(camera);
+
+		m_videoBroadcaster->requestKeyframe();
+		resumed = true;
+	}
+
+	// A Linux portal share that never delivered its first frame was never announced, and will be when that
+	// frame arrives.
+	if (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive() && !m_screenAwaitingFrame) {
+		const auto sourceKind = static_cast< MumbleProto::VideoState_SourceKind >(m_screenSourceKind);
+
+		// Audio first, for the reason given in toggleScreenShare().
+		if (m_screenAudioBroadcaster && m_screenAudioBroadcaster->isActive()) {
+			MumbleProto::VideoState audio;
+			audio.set_stream_id(m_screenAudioBroadcaster->streamID());
+			audio.set_active(true);
+			audio.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
+			audio.set_source_kind(sourceKind);
+			audio.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+			Global::get().sh->sendMessage(audio);
+		}
+
+		MumbleProto::VideoState screen;
+		screen.set_stream_id(m_screenVideoBroadcaster->streamID());
+		screen.set_active(true);
+		screen.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		screen.set_source_kind(sourceKind);
+		screen.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		const QSize size = m_screenVideoBroadcaster->frameSize();
+		if (!size.isEmpty()) {
+			screen.set_width(static_cast< unsigned int >(size.width()));
+			screen.set_height(static_cast< unsigned int >(size.height()));
+		}
+		Global::get().sh->sendMessage(screen);
+
+		m_screenVideoBroadcaster->requestKeyframe();
+		resumed = true;
+	}
+
+	if (resumed) {
+		Global::get().l->log(Log::Information, tr("Reconnected: your shares are live again."));
+	}
 }
 
 void MainWindow::resolverError(QAbstractSocket::SocketError, QString reason) {
@@ -5079,6 +5416,10 @@ void MainWindow::disconnectFromServer() {
 
 	if (Global::get().sh && Global::get().sh->isRunning()) {
 		Global::get().sh->disconnect();
+	} else {
+		// Already disconnected and waiting to reconnect: shares were being kept alive for that, and the user
+		// has just called it off. (A live connection stops them in serverDisconnected().)
+		stopAllSharesLocally();
 	}
 }
 

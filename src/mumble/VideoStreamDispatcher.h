@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 /**
  * Routes incoming video-transport units to the right consumer, based on the codec their sender announced.
@@ -51,6 +52,10 @@ public:
 	/// Drops everything, on disconnect from the server.
 	void clear();
 
+	/// The OpusAudio streams a sender currently has announced - normally none or one, the audio of their
+	/// screen share. Watching that sender's screen is what subscribes to these.
+	std::vector< unsigned int > audioStreamsOf(unsigned int senderSession) const;
+
 public slots:
 	/// Connected to the same signal VideoGrid::onVideoUnitReceived is, and filters it the same way: only
 	/// a stream announced with the codec this class cares about produces anything.
@@ -58,9 +63,11 @@ public slots:
 							 unsigned int x, unsigned int y, const QByteArray &payload);
 
 signals:
-	/// One Opus packet belonging to a sender's screen-share audio stream. x/y/width/height from the
-	/// underlying video transport are meaningless for audio and are not carried here.
-	void opusUnitReceived(unsigned int senderSession, unsigned int streamID, const QByteArray &opusPacket);
+	/// One Opus packet belonging to a sender's screen-share audio stream. @p sequence is the transport's
+	/// frame number, one per Opus packet, which is what lets the player spot a lost packet and conceal it.
+	/// x/y/width/height from the underlying video transport are meaningless for audio and are not carried.
+	void opusUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 sequence,
+						  const QByteArray &opusPacket);
 
 protected:
 	static std::uint64_t streamKey(unsigned int senderSession, unsigned int streamID) {

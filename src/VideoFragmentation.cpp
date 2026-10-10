@@ -235,6 +235,35 @@ namespace Protocol {
 		}
 	}
 
+	void VideoReassembler::collectNacks(std::uint64_t nowUsec, std::vector< VideoNackRequest > &out) {
+		for (auto &entry : m_pending) {
+			PendingUnit &unit = entry.second;
+
+			if (unit.nackAttempts >= VIDEO_NACK_MAX_ATTEMPTS || nowUsec < unit.firstSeenUsec + VIDEO_NACK_DELAY_USEC) {
+				continue;
+			}
+			if (unit.nackAttempts > 0 && nowUsec < unit.lastNackUsec + VIDEO_NACK_RETRY_USEC) {
+				continue;
+			}
+
+			const std::uint64_t missing = unit.completeMask() & ~unit.receivedMask;
+			if (missing == 0) {
+				continue;
+			}
+
+			++unit.nackAttempts;
+			unit.lastNackUsec = nowUsec;
+
+			VideoNackRequest request;
+			request.senderSession    = entry.first.senderSession;
+			request.streamID         = entry.first.streamID;
+			request.frameNumber      = entry.first.frameNumber;
+			request.unitID           = entry.first.unitID;
+			request.missingFragments = missing;
+			out.push_back(request);
+		}
+	}
+
 	void VideoReassembler::enforceSenderLimit(std::uint32_t senderSession) {
 		const UnitKey lower{ senderSession, 0, 0, 0 };
 		const UnitKey upper{ senderSession, std::numeric_limits< std::uint32_t >::max(),
@@ -391,6 +420,11 @@ namespace Protocol {
 		// spending the expiry sweep on it.
 		expire(nowUsec);
 
+		if (m_recentlyCompleted.count(key)) {
+			// Already delivered: a duplicate, usually a retransmission meant for another subscriber.
+			return VideoReassemblyResult::Incomplete;
+		}
+
 		auto it = m_pending.find(key);
 
 		if (it == m_pending.end()) {
@@ -486,8 +520,22 @@ namespace Protocol {
 		}
 
 		eraseUnit(it);
+		rememberCompleted(key, nowUsec);
 
 		return VideoReassemblyResult::Complete;
+	}
+
+	void VideoReassembler::rememberCompleted(const UnitKey &key, std::uint64_t nowUsec) {
+		while (!m_completedOrder.empty()
+			   && (m_completedOrder.size() >= MAX_REMEMBERED_COMPLETE
+				   || nowUsec > m_completedOrder.front().first + VIDEO_REASSEMBLY_TIMEOUT_USEC)) {
+			m_recentlyCompleted.erase(m_completedOrder.front().second);
+			m_completedOrder.pop_front();
+		}
+
+		if (m_recentlyCompleted.insert(key).second) {
+			m_completedOrder.emplace_back(nowUsec, key);
+		}
 	}
 
 } // namespace Protocol

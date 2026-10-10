@@ -10,9 +10,12 @@
 #include "VideoTransport.h"
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace Mumble {
@@ -65,7 +68,32 @@ namespace Protocol {
 	constexpr std::size_t MAX_PENDING_VIDEO_BYTES_TOTAL = 16 * 1024 * 1024;
 
 	// How long a partially received unit is kept before it is discarded.
-	constexpr std::uint64_t VIDEO_REASSEMBLY_TIMEOUT_USEC = 500 * 1000;
+	// Long enough for a lost fragment's retransmission to arrive over a lossy connection: the request rides
+	// TCP, whose own retransmission timeout is 200 ms at the least.
+	constexpr std::uint64_t VIDEO_REASSEMBLY_TIMEOUT_USEC = 1000 * 1000;
+
+	// Retransmission (MumbleProto::VideoNack). A unit still incomplete this long after its first fragment
+	// arrived is asked for again: long enough that fragments merely reordered behind it have turned up,
+	// short against the round trip the retransmission itself costs.
+	constexpr std::uint64_t VIDEO_NACK_DELAY_USEC = 25 * 1000;
+	// A unit is asked for at most this many times, this far apart: a lost retransmission gets one more try.
+	constexpr unsigned int VIDEO_NACK_MAX_ATTEMPTS = 2;
+	constexpr std::uint64_t VIDEO_NACK_RETRY_USEC  = 150 * 1000;
+	// Units per VideoNack message, which both ends enforce: it bounds what one request can make a sender
+	// re-send.
+	constexpr int MAX_VIDEO_NACK_UNITS = 32;
+	// How long a sender keeps what it sent, to answer retransmission requests from, and how much of it.
+	constexpr std::uint64_t VIDEO_RESEND_HISTORY_USEC = 1000 * 1000;
+	constexpr std::size_t VIDEO_RESEND_HISTORY_BYTES  = 8 * 1024 * 1024;
+
+	/// One incomplete unit a receiver would like re-sent. missingFragments: bit i = fragment i missing.
+	struct VideoNackRequest {
+		std::uint32_t senderSession    = 0;
+		std::uint32_t streamID         = 0;
+		std::uint64_t frameNumber      = 0;
+		std::uint32_t unitID           = 0;
+		std::uint64_t missingFragments = 0;
+	};
 
 	/**
 	 * Describes one independently decodable unit of a video frame. This is the metadata half of a
@@ -222,6 +250,13 @@ namespace Protocol {
 		void removeSender(std::uint32_t senderSession);
 
 		/**
+		 * Appends a retransmission request for every unit that has been incomplete for at least
+		 * VIDEO_NACK_DELAY_USEC and has not been asked for VIDEO_NACK_MAX_ATTEMPTS times yet (attempts at
+		 * least VIDEO_NACK_RETRY_USEC apart), and records the attempt.
+		 */
+		void collectNacks(std::uint64_t nowUsec, std::vector< VideoNackRequest > &out);
+
+		/**
 		 * The number of partial units currently being tracked, across all senders.
 		 */
 		std::size_t pendingUnitCount() const { return m_pending.size(); }
@@ -256,6 +291,9 @@ namespace Protocol {
 			std::uint64_t firstSeenUsec = 0;
 			// Whether the geometry fields have been filled in, which only happens once fragment 0 arrives.
 			bool haveGeometry = false;
+			// Retransmission requests already made for this unit, and when the last one was.
+			unsigned int nackAttempts  = 0;
+			std::uint64_t lastNackUsec = 0;
 
 			/// The mask value that means "every fragment of this unit has arrived".
 			std::uint64_t completeMask() const {
@@ -265,6 +303,16 @@ namespace Protocol {
 		};
 
 		std::map< UnitKey, PendingUnit > m_pending;
+
+		// Units completed within the last VIDEO_REASSEMBLY_TIMEOUT_USEC (at most MAX_REMEMBERED_COMPLETE).
+		// A fragment of one of these is a duplicate - typically a retransmission the server relays to every
+		// subscriber although only one asked - and must not start a new partial unit: that unit would never
+		// complete, would be asked for again, and the answer would reach every other subscriber in turn,
+		// a feedback loop between viewers.
+		static constexpr std::size_t MAX_REMEMBERED_COMPLETE = 4096;
+		std::set< UnitKey > m_recentlyCompleted;
+		std::deque< std::pair< std::uint64_t, UnitKey > > m_completedOrder;
+		void rememberCompleted(const UnitKey &key, std::uint64_t nowUsec);
 
 		// Units keyed by their creation time, so that "which is the oldest" is the front of this rather
 		// than a scan of m_pending. Measured: without it, admitting one fragment while the pool is full

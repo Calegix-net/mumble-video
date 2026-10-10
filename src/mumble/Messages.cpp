@@ -192,6 +192,9 @@ void MainWindow::msgServerSync(const MumbleProto::ServerSync &msg) {
 
 	Global::get().sh->setServerSynchronized(true);
 
+	// Shares kept alive across an automatic reconnect - see serverDisconnected().
+	reannounceSharesAfterReconnect();
+
 	emit serverSynchronized();
 }
 
@@ -1349,6 +1352,10 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 
 		removeScreenShareAudioBuffer(msg.session(), msg.stream_id());
 		m_lastKeyframeRequestMsec.erase(screenShareAudioKey(msg.session(), msg.stream_id()));
+		forgetScreenAudioSubscription(msg.session(), msg.stream_id());
+
+		// If that was the screen being watched, its audio is no longer wanted either.
+		syncScreenShareAudioSubscription(msg.session());
 
 		return;
 	}
@@ -1376,6 +1383,19 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		// Named after the surface exists, since that is what holds the label.
 		if (ClientUser *sender = ClientUser::get(msg.session())) {
 			m_videoGrid->setSenderName(msg.session(), sender->qsName);
+
+			// Watching it before our connection dropped: carry on watching rather than making the viewer
+			// click again because of a blip. See serverDisconnected().
+			if (!m_resumeWatchAfterReconnect.empty()
+				&& QDateTime::currentMSecsSinceEpoch() < m_resumeWatchDeadlineMsec) {
+				const auto wanted = std::make_pair(videoSenderIdentity(sender), static_cast< int >(msg.source_kind()));
+				const auto it =
+					std::find(m_resumeWatchAfterReconnect.begin(), m_resumeWatchAfterReconnect.end(), wanted);
+				if (it != m_resumeWatchAfterReconnect.end()) {
+					m_resumeWatchAfterReconnect.erase(it);
+					m_videoGrid->setWatching(msg.session(), msg.stream_id(), true);
+				}
+			}
 		}
 	}
 
@@ -1385,21 +1405,14 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 
 	// A picture stream starts as a preview - VideoGrid shows a greyed placeholder and this side does not
 	// ask to actually receive it until the eyeball button is clicked (VideoGrid::watchToggled, wired in
-	// setupVideoGrid()), matching the "click to watch" flow. Audio is not gated the same way: screen-share
-	// audio only ever exists as a second stream on a sender whose picture is already in the grid, and
-	// holding it back the same way would mean muting a stream the UI offers no control to un-mute.
+	// setupVideoGrid()), matching the "click to watch" flow. A share's audio follows its picture: it is
+	// subscribed while that sender's screen is being watched (and only then), so it is controlled by the
+	// same click rather than playing to everyone in the channel whether they are watching or not.
 	if (msg.codec() != MumbleProto::VideoState_Codec_OpusAudio) {
 		return;
 	}
 
-	MumbleProto::VideoSubscribe mpvs;
-	mpvs.set_session(msg.session());
-	mpvs.set_stream_id(msg.stream_id());
-	mpvs.set_subscribe(true);
-	// Nothing decodes until a keyframe arrives, and the sender's next scheduled one may be seconds out.
-	mpvs.set_request_keyframe(true);
-
-	Global::get().sh->sendMessage(mpvs);
+	syncScreenShareAudioSubscription(msg.session());
 }
 
 /// The server's answer to a subscription request, or notice that an existing one has ended because the
@@ -1434,6 +1447,18 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	if (m_videoGrid && m_videoGrid->consumeUnsubscribeAcknowledgement(msg.session(), msg.stream_id())) {
 		return;
 	}
+
+	// Likewise the echo of this client's own unsubscribe from a share's audio (it stopped watching).
+	const auto pendingAudio =
+		m_pendingScreenAudioUnsubscribes.find(screenShareAudioKey(msg.session(), msg.stream_id()));
+	if (pendingAudio != m_pendingScreenAudioUnsubscribes.end()) {
+		if (--pendingAudio->second == 0) {
+			m_pendingScreenAudioUnsubscribes.erase(pendingAudio);
+		}
+		return;
+	}
+
+	forgetScreenAudioSubscription(msg.session(), msg.stream_id());
 
 	// Subscription refused or withdrawn, for this one stream. Dropping its surface is what stops the user
 	// staring at a frozen last frame wondering whether the network died; a sender's other streams, if

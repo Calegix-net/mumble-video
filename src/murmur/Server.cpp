@@ -24,6 +24,7 @@
 #include "ServerUser.h"
 #include "User.h"
 #include "Version.h"
+#include "VideoFragmentation.h"
 
 #ifdef USE_ZEROCONF
 #	include "Zeroconf.h"
@@ -1490,6 +1491,12 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		}
 	}
 
+	if (plaintext.size() >= 2
+		&& plaintext[0] == static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack)) {
+		relayVideoNack(sender, plaintext);
+		return;
+	}
+
 	// The routing decision needs the stream id, so the relay does have to look inside. The payload is
 	// left untouched: only the sender's session is stamped, by appending it, which Protobuf's
 	// last-occurrence-wins rule for singular scalars makes valid.
@@ -1555,79 +1562,131 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 			continue;
 		}
 
-		{
-			QMutexLocker l(&recipient->qmCrypt);
+		sendVideoPlaintext(recipient, plaintext, outgoing);
+	}
+}
 
-			// Re-encrypted per recipient, because each holds its own sequence space and its own key.
-			if (!recipient->videoCrypt.isValid() || !recipient->videoCrypt.encrypt(plaintext, outgoing)) {
-				continue;
-			}
+void Server::sendVideoPlaintext(ServerUser *recipient, const std::vector< Mumble::Protocol::byte > &plaintext,
+								std::vector< Mumble::Protocol::byte > &outgoing) {
+	{
+		QMutexLocker l(&recipient->qmCrypt);
+
+		// Re-encrypted per recipient, because each holds its own sequence space and its own key.
+		if (!recipient->videoCrypt.isValid() || !recipient->videoCrypt.encrypt(plaintext, outgoing)) {
+			return;
 		}
+	}
 
 #ifdef Q_OS_LINUX
-		// Sent with the same IP_PKTINFO discipline as Server::sendMessage. A bare sendto leaves the
-		// source address to the kernel's route lookup, which on a multihomed host (a VPN tunnel, a
-		// second interface) may pick an address other than the one the client is talking to - and a
-		// flow-tracking middlebox between us and the client then drops the datagram as not belonging
-		// to the client's flow. The client's own datagrams all target the address its TCP connection
-		// terminates on, so that is the one source it is guaranteed to be able to receive from.
-		struct msghdr msg;
-		struct iovec iov[1];
+	// Sent with the same IP_PKTINFO discipline as Server::sendMessage. A bare sendto leaves the
+	// source address to the kernel's route lookup, which on a multihomed host (a VPN tunnel, a
+	// second interface) may pick an address other than the one the client is talking to - and a
+	// flow-tracking middlebox between us and the client then drops the datagram as not belonging
+	// to the client's flow. The client's own datagrams all target the address its TCP connection
+	// terminates on, so that is the one source it is guaranteed to be able to receive from.
+	struct msghdr msg;
+	struct iovec iov[1];
 
-		iov[0].iov_base = outgoing.data();
-		iov[0].iov_len  = outgoing.size();
+	iov[0].iov_base = outgoing.data();
+	iov[0].iov_len  = outgoing.size();
 
-		uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
-		memset(controldata, 0, sizeof(controldata));
+	uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
+	memset(controldata, 0, sizeof(controldata));
 
-		memset(&msg, 0, sizeof(msg));
-		msg.msg_name = reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress);
-		msg.msg_namelen =
-			static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
-																					  : sizeof(struct sockaddr_in));
-		msg.msg_iov        = iov;
-		msg.msg_iovlen     = 1;
-		msg.msg_control    = controldata;
-		msg.msg_controllen = CMSG_SPACE((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct in6_pktinfo)
-																						 : sizeof(struct in_pktinfo));
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_name    = reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress);
+	msg.msg_namelen = static_cast< socklen_t >(
+		(recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
+	msg.msg_iov        = iov;
+	msg.msg_iovlen     = 1;
+	msg.msg_control    = controldata;
+	msg.msg_controllen = CMSG_SPACE((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct in6_pktinfo)
+																					 : sizeof(struct in_pktinfo));
 
-		struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-		HostAddress tcpha(recipient->saiTcpLocalAddress);
-		if (recipient->saiUdpAddress.ss_family == AF_INET6) {
-			cmsg->cmsg_level            = IPPROTO_IPV6;
-			cmsg->cmsg_type             = IPV6_PKTINFO;
-			cmsg->cmsg_len              = CMSG_LEN(sizeof(struct in6_pktinfo));
-			struct in6_pktinfo *pktinfo = reinterpret_cast< struct in6_pktinfo * >(CMSG_DATA(cmsg));
-			memset(pktinfo, 0, sizeof(*pktinfo));
-			memcpy(&pktinfo->ipi6_addr.s6_addr[0], tcpha.getByteRepresentation().data(),
-				   sizeof(pktinfo->ipi6_addr.s6_addr));
-		} else {
-			cmsg->cmsg_level           = IPPROTO_IP;
-			cmsg->cmsg_type            = IP_PKTINFO;
-			cmsg->cmsg_len             = CMSG_LEN(sizeof(struct in_pktinfo));
-			struct in_pktinfo *pktinfo = reinterpret_cast< struct in_pktinfo * >(CMSG_DATA(cmsg));
-			memset(pktinfo, 0, sizeof(*pktinfo));
-			if (tcpha.isV6()) {
-				continue;
-			}
-			pktinfo->ipi_spec_dst.s_addr = tcpha.toIPv4();
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	HostAddress tcpha(recipient->saiTcpLocalAddress);
+	if (recipient->saiUdpAddress.ss_family == AF_INET6) {
+		cmsg->cmsg_level            = IPPROTO_IPV6;
+		cmsg->cmsg_type             = IPV6_PKTINFO;
+		cmsg->cmsg_len              = CMSG_LEN(sizeof(struct in6_pktinfo));
+		struct in6_pktinfo *pktinfo = reinterpret_cast< struct in6_pktinfo * >(CMSG_DATA(cmsg));
+		memset(pktinfo, 0, sizeof(*pktinfo));
+		memcpy(&pktinfo->ipi6_addr.s6_addr[0], tcpha.getByteRepresentation().data(),
+			   sizeof(pktinfo->ipi6_addr.s6_addr));
+	} else {
+		cmsg->cmsg_level           = IPPROTO_IP;
+		cmsg->cmsg_type            = IP_PKTINFO;
+		cmsg->cmsg_len             = CMSG_LEN(sizeof(struct in_pktinfo));
+		struct in_pktinfo *pktinfo = reinterpret_cast< struct in_pktinfo * >(CMSG_DATA(cmsg));
+		memset(pktinfo, 0, sizeof(*pktinfo));
+		if (tcpha.isV6()) {
+			return;
 		}
+		pktinfo->ipi_spec_dst.s_addr = tcpha.toIPv4();
+	}
 
-		::sendmsg(recipient->sUdpSocket, &msg, 0);
+	::sendmsg(recipient->sUdpSocket, &msg, 0);
 #else
 #	ifdef Q_OS_WIN
-		using size_type = int;
+	using size_type = int;
 #	else
-		using size_type = std::size_t;
+	using size_type = std::size_t;
 #	endif
-		::sendto(recipient->sUdpSocket, reinterpret_cast< const char * >(outgoing.data()),
-				 static_cast< size_type >(outgoing.size()), 0,
-				 reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress),
-				 static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6)
-											  ? sizeof(struct sockaddr_in6)
-											  : sizeof(struct sockaddr_in)));
+	::sendto(recipient->sUdpSocket, reinterpret_cast< const char * >(outgoing.data()),
+			 static_cast< size_type >(outgoing.size()), 0,
+			 reinterpret_cast< struct sockaddr * >(&recipient->saiUdpAddress),
+			 static_cast< socklen_t >((recipient->saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
+																					   : sizeof(struct sockaddr_in)));
 #endif
+}
+
+void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Protocol::byte > &plaintext) {
+	// Requests per second per requester, at most. A receiver batches everything it is missing into one
+	// request per stream per 10 ms tick, so real loss stays far below this.
+	constexpr unsigned int MAX_NACKS_PER_SECOND = 100;
+
+	m_relayedNack.Clear();
+	if (!m_relayedNack.ParseFromArray(plaintext.data() + 1, static_cast< int >(plaintext.size() - 1))
+		|| m_relayedNack.units_size() == 0) {
+		return;
 	}
+
+	const quint64 nowMsec = static_cast< quint64 >(tUptime.elapsed< std::chrono::milliseconds >().count());
+	NackBudget &budget    = m_videoNackBudget[requester->uiSession];
+	if (nowMsec - budget.windowStartMsec >= 1000) {
+		budget.windowStartMsec = nowMsec;
+		budget.count           = 0;
+	}
+	if (++budget.count > MAX_NACKS_PER_SECOND) {
+		return;
+	}
+
+	const unsigned int senderSession = m_relayedNack.sender_session();
+	ServerUser *sender               = qhUsers.value(senderSession);
+	if (!sender || sender == requester || sender->sUdpSocket == INVALID_SOCKET) {
+		return;
+	}
+
+	// Only someone actually receiving the stream may ask for parts of it again - otherwise this would be a
+	// way to make a sender transmit what nobody is watching.
+	const std::vector< unsigned int > subscribers =
+		m_videoRouter.subscribersOf(senderSession, m_relayedNack.stream_id());
+	if (std::find(subscribers.begin(), subscribers.end(), requester->uiSession) == subscribers.end()) {
+		return;
+	}
+
+	// Bounds what one request can make a sender re-send; the sender enforces the same limit.
+	while (m_relayedNack.units_size() > Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
+		m_relayedNack.mutable_units()->RemoveLast();
+	}
+	m_relayedNack.set_requester_session(requester->uiSession);
+
+	std::vector< Mumble::Protocol::byte > forwarded(1 + m_relayedNack.ByteSizeLong());
+	forwarded[0] = static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack);
+	m_relayedNack.SerializeToArray(forwarded.data() + 1, static_cast< int >(forwarded.size() - 1));
+
+	std::vector< Mumble::Protocol::byte > outgoing;
+	sendVideoPlaintext(sender, forwarded, outgoing);
 }
 
 bool Server::mayShareVideo(unsigned int senderSession) {

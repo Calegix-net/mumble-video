@@ -1213,6 +1213,8 @@ if(pulseaudio)
 		PRIVATE
 			"PulseAudio.cpp"
 			"PulseAudio.h"
+			"PulseLoopbackSource.cpp"
+			"PulseLoopbackSource.h"
 	)
 
 	target_compile_definitions(mumble_client_object_lib PUBLIC "USE_PULSEAUDIO")

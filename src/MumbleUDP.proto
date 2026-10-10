@@ -115,6 +115,35 @@ message Ping {
  * subscription for, which is also what makes a mid-stream parameter change safe: the sender allocates
  * a new stream_id.
  */
+/**
+ * A request to re-send lost fragments of a video stream (a NACK), on the video channel like the fragments
+ * themselves. UDP rather than the TCP control channel deliberately: under packet loss TCP holds every later
+ * message back until a lost segment is retransmitted - 200 ms at the very least - by which time the frames
+ * waiting on the answer have long been given up on. A lost request costs only itself; the receiver asks
+ * again.
+ *
+ * A receiver sends it to the server naming the stream's sender; the server checks the requester is
+ * subscribed, stamps requester_session, and forwards it to the sender, who re-sends the listed fragments
+ * as ordinary Video datagrams. A server or sender that predates this message drops it as an unknown type.
+ */
+message VideoNack {
+	message Unit {
+		uint64 frame_number = 1;
+		uint32 unit_id = 2;
+		// Bit i set: fragment i is missing. 0 means the whole unit is missing (no fragment of it arrived,
+		// so the receiver cannot know how many it had).
+		fixed64 missing_fragments = 3;
+	}
+
+	// Session of the stream's sender.
+	uint32 sender_session = 1;
+	uint32 stream_id = 2;
+	// At most MAX_VIDEO_NACK_UNITS (VideoFragmentation.h); the rest are ignored.
+	repeated Unit units = 3;
+	// Who asked. Set by the server; a client leaves it unset.
+	uint32 requester_session = 4;
+}
+
 message Video {
 	// The session of the client this video was originally sent from. Not set when sending to the
 	// server; always set by the server when relaying.

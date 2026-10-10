@@ -92,6 +92,9 @@ public:
 	void setCodec(int codec);
 	int codec() const { return m_codec; }
 
+	/// Size of the most recently encoded frame, or an empty size before the first one.
+	QSize frameSize() const { return m_lastFrame.size(); }
+
 	/// Applies the capture and quality settings. Called before start() so the first frame already uses
 	/// them; VP8 in particular cannot change resolution mid-stream.
 	void configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality, int tileSize);
@@ -144,6 +147,20 @@ protected:
 	QElapsedTimer m_captureActivity;
 	std::uint64_t m_captureTimestamp    = 0;
 	std::uint64_t m_lastEncodeTimestamp = 0;
+
+	/// MUMBLE_VIDEO_STATS: what encodeFrame() did since the last stats line (logged at most every 2 s).
+	struct EncodeStats {
+		bool enabled = false;
+		QElapsedTimer window;
+		std::uint64_t frames           = 0;
+		std::uint64_t keyframes        = 0;
+		std::uint64_t units            = 0;
+		std::uint64_t bytes            = 0;
+		std::uint64_t encodeUsec       = 0;
+		std::uint64_t maxEncodeUsec    = 0;
+		std::uint64_t maxUnitsPerFrame = 0;
+	} m_stats;
+	void noteEncodeStats(bool keyframe, std::size_t units, std::uint64_t bytes, std::uint64_t encodeUsec);
 };
 
 #endif // MUMBLE_MUMBLE_VIDEOBROADCASTER_H_

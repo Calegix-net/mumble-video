@@ -67,6 +67,13 @@ bool ScreenAudioBroadcaster::start(std::unique_ptr< AudioLoopbackSource > source
 	}
 
 	opus_encoder_ctl(m_opusState, OPUS_SET_BITRATE(static_cast< opus_int32 >(m_bitrateKbps) * 1000));
+	// In-band FEC: each packet carries a low-bitrate copy of the one before it, which is what lets
+	// AudioOutputScreenShare rebuild a single lost packet instead of guessing at it. The expected-loss hint
+	// is what makes the encoder actually spend bits on that copy.
+	opus_encoder_ctl(m_opusState, OPUS_SET_INBAND_FEC(1));
+	opus_encoder_ctl(m_opusState, OPUS_SET_PACKET_LOSS_PERC(10));
+	// Game sound, films and music rather than speech.
+	opus_encoder_ctl(m_opusState, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
 
 	m_accumulator.clear();
 	m_frameNumber = 0;

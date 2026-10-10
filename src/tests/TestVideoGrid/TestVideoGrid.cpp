@@ -120,6 +120,7 @@ private slots:
 	void aStuckDecoderAsksForAKeyframe();
 	void aGapInVp8FramesFreezesInsteadOfCorrupting();
 	void decodeResumesAtTheNextKeyframe();
+	void anUnrecoverableGapFallsBackToAKeyframe();
 	void aStaleVp8FrameArrivingLateIsDropped();
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void aNewStreamStartsAsAnUnwatchedPreview();
@@ -254,7 +255,13 @@ void TestVideoGrid::anEncodedFrameIsReassembledIntoThePicture() {
 	// Mirroring rather than moving a single tile: the gradient varies along x, so a mirror changes almost
 	// every pixel, whereas displacing one 128x128 tile touches only five percent of a 640x480 frame and
 	// barely moves the mean at all.
-	QVERIFY(meanDifference(original, shown.flipped(Qt::Horizontal)) > 4.0);
+	// QImage::flipped() is Qt 6.9+; mirrored() is the same operation before that (and deprecated after).
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+	const QImage mirroredShown = shown.flipped(Qt::Horizontal);
+#else
+	const QImage mirroredShown = shown.mirrored(true, false);
+#endif
+	QVERIFY(meanDifference(original, mirroredShown) > 4.0);
 }
 
 void TestVideoGrid::aPartialFrameShowsWhatArrived() {
@@ -529,8 +536,8 @@ void TestVideoGrid::anUnknownCodecIsDropped() {
 // - and the grid still has to survive being painted in it.
 // The green-frame bug: VP8 decodes an inter-frame whose reference was lost into a plausible corrupted
 // image rather than failing, so the failure-counting recovery path never noticed anything was wrong.
-// The grid now enforces frame continuity itself: a gap freezes the picture on the last good frame and
-// asks for a keyframe immediately - once, not per dropped unit.
+// The grid enforces frame continuity itself: a gap freezes the picture on the last good frame and asks
+// for the missing frame to be re-sent - once, not per held unit. A keyframe is the fallback, below.
 void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
 	VP8Encoder encoder;
 	encoder.setBitrate(600);
@@ -541,6 +548,7 @@ void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
 
 	VideoGrid grid;
 	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+	QSignalSpy retransmit(&grid, &VideoGrid::retransmitNeeded);
 
 	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
@@ -555,19 +563,28 @@ void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
 	const QImage afterKeyframe = grid.surfaceFor(SENDER, STREAM);
 	QVERIFY(!afterKeyframe.isNull());
 
-	// Frame 1 never arrives; frame 2 does. Feeding it to the decoder would "succeed" with garbage, so
-	// the grid must not: the canvas stays exactly the frame-0 picture and one keyframe request goes out.
+	// Frame 1 has not arrived; frame 2 does. Feeding it to the decoder would "succeed" with garbage, so
+	// the grid must not: the canvas stays exactly the frame-0 picture and frame 1 is asked for again.
 	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
-	QCOMPARE(needed.count(), 1);
+	QCOMPARE(retransmit.count(), 1);
+	QCOMPARE(retransmit.at(0).at(2).value< quint64 >(), quint64(1));
+	QCOMPARE(needed.count(), 0);
 
 	// Further inter-frames while frozen change nothing and do not spam requests.
 	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, false);
 	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
-	QCOMPARE(needed.count(), 1);
+	QCOMPARE(retransmit.count(), 1);
+	QCOMPARE(needed.count(), 0);
+
+	// The re-sent frame 1 arrives: frames 1, 2 and 3 are decoded in order, with no keyframe needed.
+	deliverFrame(grid, f1, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QVERIFY(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe) > 1.0);
+	QCOMPARE(needed.count(), 0);
 }
 
 void TestVideoGrid::decodeResumesAtTheNextKeyframe() {
@@ -586,20 +603,51 @@ void TestVideoGrid::decodeResumesAtTheNextKeyframe() {
 	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
 	encoder.encode(source.render(1), STREAM, 1, 1, false); // lost on the wire
 	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
-	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, true); // the answer to the request
+	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, true); // a keyframe
 
 	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	const QImage frozen = grid.surfaceFor(SENDER, STREAM);
-	QCOMPARE(needed.count(), 1);
 
-	// The keyframe unfreezes the stream: the canvas moves off the frozen picture, and no further
-	// request is emitted.
+	// A keyframe needs no predecessor: it unfreezes the stream whether or not frame 1 ever turns up.
 	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QVERIFY(meanDifference(grid.surfaceFor(SENDER, STREAM), frozen) > 1.0);
+	QCOMPARE(needed.count(), 0);
+}
+
+// When the missing frame does not come back in time, the old recovery takes over: one keyframe request,
+// and the picture stays frozen (not corrupted) until it is answered.
+void TestVideoGrid::anUnrecoverableGapFallsBackToAKeyframe() {
+	VP8Encoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	encoder.encode(source.render(1), STREAM, 1, 1, false); // lost for good
+	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
+	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, false);
+
+	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	const QImage frozen = grid.surfaceFor(SENDER, STREAM);
+
+	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	QCOMPARE(needed.count(), 0);
+
+	QTest::qWait(800); // past VideoGrid::VP8_HOLD_MSEC
+	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
 	QCOMPARE(needed.count(), 1);
+	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), frozen), 0.0);
 }
 
 // The reassembler delivers units in completion order, not frame order: a fragment of frame N can finish
