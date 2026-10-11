@@ -68,10 +68,12 @@ jobs:
           # Pre-created so docker does not create them root-owned: the zip step below runs as the
           # unprivileged runner user and must be able to write here.
           mkdir -p build out
+          # -Dupdate=OFF as for the Windows and flatpak builds: the update check asks upstream's
+          # update.mumble.info, which knows nothing of this fork's releases.
           docker run --rm -v "$PWD":/src -v "$PWD/build":/build -e RELEASE_VERSION mumble-build bash -c '
             set -e
             cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF \
-              -Drelease-version="${RELEASE_VERSION}"
+              -Dupdate=OFF -Drelease-version="${RELEASE_VERSION}"
             cmake --build /build -j"$(nproc)"
             cd /build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure'
 

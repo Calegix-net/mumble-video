@@ -1913,6 +1913,11 @@ void MainWindow::setupGui() {
 	on_qaFilterToggle_triggered();
 
 	qaHelpWhatsThis->setShortcuts(QKeySequence::WhatsThis);
+#ifdef NO_UPDATE_CHECK
+	// The check asks upstream's update.mumble.info, which knows nothing of this fork's releases. Asked
+	// about a development build it answers with an upstream snapshot to download instead.
+	qaHelpVersionCheck->setVisible(false);
+#endif
 
 	qaConfigMinimal->setChecked(Global::get().s.bMinimalView);
 	qaConfigHideFrame->setChecked(Global::get().s.bHideFrame);
@@ -5911,7 +5916,9 @@ void MainWindow::openAboutQtDialog() {
 }
 
 void MainWindow::versionCheck() {
+#ifndef NO_UPDATE_CHECK
 	new VersionCheck(false, this);
+#endif
 }
 
 void MainWindow::enablePositionalAudio(bool enable) {
