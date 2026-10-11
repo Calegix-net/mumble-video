@@ -72,8 +72,6 @@ set(SHARED_SOURCES
 	"SSLLocks.cpp"
 	"UnresolvedServerAddress.cpp"
 	"Version.cpp"
-	"VideoFragmentation.cpp"
-	"VideoTransport.cpp"
 
 	"crypto/CryptographicHash.cpp"
 )
@@ -103,8 +101,6 @@ set(SHARED_HEADERS
 	"SSLLocks.h"
 	"UnresolvedServerAddress.h"
 	"Version.h"
-	"VideoFragmentation.h"
-	"VideoTransport.h"
 
 	"crypto/CryptographicHash.h"
 )

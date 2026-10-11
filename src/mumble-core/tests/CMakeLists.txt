@@ -8,7 +8,13 @@
 
 add_executable(TestMumbleCore
 	"CoreTest.h"
+	"TestKnownAnswers.cpp"
 	"TestMumbleCore.cpp"
+)
+
+target_include_directories(TestMumbleCore PRIVATE "${MUMBLE_CORE_3RDPARTY_DIR}/nlohmann_json/single_include")
+target_compile_definitions(TestMumbleCore
+	PRIVATE "MUMBLE_CORE_TEST_VECTORS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../test-vectors\""
 )
 
 target_link_libraries(TestMumbleCore PRIVATE mumble-core)

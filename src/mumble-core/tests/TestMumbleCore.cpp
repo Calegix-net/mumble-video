@@ -13,6 +13,7 @@
 #include "VolumeAdjustment.h"
 #include "crypto/CryptStateOCB2.h"
 #include "crypto/CryptographicRandom.h"
+#include "crypto/Digest.h"
 
 #include <array>
 #include <bit>
@@ -244,6 +245,29 @@ CORE_TEST(legacyUdpIsRefusedWhenLeftOut) {
 	CHECK(!decoder.decode(legacyPing));
 }
 #endif
+
+CORE_TEST(digestKnownAnswers) {
+	using Mumble::Crypto::Digest;
+	using Mumble::Crypto::DigestAlgorithm;
+
+	const std::vector< std::uint8_t > abc    = { 'a', 'b', 'c' };
+	const std::vector< std::uint8_t > sha1   = { 0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
+												 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d };
+	const std::vector< std::uint8_t > sha256 = { 0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40,
+												 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17,
+												 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad };
+	CHECK(Digest::hash(abc, DigestAlgorithm::Sha1) == sha1);
+	CHECK(Digest::hash(abc, DigestAlgorithm::Sha256) == sha256);
+
+	Digest incremental(DigestAlgorithm::Sha256);
+	incremental.addData(std::span< const std::uint8_t >(abc).first(1));
+	incremental.addData(std::span< const std::uint8_t >(abc).subspan(1));
+	CHECK(incremental.result() == sha256);
+	CHECK(incremental.result() == sha256);
+	// Adding after the result is an error, and stays one.
+	incremental.addData(abc);
+	CHECK(incremental.result().empty());
+}
 
 int main() {
 	return CoreTest::runAll();
