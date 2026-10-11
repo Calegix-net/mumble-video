@@ -100,6 +100,7 @@ option(lto "Enables link-time optimizations for release builds" ${LTO_DEFAULT})
 # optional so a build on a system without them is a flag away rather than a patch away.
 if(UNIX AND NOT APPLE)
 	option(screen-share-pipewire "Build Linux screen sharing (XDG desktop portal + PipeWire)." ON)
+	option(screen-share-x11 "Build the X11 screen-capture fallback, for desktops with no ScreenCast portal." ON)
 endif()
 
 option(bundled-utfcpp "Use the bundled utf8cpp version instead of looking for one on the system" ON)
