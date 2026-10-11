@@ -652,7 +652,7 @@ void TestVideoGrid::threadedDecodingPaintsTheNewestFrame() {
 	VpxDecoder reference;
 	QImage expected;
 	for (int i = 0; i < 20; ++i) {
-		const auto units = encoder.encode(source.render(i), STREAM, static_cast< std::uint64_t >(i),
+		const auto units = encoder.encode(source.render(static_cast< std::uint64_t >(i)), STREAM, static_cast< std::uint64_t >(i),
 										  static_cast< std::uint64_t >(i), i == 0);
 		QVERIFY(!units.empty());
 		expected = reference.decode(units[0].payload);
@@ -681,7 +681,7 @@ void TestVideoGrid::bunchedFramesArePlayedOutAtTheirOwnPace() {
 	QImage last;
 	std::vector< std::vector< EncodedVideoUnit > > frames;
 	for (int i = 0; i < 10; ++i) {
-		frames.push_back(encoder.encode(source.render(i), STREAM, static_cast< std::uint64_t >(i),
+		frames.push_back(encoder.encode(source.render(static_cast< std::uint64_t >(i)), STREAM, static_cast< std::uint64_t >(i),
 										static_cast< std::uint64_t >(i) * 33333 + 1000000, i == 0));
 		QVERIFY(!frames.back().empty());
 		last = reference.decode(frames.back()[0].payload);
