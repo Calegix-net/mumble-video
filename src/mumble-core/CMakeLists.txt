@@ -77,6 +77,10 @@ target_sources(mumble-core
 		"Timer.cpp"
 		"Timer.h"
 		"VersionNumber.h"
+		"VideoFragmentation.cpp"
+		"VideoFragmentation.h"
+		"VideoTransport.cpp"
+		"VideoTransport.h"
 		"VolumeAdjustment.cpp"
 		"VolumeAdjustment.h"
 
@@ -86,6 +90,8 @@ target_sources(mumble-core
 		"crypto/CryptState.h"
 		"crypto/CryptStateOCB2.cpp"
 		"crypto/CryptStateOCB2.h"
+		"crypto/Digest.cpp"
+		"crypto/Digest.h"
 
 		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.cpp"
 		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.h"
