@@ -6,13 +6,22 @@
 # harvested from the directory rather than maintained by hand, so the MSI always contains exactly what
 # the zip contains.
 #
-# Usage: build-msi.sh <bundle-dir> <output.msi> [version]
+# Usage: build-msi.sh <bundle-dir> <output.msi> <version>
+#
+# <version> is three numbers, X.Y.Z (scripts/installer-version.sh prints it). Required: Windows
+# Installer decides upgrades by it, and the old 1.7.0 default stamped every MSI the same, so a new one
+# refused to install over an old one.
 
 set -euo pipefail
 
-BUNDLE_DIR="${1:?usage: build-msi.sh <bundle-dir> <output.msi> [version]}"
-OUT_MSI="${2:?usage: build-msi.sh <bundle-dir> <output.msi> [version]}"
-VERSION="${3:-1.7.0}"
+BUNDLE_DIR="${1:?usage: build-msi.sh <bundle-dir> <output.msi> <version>}"
+OUT_MSI="${2:?usage: build-msi.sh <bundle-dir> <output.msi> <version>}"
+VERSION="${3:?usage: build-msi.sh <bundle-dir> <output.msi> <version>}"
+
+if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "build-msi: version must be X.Y.Z, got '${VERSION}'" >&2
+    exit 1
+fi
 
 WXS_DIR="$(dirname "$0")/../installer"
 WORK="$(mktemp -d)"

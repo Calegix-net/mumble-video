@@ -31,10 +31,13 @@
     <Property Id="ALLUSERS" Value="1"/>
 
     <!-- Newer version replaces older in one step; downgrades are refused with a message rather than
-         producing a silent side-by-side mess. -->
+         producing a silent side-by-side mess. An equal version is replaced too: a development build
+         carries the version of the release it follows (see scripts/installer-version.sh), and each
+         must be able to replace the other. -->
     <Upgrade Id="7f2a9b64-3c81-4e1f-9d5a-4b8e2c6f0a17">
-      <UpgradeVersion Minimum="$(var.Version)" OnlyDetect="yes" Property="NEWERVERSIONDETECTED"/>
-      <UpgradeVersion Minimum="0.0.0" Maximum="$(var.Version)" IncludeMinimum="yes" IncludeMaximum="no"
+      <UpgradeVersion Minimum="$(var.Version)" IncludeMinimum="no" OnlyDetect="yes"
+                      Property="NEWERVERSIONDETECTED"/>
+      <UpgradeVersion Minimum="0.0.0" Maximum="$(var.Version)" IncludeMinimum="yes" IncludeMaximum="yes"
                       Property="OLDERVERSIONBEINGUPGRADED"/>
     </Upgrade>
     <Condition Message="A newer version of Mumble Video is already installed.">NOT NEWERVERSIONDETECTED</Condition>
