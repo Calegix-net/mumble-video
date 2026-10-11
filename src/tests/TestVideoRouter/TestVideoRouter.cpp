@@ -49,6 +49,9 @@ private slots:
 	void staleStreamsIgnoresAStreamWithNoBaselineYet();
 	void staleStreamsFlagsAWatchedStreamThatWentQuiet();
 	void noteRelayedIsIgnoredForAStreamThatDoesNotExist();
+	void keyframeRequestsAreLimitedPerStream();
+	void keyframeRequestsNeedASubscription();
+	void keyframeRequestSlotEndsWithTheStream();
 };
 
 #define ROUTER(perms)                                                                                 \
@@ -350,6 +353,81 @@ void TestVideoRouter::noteRelayedIsIgnoredForAStreamThatDoesNotExist() {
 	// ended is an ordinary occurrence, not a bug.
 	router.noteRelayed(1, 0, 1000);
 	QVERIFY(router.staleStreams(1'000'000, 1'000).empty());
+}
+
+void TestVideoRouter::keyframeRequestsAreLimitedPerStream() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+	perms.mayWatch.insert({ 2, 1 });
+	perms.mayWatch.insert({ 3, 1 });
+
+	ROUTER(perms);
+	// A screen (stream 0) and its audio (stream 1), as a share announces them.
+	QVERIFY(router.announceStream(1, 0, true));
+	QVERIFY(router.announceStream(1, 1, true));
+	QVERIFY(router.subscribe(2, 1, 0, true));
+	QVERIFY(router.subscribe(2, 1, 1, true));
+	QVERIFY(router.subscribe(3, 1, 0, true));
+
+	QVERIFY(router.admitKeyframeRequest(2, 1, 0, 10'000));
+
+	// The sender's other stream has a slot of its own. When the two shared one, asking for the picture
+	// swallowed the request for the audio, and the other way round.
+	QVERIFY(router.admitKeyframeRequest(2, 1, 1, 10'000));
+
+	// A second subscriber to the same stream inside the interval costs the sender nothing more.
+	QVERIFY(!router.admitKeyframeRequest(3, 1, 0, 10'000 + VideoRouter::KEYFRAME_REQUEST_INTERVAL_MSEC - 1));
+
+	QVERIFY(router.admitKeyframeRequest(3, 1, 0, 10'000 + VideoRouter::KEYFRAME_REQUEST_INTERVAL_MSEC));
+}
+
+void TestVideoRouter::keyframeRequestsNeedASubscription() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+	perms.mayWatch.insert({ 2, 1 });
+
+	ROUTER(perms);
+	QVERIFY(router.announceStream(1, 0, true));
+
+	// Not subscribed, and a stream that does not exist.
+	QVERIFY(!router.admitKeyframeRequest(2, 1, 0, 0));
+	QVERIFY(!router.admitKeyframeRequest(2, 1, 7, 0));
+
+	// Becoming subscribed: subscribe() has applied the message before the request is judged.
+	QVERIFY(router.subscribe(2, 1, 0, true));
+	QVERIFY(router.admitKeyframeRequest(2, 1, 0, 0));
+
+	// The bug: subscribe = false with request_keyframe = true still reached the sender. Spaced well past
+	// the interval, so only the missing subscription can be what refuses it.
+	QVERIFY(router.subscribe(2, 1, 0, false));
+	QVERIFY(!router.admitKeyframeRequest(2, 1, 0, 60'000));
+
+	// A subscription that is no longer permitted asks for nothing either.
+	QVERIFY(router.subscribe(2, 1, 0, true));
+	perms.mayWatch.clear();
+	QVERIFY(!router.admitKeyframeRequest(2, 1, 0, 120'000));
+
+	// Nor does a refused request use up the stream's slot for a subscriber who is entitled to one.
+	perms.mayWatch.insert({ 2, 1 });
+	QVERIFY(router.admitKeyframeRequest(2, 1, 0, 120'000));
+}
+
+void TestVideoRouter::keyframeRequestSlotEndsWithTheStream() {
+	FakePermissions perms;
+	perms.mayShare.insert(1);
+	perms.mayWatch.insert({ 2, 1 });
+
+	ROUTER(perms);
+	QVERIFY(router.announceStream(1, 0, true));
+	QVERIFY(router.subscribe(2, 1, 0, true));
+	QVERIFY(router.admitKeyframeRequest(2, 1, 0, 0));
+
+	// Ended and announced again under the same id - a sender stopping and restarting - is a new stream
+	// whose first viewer needs a keyframe now, not after the old stream's interval runs out.
+	QVERIFY(router.announceStream(1, 0, false));
+	QVERIFY(router.announceStream(1, 0, true));
+	QVERIFY(router.subscribe(2, 1, 0, true));
+	QVERIFY(router.admitKeyframeRequest(2, 1, 0, 1));
 }
 
 QTEST_MAIN(TestVideoRouter)

@@ -2701,22 +2701,17 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 	}
 
 	// A new subscriber needs a keyframe before it can decode anything, and after heavy loss an existing
-	// one needs a fresh point to resume from. The request is relayed to the sender, rate-limited per
-	// sender: a keyframe costs several normal frames of bandwidth, so a burst of subscribers must cost
-	// the sender one keyframe between them, not one each.
+	// one needs a fresh point to resume from. The request is relayed to the sender only on behalf of a
+	// subscriber - the subscription above has already been applied, so one that arrives with an
+	// unsubscribe goes no further - and at most once a second per stream: a keyframe costs several normal
+	// frames of bandwidth, so a burst of subscribers must cost the sender one keyframe between them, not
+	// one each. See VideoRouter::admitKeyframeRequest.
 	if (msg.request_keyframe()) {
 		ServerUser *senderUser = qhUsers.value(sender);
 
-		constexpr quint64 KEYFRAME_RELAY_INTERVAL_USEC = 1000 * 1000;
-
-		const quint64 now = static_cast< quint64 >(tUptime.elapsed().count());
-		const auto lastIt = m_lastKeyframeRelayUsec.find(sender);
-		const bool allowed =
-			lastIt == m_lastKeyframeRelayUsec.end() || now - lastIt->second >= KEYFRAME_RELAY_INTERVAL_USEC;
-
-		if (senderUser && allowed) {
-			m_lastKeyframeRelayUsec[sender] = now;
-
+		if (senderUser
+			&& m_videoRouter.admitKeyframeRequest(uSource->uiSession, sender, msg.stream_id(),
+												  tUptime.elapsed< std::chrono::milliseconds >().count())) {
 			MumbleProto::VideoSubscribe request;
 			// The session names the stream's sender, here the recipient itself: that is how the sending
 			// client recognises the message as being about its own stream. subscribe stays true so that a
