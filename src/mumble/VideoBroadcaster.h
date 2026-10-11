@@ -7,6 +7,9 @@
 #define MUMBLE_MUMBLE_VIDEOBROADCASTER_H_
 
 #include "VP8Codec.h"
+#ifdef USE_H264
+#	include "H264Codec.h"
+#endif
 #include "VideoEncoder.h"
 #include "VideoFragmentation.h"
 
@@ -88,8 +91,10 @@ public:
 
 	TiledImageEncoder &encoder() { return m_encoder; }
 
-	/// Which codec to encode with. 0 = VP8, 1 = TiledImage, matching Settings::videoCodec.
+	/// Which codec to encode with. 0 = VP8, 1 = TiledImage, matching Settings::videoCodec, or CODEC_H264
+	/// (screen shares only, and only in a build with USE_H264; anything else falls back to VP8).
 	void setCodec(int codec);
+	static constexpr int CODEC_H264 = 2;
 	int codec() const { return m_codec; }
 
 	/// Size of the most recently encoded frame, or an empty size before the first one.
@@ -127,8 +132,11 @@ protected:
 	std::unique_ptr< VideoSource > m_source;
 	TiledImageEncoder m_encoder;
 	VP8Encoder m_vp8;
+#ifdef USE_H264
+	H264Encoder m_h264;
+#endif
 
-	// 0 = VP8, 1 = TiledImage. Neither is a better default in general: VP8 is right for a camera and
+	// 0 = VP8, 1 = TiledImage, CODEC_H264. Neither is a better default in general: VP8 is right for a camera and
 	// ruinously wrong for a still screen, and tiled JPEG is the reverse.
 	int m_codec = 0;
 

@@ -87,6 +87,8 @@ const SettingsKey VIDEO_FRAMERATE_KEY    = { "video_framerate" };
 const SettingsKey VIDEO_BITRATE_KEY      = { "video_bitrate" };
 const SettingsKey VIDEO_TILE_QUALITY_KEY = { "video_tile_quality" };
 const SettingsKey VIDEO_TILE_SIZE_KEY    = { "video_tile_size" };
+const SettingsKey SCREEN_SHARE_CODEC_KEY   = { "screen_share_codec" };
+const SettingsKey SCREEN_SHARE_BITRATE_KEY = { "screen_share_bitrate" };
 const SettingsKey VIDEO_WIZARD_SHOWN_KEY = { "video_wizard_shown" };
 
 // Idle settings

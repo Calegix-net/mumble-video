@@ -10,7 +10,9 @@
 #include <QtGui/QPainter>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <vector>
 
 SyntheticVideoSource::SyntheticVideoSource(int width, int height, QObject *parent)
 	: VideoSource(parent), m_width(width), m_height(height) {
@@ -61,6 +63,74 @@ namespace {
 // The pseudo desktop. Deliberately drawn with plain QPainter primitives and default fonts so it renders
 // identically on a headless box with no fontconfig to speak of - the point is stable, varied, mostly
 // static content with a few always-moving regions, not fidelity.
+QImage renderFilmLike(int width, int height, std::uint64_t frameIndex) {
+	QImage image(width, height, QImage::Format_RGB32);
+
+	const double frame = static_cast< double >(frameIndex);
+	const double t     = frame / 30.0;
+
+	// A slow diagonal sweep of colour with a fine texture panning across it: everything moves, smoothly.
+	// Every term is a function of x or of y alone (the diagonal one through sin(a + b) = sin a cos b +
+	// cos a sin b), so it is computed once per column and once per row: a per-pixel sine made the mock
+	// itself the bottleneck at 1080p, capping the frame rate it was meant to measure.
+	std::vector< double > red(static_cast< std::size_t >(width)), sinU(red.size()), cosU(red.size()),
+		textureX(red.size());
+	std::vector< double > green(static_cast< std::size_t >(height)), sinV(green.size()), cosV(green.size()),
+		textureY(green.size());
+
+	for (int x = 0; x < width; ++x) {
+		const double u                          = static_cast< double >(x) / width;
+		red[static_cast< std::size_t >(x)]      = 128 + 90 * std::sin(6.0 * u + t);
+		sinU[static_cast< std::size_t >(x)]     = std::sin(4.0 * u - 0.7 * t + 4.0);
+		cosU[static_cast< std::size_t >(x)]     = std::cos(4.0 * u - 0.7 * t + 4.0);
+		textureX[static_cast< std::size_t >(x)] = 18.0 * std::sin((x + frame * 3.0) * 0.11);
+	}
+
+	for (int y = 0; y < height; ++y) {
+		const double v                          = static_cast< double >(y) / height;
+		green[static_cast< std::size_t >(y)]    = 128 + 90 * std::sin(5.0 * v + 1.3 * t + 2.0);
+		sinV[static_cast< std::size_t >(y)]     = std::sin(4.0 * v);
+		cosV[static_cast< std::size_t >(y)]     = std::cos(4.0 * v);
+		textureY[static_cast< std::size_t >(y)] = std::cos((y - frame * 2.0) * 0.07);
+	}
+
+	for (int y = 0; y < height; ++y) {
+		QRgb *scan            = reinterpret_cast< QRgb * >(image.scanLine(y));
+		const std::size_t row = static_cast< std::size_t >(y);
+
+		for (int x = 0; x < width; ++x) {
+			const std::size_t column = static_cast< std::size_t >(x);
+			const double texture     = textureX[column] * textureY[row];
+			const double blue        = 128 + 90 * (sinU[column] * cosV[row] + cosU[column] * sinV[row]);
+
+			scan[x] = qRgb(std::clamp(static_cast< int >(red[column] + texture), 0, 255),
+						   std::clamp(static_cast< int >(green[row] + texture), 0, 255),
+						   std::clamp(static_cast< int >(blue + texture), 0, 255));
+		}
+	}
+
+	// Shapes crossing the frame at different speeds, so there is motion to predict, not only change.
+	QPainter painter(&image);
+	painter.setRenderHint(QPainter::Antialiasing);
+
+	for (int i = 0; i < 6; ++i) {
+		const double phase = t * (0.4 + 0.15 * i) + i;
+		const int size     = height / (6 + i);
+		const int cx       = static_cast< int >((0.5 + 0.42 * std::sin(phase)) * width);
+		const int cy       = static_cast< int >((0.5 + 0.38 * std::cos(phase * 1.3)) * height);
+
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(QColor::fromHsv((i * 60 + static_cast< int >(t * 20)) % 360, 200, 230));
+		if (i % 2 == 0) {
+			painter.drawEllipse(QPoint(cx, cy), size, size);
+		} else {
+			painter.drawRect(cx - size, cy - size / 2, size * 2, size);
+		}
+	}
+
+	return image;
+}
+
 QImage renderScreenLike(int width, int height, std::uint64_t frameIndex) {
 	QImage image(width, height, QImage::Format_RGB32);
 	image.fill(QColor(30, 34, 42));
@@ -150,6 +220,10 @@ QImage renderScreenLike(int width, int height, std::uint64_t frameIndex) {
 } // namespace
 
 QImage SyntheticVideoSource::render(std::uint64_t frameIndex) const {
+	if (m_filmLike) {
+		return renderFilmLike(m_width, m_height, frameIndex);
+	}
+
 	if (m_screenLike) {
 		return renderScreenLike(m_width, m_height, frameIndex);
 	}

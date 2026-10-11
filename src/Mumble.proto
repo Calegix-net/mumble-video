@@ -796,6 +796,11 @@ message VideoState {
 		// it produces no picture surface - only x/y/width/height are meaningless here and MUST be
 		// ignored.
 		OpusAudio = 5;
+		// H.264 Annex B, one access unit per frame, from a hardware encoder. Whole-frame like VP8, but a
+		// frame may span several units: unit i of n carries x = i and y = n (there is no tile position),
+		// and the receiver joins all n before decoding. No B-frames. A client too old to know this value
+		// reads CODEC_UNKNOWN and drops the stream, as required above.
+		H264 = 6;
 	}
 
 	// What is being captured.

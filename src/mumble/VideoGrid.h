@@ -7,14 +7,18 @@
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
 #include "VP8Codec.h"
+#ifdef USE_H264
+#	include "H264Codec.h"
+#endif
 
 #include <QtCore/QByteArray>
+#include <QtCore/QDeadlineTimer>
+#include <QtCore/QList>
 #include <QtCore/QPoint>
 #include <QtCore/QRect>
 #include <QtCore/QString>
 #include <QtGui/QImage>
 #include <QtGui/QRegion>
-#include <QtCore/QDeadlineTimer>
 #include <QtWidgets/QWidget>
 
 #include <atomic>
@@ -27,6 +31,7 @@
 
 class QEnterEvent;
 class QKeyEvent;
+class QLabel;
 class QMouseEvent;
 class QResizeEvent;
 class QSlider;
@@ -291,6 +296,12 @@ signals:
 	/// Partially arrived frames are asked for by ServerHandler, which can see which fragments are missing.
 	void retransmitNeeded(unsigned int senderSession, unsigned int streamID, quint64 frameNumber);
 
+	/// Like retransmitNeeded(), for a codec whose frame spans several units (H.264): the units of the frame
+	/// to ask for again. Those of its parts that never arrived when some did; when none did, as many as the
+	/// stream's recent frames have had, since how many this one had is unknown.
+	void unitsRetransmitNeeded(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+							   const QList< unsigned int > &unitIDs);
+
 protected:
 	struct PendingTile {
 		quint64 frameNumber = 0;
@@ -375,6 +386,15 @@ protected:
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
 		std::unique_ptr< VP8Decoder > vp8;
 
+#ifdef USE_H264
+		/// H.264 goes through the same in-order, hold-and-retransmit path as VP8 (the vp8* members below),
+		/// once its parts have been joined into whole frames here.
+		std::unique_ptr< H264Decoder > h264;
+		H264FrameAssembler h264Parts;
+		/// Parts the most recent complete frame had, for asking after a frame of which nothing arrived.
+		unsigned int h264RecentPartCount = 1;
+#endif
+
 		/// VP8 frames that arrived after a gap, held (by frame number) while the frames missing before them
 		/// are re-sent - see onVp8UnitReceived(). Without this every lost frame froze the picture until a
 		/// keyframe, which at a couple of percent packet loss meant a frozen camera most of the time.
@@ -424,6 +444,14 @@ protected:
 					   const QByteArray &payload);
 	/// Decodes held frames that are now next in line.
 	void drainHeldVp8(std::uint64_t key, Surface &surface);
+	/// Asks for a frame that never arrived again, the way its codec needs (retransmitNeeded() or
+	/// unitsRetransmitNeeded()).
+	void requestRetransmit(Surface &surface, quint64 frameNumber);
+#ifdef USE_H264
+	/// One part of an H.264 frame: joined with the rest, then handed to onVp8UnitReceived() as a whole.
+	void onH264PartReceived(std::uint64_t key, Surface &surface, quint64 frameNumber, bool isKeyframe,
+							unsigned int index, unsigned int count, const QByteArray &part);
+#endif
 
 	/// MUMBLE_VIDEO_STATS: records a tile about to be painted for frame @p frameNumber.
 	void noteStatsPaint(Surface &surface, quint64 frameNumber);
@@ -556,6 +584,10 @@ protected:
 		QToolButton *fullscreenButton = nullptr;
 		QToolButton *watchButton      = nullptr;
 		QSlider *volumeSlider         = nullptr;
+		/// Speaker icon left of the slider: shows the level at a glance, and mutes/unmutes on click.
+		QToolButton *muteButton = nullptr;
+		/// The slider's value as a percentage, right of it.
+		QLabel *volumeLabel = nullptr;
 
 		/// bar owns fullscreenButton/watchButton/volumeSlider through Qt's own parent-child ownership - they
 		/// are all constructed with bar as their parent - but bar itself is a plain QWidget*, not something

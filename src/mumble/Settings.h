@@ -296,6 +296,11 @@ struct Settings {
 	int iVideoTileSize = 128;
 	/// Whether the video wizard has been shown once already.
 	bool videoWizardShown = false;
+	/// Screen-share codec: 0 = automatic (H.264 when a hardware encoder opens, else TiledImage),
+	/// 1 = TiledImage always, 2 = H.264 (TiledImage when no hardware encoder opens).
+	int screenShareCodec = 0;
+	/// H.264 screen-share target bitrate, kbit/s. Separate from iVideoBitrate, which is a camera's.
+	int iScreenShareBitrate = 6000;
 
 	int iFramesPerPacket                = 2;
 	QString qsAudioInput                = {};

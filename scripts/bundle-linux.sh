@@ -52,6 +52,9 @@ copy_deps() {
                 # from the host at runtime, not from here.
                 ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*) continue ;;
                 libGLX*|libGL.so*|libEGL.so*|libGLdispatch*|libdrm*|libgbm*) continue ;;
+                # VA-API (H.264 screen sharing) loads the host's GPU driver from a path compiled into
+                # libva itself, so a libva from this build machine would look in the wrong place.
+                libva.so*|libva-drm.so*|libva-x11.so*|libva-wayland.so*) continue ;;
             esac
 
             cp -L "${lib}" "${OUT_DIR}/lib/" 2>/dev/null && added=1
