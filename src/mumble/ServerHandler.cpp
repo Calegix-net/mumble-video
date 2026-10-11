@@ -1232,6 +1232,8 @@ void ServerHandler::serverConnectionConnected() {
 	}
 
 	mpa.set_opus(true);
+	// Also what has the server frame this connection's UDP for video - see Feature in Mumble.proto.
+	mpa.add_features(MumbleProto::FEATURE_VIDEO);
 	sendMessage(mpa);
 
 	{
