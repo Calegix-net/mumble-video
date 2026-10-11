@@ -8,6 +8,9 @@
 
 #include "PortalScreenCast.h"
 
+#include <QtCore/QList>
+#include <QtCore/QPointer>
+#include <QtGui/QScreen>
 #include <QtWidgets/QDialog>
 
 class QCheckBox;
@@ -29,15 +32,22 @@ class QToolButton;
  * audio" cannot follow the window as it does on Windows. Instead the applications playing sound right now
  * are listed and one can be chosen.
  *
+ * With directCapture, the share is going to X11ScreenVideoSource instead, because no screen-cast portal
+ * answered. There is then no desktop picker to follow, so this dialog asks which screen itself when there
+ * is more than one. A window cannot be chosen and the cursor cannot be shown: that source grabs a region
+ * of the root window, which holds neither a window of its own nor the cursor.
+ *
  * The choices are remembered for the rest of the session.
  */
 class LinuxSharePickerDialog : public QDialog {
 	Q_OBJECT
 
 public:
-	explicit LinuxSharePickerDialog(QWidget *parent = nullptr);
+	explicit LinuxSharePickerDialog(QWidget *parent = nullptr, bool directCapture = false);
 
 	PortalScreenCast::SourceType sourceType() const;
+	/// The screen to capture with directCapture; nullptr without it, or if that screen has gone since.
+	QScreen *captureScreen() const;
 	bool includeAudio() const;
 	/// The application whose sound to share (a PulseLoopbackSource::Application key); empty for every
 	/// application except Mumble. Meaningful only when includeAudio().
@@ -51,6 +61,10 @@ protected slots:
 	void remember();
 
 protected:
+	bool m_directCapture = false;
+	QList< QPointer< QScreen > > m_screens;
+	QComboBox *m_screenChoice = nullptr;
+
 	QRadioButton *m_screen          = nullptr;
 	QRadioButton *m_window          = nullptr;
 	QCheckBox *m_includeAudio       = nullptr;

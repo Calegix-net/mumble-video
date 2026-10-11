@@ -9,6 +9,7 @@
 #	include "PulseLoopbackSource.h"
 #endif
 
+#include <QtGui/QGuiApplication>
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
@@ -40,7 +41,8 @@ Remembered &remembered() {
 
 } // namespace
 
-LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent) : QDialog(parent) {
+LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent, bool directCapture)
+	: QDialog(parent), m_directCapture(directCapture) {
 	setWindowTitle(tr("Share Screen"));
 	setMinimumWidth(460);
 
@@ -56,12 +58,39 @@ LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent) : QDialog(parent
 	group->addButton(m_screen);
 	group->addButton(m_window);
 
-	auto *next = new QLabel(tr("Next, your desktop asks which screen or window, with a preview of each."), what);
-	next->setWordWrap(true);
-	QFont hintFont = next->font();
-	hintFont.setItalic(true);
-	next->setFont(hintFont);
-	whatLayout->addWidget(next);
+	if (!m_directCapture) {
+		auto *next = new QLabel(tr("Next, your desktop asks which screen or window, with a preview of each."), what);
+		next->setWordWrap(true);
+		QFont hintFont = next->font();
+		hintFont.setItalic(true);
+		next->setFont(hintFont);
+		whatLayout->addWidget(next);
+	} else {
+		for (QScreen *screen : QGuiApplication::screens()) {
+			m_screens << screen;
+		}
+
+		// No desktop picker follows on this path, so the question it would have asked is asked here.
+		// With a single screen there is nothing to ask.
+		if (m_screens.size() > 1) {
+			auto *screenRow = new QHBoxLayout();
+			m_screenChoice  = new QComboBox(what);
+
+			for (const QPointer< QScreen > &screen : m_screens) {
+				m_screenChoice->addItem(tr("%1 (%2x%3)")
+											.arg(screen->name().isEmpty() ? tr("Screen") : screen->name())
+											.arg(screen->geometry().width())
+											.arg(screen->geometry().height()));
+			}
+			m_screenChoice->setCurrentIndex(
+				std::max(0, static_cast< int >(m_screens.indexOf(QGuiApplication::primaryScreen()))));
+
+			screenRow->addSpacing(20);
+			screenRow->addWidget(new QLabel(tr("Screen:"), what));
+			screenRow->addWidget(m_screenChoice, 1);
+			whatLayout->addLayout(screenRow);
+		}
+	}
 	layout->addWidget(what);
 
 	m_includeAudio = new QCheckBox(tr("Include audio"), this);
@@ -92,6 +121,16 @@ LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent) : QDialog(parent
 	(last.window ? m_window : m_screen)->setChecked(true);
 	m_includeAudio->setChecked(last.includeAudio);
 	m_showCursor->setChecked(last.showCursor);
+
+	if (m_directCapture) {
+		m_screen->setChecked(true);
+		m_window->setEnabled(false);
+		m_window->setToolTip(tr("Sharing a single window needs the desktop's screen-cast portal, which this "
+								"desktop does not provide."));
+		m_showCursor->setChecked(false);
+		m_showCursor->setEnabled(false);
+		m_showCursor->setToolTip(tr("The cursor cannot be captured without the desktop's screen-cast portal."));
+	}
 
 #ifndef USE_PULSEAUDIO
 	m_includeAudio->setChecked(false);
@@ -148,14 +187,28 @@ void LinuxSharePickerDialog::updateControls() {
 
 void LinuxSharePickerDialog::remember() {
 	Remembered &last  = remembered();
-	last.window       = m_window->isChecked();
 	last.includeAudio = m_includeAudio->isChecked();
 	last.audioKey     = audioApplicationKey();
-	last.showCursor   = m_showCursor->isChecked();
+
+	// Not choices on the direct-capture path, so they are left as the portal path last had them.
+	if (!m_directCapture) {
+		last.window     = m_window->isChecked();
+		last.showCursor = m_showCursor->isChecked();
+	}
 }
 
 PortalScreenCast::SourceType LinuxSharePickerDialog::sourceType() const {
 	return m_window->isChecked() ? PortalScreenCast::SourceType::Window : PortalScreenCast::SourceType::Monitor;
+}
+
+QScreen *LinuxSharePickerDialog::captureScreen() const {
+	if (!m_directCapture || m_screens.isEmpty()) {
+		return nullptr;
+	}
+
+	const int index = m_screenChoice ? m_screenChoice->currentIndex() : 0;
+
+	return index >= 0 && index < m_screens.size() ? m_screens.at(index).data() : nullptr;
 }
 
 bool LinuxSharePickerDialog::includeAudio() const {

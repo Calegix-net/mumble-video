@@ -22,7 +22,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         pipewire-devel \
         mesa-libGL-devel boost-devel openssl-devel \
         protobuf-devel protobuf-compiler \
-        libcap-devel libXi-devel nlohmann-json-devel poco-devel \
+        libcap-devel libXi-devel libX11-devel libXext-devel nlohmann-json-devel poco-devel \
         alsa-lib-devel libogg-devel libsndfile-devel opus-devel speexdsp-devel \
         speech-dispatcher-devel avahi-compat-libdns_sd-devel \
         mariadb-connector-c-devel libpq-devel sqlite-devel \

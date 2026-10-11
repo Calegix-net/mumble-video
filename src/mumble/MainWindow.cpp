@@ -86,6 +86,10 @@
 #	include "PipeWireScreenVideoSource.h"
 #endif
 
+#ifdef USE_SCREEN_SHARE_X11
+#	include "X11ScreenVideoSource.h"
+#endif
+
 #ifdef USE_PULSEAUDIO
 #	include "PulseLoopbackSource.h"
 #endif
@@ -920,17 +924,34 @@ void MainWindow::setupScreenShare() {
 
 	qmSelf->addAction(m_shareScreenAction);
 
-	// Shown only where something can actually capture. On Linux that means a desktop portal is
-	// answering on the session bus - without one there is no way to ask for permission, so the control
-	// could only ever report its own unavailability. The action is built regardless, so every signal
-	// connection below stays unconditional.
+	// Shown only where something can actually capture. On Linux that means a desktop portal answering
+	// ScreenCast on the session bus, or failing that an X11 session the fallback can grab - see
+	// toggleScreenShare(). The action is built regardless, so every signal connection below stays
+	// unconditional.
 #if defined(Q_OS_WIN)
 	const bool nativeScreenCaptureAvailable = true;
-#elif defined(USE_SCREEN_SHARE_PIPEWIRE)
-	const bool nativeScreenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
 #else
-	const bool nativeScreenCaptureAvailable = false;
+	bool nativeScreenCaptureAvailable = false;
+#	ifdef USE_SCREEN_SHARE_PIPEWIRE
+	nativeScreenCaptureAvailable = PipeWireScreenVideoSource::isAvailable();
+#	endif
+#	ifdef USE_SCREEN_SHARE_X11
+	// The fallback counts towards the button being offered at all: on a desktop with no ScreenCast
+	// portal it is the only thing that can capture, and hiding the action there is what left XFCE users
+	// with no screen sharing and no explanation.
+	if (!nativeScreenCaptureAvailable) {
+		nativeScreenCaptureAvailable = X11ScreenVideoSource::isAvailable();
+	}
+#	endif
 #endif
+
+	// Says out loud why the action is missing when it is. Silently hiding it is indistinguishable, from
+	// the user's side, from a build with no screen sharing compiled in at all.
+	if (!nativeScreenCaptureAvailable && qEnvironmentVariableIsEmpty("MUMBLE_MOCK_SCREEN")) {
+		qWarning("MainWindow: no screen capture backend is available - no ScreenCast portal answered on "
+				 "the session bus (xdg-desktop-portal-gtk does not implement it) and no X11 display can "
+				 "be grabbed. Share Screen is hidden.");
+	}
 
 	// MUMBLE_MOCK_SCREEN streams a synthetic desktop instead of capturing one - see toggleScreenShare().
 	// The action has to be visible for that to be reachable, portal or no portal.
@@ -1282,14 +1303,64 @@ void MainWindow::toggleScreenShare(bool share) {
 
 #ifndef Q_OS_WIN
 #	ifdef USE_SCREEN_SHARE_PIPEWIRE
+	// The portal whenever it answers. The X11 grab is only for an X11 session where it does not - see
+	// X11ScreenVideoSource for why it never stands in for the portal on Wayland.
+	const bool portalAvailable = PipeWireScreenVideoSource::isAvailable();
+#		ifdef USE_SCREEN_SHARE_X11
+	const bool directCapture = !portalAvailable && X11ScreenVideoSource::isAvailable();
+#		else
+	const bool directCapture = false;
+#		endif
+
+	if (!portalAvailable && !directCapture) {
+		Global::get().l->log(Log::Warning, tr("No screen capture backend is available."));
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
+
 	// Our picker first, with the same choices as on Windows; then the desktop's own, for which screen or
-	// window - only it may show them. See LinuxSharePickerDialog.
-	LinuxSharePickerDialog picker(this);
+	// window - only it may show them. See LinuxSharePickerDialog. Without the portal there is no desktop
+	// picker, and ours asks which screen itself.
+	LinuxSharePickerDialog picker(this, directCapture);
 
 	if (picker.exec() != QDialog::Accepted) {
 		m_shareScreenAction->setChecked(false);
 
 		return;
+	}
+
+	std::unique_ptr< VideoSource > screenSource;
+
+#		ifdef USE_SCREEN_SHARE_X11
+	if (directCapture) {
+		QScreen *chosen = picker.captureScreen();
+
+		if (!chosen) {
+			Global::get().l->log(Log::Warning, tr("No screen to share."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		// Qt reports screen geometry in device-independent pixels; the X grab wants X pixels. They are
+		// the same thing on an unscaled X11 session, which is the overwhelmingly common case, and this
+		// keeps a scaled one from capturing a quarter of the screen.
+		const qreal ratio   = chosen->devicePixelRatio();
+		const QRect logical = chosen->geometry();
+		const QRect region(qRound(logical.x() * ratio), qRound(logical.y() * ratio), qRound(logical.width() * ratio),
+						   qRound(logical.height() * ratio));
+
+		const int framerate = Global::get().s.iScreenShareFramerate;
+
+		screenSource = std::make_unique< X11ScreenVideoSource >(
+			region, tr("%1 (X11)").arg(chosen->name().isEmpty() ? tr("Screen") : chosen->name()),
+			framerate > 0 ? std::max(1, 1000 / framerate) : 66);
+	}
+#		endif
+
+	if (!screenSource) {
+		screenSource = std::make_unique< PipeWireScreenVideoSource >(picker.sourceType(), picker.showCursor());
 	}
 
 	m_shareAudioWanted          = picker.includeAudio();
@@ -1302,9 +1373,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	configureScreenBroadcaster(Global::get().s);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
-	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(picker.sourceType(), picker.showCursor());
-
-	if (!m_screenVideoBroadcaster->start(std::move(pipeWireSource))) {
+	if (!m_screenVideoBroadcaster->start(std::move(screenSource))) {
 		Global::get().l->log(Log::Warning, tr("Could not start screen capture."));
 		m_shareScreenAction->setChecked(false);
 
