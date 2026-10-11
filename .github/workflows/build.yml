@@ -150,11 +150,14 @@ jobs:
 
       - name: Bundle and build the installers
         run: |
-          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out mumble-build-windows bash -c '
+          read -r msi_version display_version < <(bash scripts/installer-version.sh)
+          echo "Installer version: MSI ${msi_version}, shown as ${display_version}"
+          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out \
+            -e MSI_VERSION="${msi_version}" -e DISPLAY_VERSION="${display_version}" mumble-build-windows bash -c '
             set -e
             bash /src/scripts/bundle-windows.sh /build /out/mumble-windows
-            bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi
-            bash /src/scripts/build-nsis.sh /out/mumble-windows /out/mumble-video-setup.exe'
+            bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi "${MSI_VERSION}"
+            bash /src/scripts/build-nsis.sh /out/mumble-windows /out/mumble-video-setup.exe "${DISPLAY_VERSION}"'
           cd out && zip -q -r -9 mumble-video-windows-x86_64.zip mumble-windows
 
       - uses: actions/upload-artifact@v4

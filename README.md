@@ -91,7 +91,7 @@ docker run --rm -v "$PWD":/src -v "$PWD/build":/build mumble-build bash -c \
 docker build -t mumble-build-windows -f docker/Dockerfile.windows docker/
 docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows bash /src/scripts/build-windows.sh
 docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out mumble-build-windows bash -c \
-  'bash /src/scripts/bundle-windows.sh /build /out/bundle && bash /src/scripts/build-msi.sh /out/bundle /out/mumble-video-x64.msi'
+  'bash /src/scripts/bundle-windows.sh /build /out/bundle && bash /src/scripts/build-msi.sh /out/bundle /out/mumble-video-x64.msi 1.9.0'
 
 # Flatpak (privileged, because flatpak-builder needs its own namespaces)
 docker build -t mumble-flatpak-build -f docker/Dockerfile.flatpak docker/

@@ -4,13 +4,16 @@
 # Run inside the Windows build image (docker/Dockerfile.windows). This is the installer a person
 # should download; the MSI beside it exists for deployment tooling that wants one.
 #
-# Usage: build-nsis.sh <bundle-dir> <output.exe> [version]
+# Usage: build-nsis.sh <bundle-dir> <output.exe> <version>
+#
+# <version> is what Settings > Apps shows, e.g. 1.9.0 or 1.9.0-dev+abc123456 (the second word
+# scripts/installer-version.sh prints).
 
 set -euo pipefail
 
-BUNDLE_DIR="$(realpath "${1:?usage: build-nsis.sh <bundle-dir> <output.exe> [version]}")"
-OUT_EXE="${2:?usage: build-nsis.sh <bundle-dir> <output.exe> [version]}"
-VERSION="${3:-1.7.0}"
+BUNDLE_DIR="$(realpath "${1:?usage: build-nsis.sh <bundle-dir> <output.exe> <version>}")"
+OUT_EXE="${2:?usage: build-nsis.sh <bundle-dir> <output.exe> <version>}"
+VERSION="${3:?usage: build-nsis.sh <bundle-dir> <output.exe> <version>}"
 
 REPO_DIR="$(realpath "$(dirname "$0")/..")"
 
