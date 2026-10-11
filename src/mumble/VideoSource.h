@@ -115,6 +115,14 @@ public:
 	void setScreenLike(bool screenLike) { m_screenLike = screenLike; }
 
 	/**
+	 * Render something like film footage: a drifting colour gradient, a panning texture and moving
+	 * shapes. Every pixel changes every frame, as in a film or a game, but compressibly, the way real
+	 * footage does - unlike the noise of the default pattern, which no video encoder can do anything
+	 * with. Takes precedence over setScreenLike(); setChangeRatio() is ignored.
+	 */
+	void setFilmLike(bool filmLike) { m_filmLike = filmLike; }
+
+	/**
 	 * Emits a frame every `milliseconds` once started, instead of only when pumped.
 	 *
 	 * Pull mode is what a test wants when it needs to control exactly how many frames exist. Anything
@@ -128,6 +136,7 @@ protected:
 	int m_height;
 	int m_changePercent  = 100;
 	bool m_screenLike    = false;
+	bool m_filmLike      = false;
 	bool m_running       = false;
 	std::uint64_t m_next = 0;
 
