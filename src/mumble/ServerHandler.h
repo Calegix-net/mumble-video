@@ -169,6 +169,10 @@ public:
 
 	/// Asks the sender of a stream to re-send one whole unit that never arrived (for VP8: a whole frame).
 	void requestVideoRetransmission(unsigned int senderSession, unsigned int streamID, quint64 frameNumber);
+	/// The given units of a frame, each whole: a frame that spans several units (H.264) and of which these
+	/// never arrived. At most MAX_VIDEO_NACK_UNITS are asked for.
+	void requestVideoUnitsRetransmission(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+										 const QList< unsigned int > &unitIDs);
 
 protected:
 	/// Flag indicating whether the server we are currently connected to has

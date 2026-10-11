@@ -551,6 +551,30 @@ void ServerHandler::requestVideoRetransmission(unsigned int senderSession, unsig
 	sendVideoNack(nack);
 }
 
+void ServerHandler::requestVideoUnitsRetransmission(unsigned int senderSession, unsigned int streamID,
+													quint64 frameNumber, const QList< unsigned int > &unitIDs) {
+	if (unitIDs.isEmpty()) {
+		return;
+	}
+
+	MumbleUDP::VideoNack nack;
+	nack.set_sender_session(senderSession);
+	nack.set_stream_id(streamID);
+
+	for (const unsigned int unitID : unitIDs) {
+		if (nack.units_size() >= Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
+			break;
+		}
+
+		MumbleUDP::VideoNack::Unit *unit = nack.add_units();
+		unit->set_frame_number(frameNumber);
+		unit->set_unit_id(unitID);
+		unit->set_missing_fragments(0);
+	}
+
+	sendVideoNack(nack);
+}
+
 void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
 	// Messages per second, at most, so a burst of loss costs the server's rate limit for this client a
 	// bounded amount, leaving room for its subscriptions and keyframe requests.

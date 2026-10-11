@@ -7,6 +7,9 @@
 
 #include "CameraVideoSource.h"
 #include "VP8Codec.h"
+#ifdef USE_H264
+#	include "H264Codec.h"
+#endif
 #include "VideoEncoder.h"
 #include "VideoSource.h"
 
@@ -135,6 +138,43 @@ void VideoConfigDialog::buildUi() {
 	codecLayout->addWidget(m_tiledGroup);
 
 	outer->addWidget(codecBox);
+
+	// Screen sharing has its own codec choice: the camera settings above are for a camera, and the best
+	// codec for a screen depends on what is shown and on this machine's graphics card, not on the camera.
+	auto *screenBox    = new QGroupBox(tr("Screen sharing"), this);
+	auto *screenLayout = new QFormLayout(screenBox);
+
+	m_screenCodec = new QComboBox(screenBox);
+	m_screenCodec->addItem(tr("Automatic"), 0);
+	m_screenCodec->addItem(tr("Tiled image - best for a still desktop"), 1);
+	m_screenCodec->addItem(tr("H.264 - best for films and games"), 2);
+	m_screenCodec->setToolTip(tr("Automatic and H.264 encode on the graphics card when it can, which keeps "
+								 "films and games smooth for little bandwidth. Without a hardware encoder, "
+								 "both share tiled images, which cost nothing while the screen is still."));
+	screenLayout->addRow(tr("Co&dec"), m_screenCodec);
+
+	m_screenBitrate = new QSpinBox(screenBox);
+	m_screenBitrate->setRange(1000, 20000);
+	m_screenBitrate->setSingleStep(500);
+	m_screenBitrate->setSuffix(tr(" kbit/s"));
+	m_screenBitrate->setToolTip(tr("H.264 target bitrate. Everyone watching your screen downloads about this much."));
+	screenLayout->addRow(tr("H.264 bit&rate"), m_screenBitrate);
+
+#ifdef USE_H264
+	const QString backend = H264Encoder::availableBackend();
+	auto *encoderLabel =
+		new QLabel(backend.isEmpty() ? tr("No hardware H.264 encoder found: screens are shared as tiled images.")
+									 : tr("Hardware encoder: %1").arg(backend),
+				   screenBox);
+#else
+	auto *encoderLabel = new QLabel(tr("This build has no H.264: screens are shared as tiled images."), screenBox);
+	m_screenCodec->setEnabled(false);
+	m_screenBitrate->setEnabled(false);
+#endif
+	encoderLabel->setWordWrap(true);
+	screenLayout->addRow(encoderLabel);
+
+	outer->addWidget(screenBox);
 
 	auto *previewBox    = new QGroupBox(tr("Preview"), this);
 	auto *previewLayout = new QVBoxLayout(previewBox);
@@ -335,6 +375,9 @@ void VideoConfigDialog::load(const Settings &r) {
 	m_tileSize->setCurrentIndex(tileIndex >= 0 ? tileIndex : 1);
 
 	onCodecChanged(m_codec->currentIndex());
+
+	loadComboBox(m_screenCodec, r.screenShareCodec);
+	m_screenBitrate->setValue(r.iScreenShareBitrate);
 }
 
 void VideoConfigDialog::save() const {
@@ -349,4 +392,7 @@ void VideoConfigDialog::save() const {
 	s.iVideoBitrate     = m_bitrate->value();
 	s.iVideoTileQuality = m_tileQuality->value();
 	s.iVideoTileSize    = m_tileSize->currentData().toInt();
+
+	s.screenShareCodec    = m_screenCodec->currentData().toInt();
+	s.iScreenShareBitrate = m_screenBitrate->value();
 }
