@@ -8,6 +8,9 @@
 
 #include "AudioLoopbackSource.h"
 
+#include <QtCore/QList>
+#include <QtCore/QString>
+
 #include <pulse/context.h>
 #include <pulse/introspect.h>
 #include <pulse/mainloop-api.h>
@@ -58,6 +61,22 @@ public:
 	/// pa_stream_set_monitor_stream.
 	static bool isAvailable();
 
+	/// An application with a playback stream right now, as the share picker lists it.
+	struct Application {
+		/// What setOnlyApplication() matches on: the process binary, or the application name without one.
+		QString key;
+		/// What the user sees.
+		QString name;
+	};
+
+	/// The applications playing sound right now, Mumble excluded. Asks the audio server and waits for the
+	/// answer, at most timeoutMsec.
+	static QList< Application > playingApplications(int timeoutMsec = 1500);
+
+	/// Captures only this application's sound (an Application::key), instead of everything but Mumble.
+	/// Empty for everything. Set before start(); streams the application opens later are picked up too.
+	void setOnlyApplication(const QString &key, const QString &name);
+
 	// Not SAMPLE_RATE: Audio.h #defines that.
 	static constexpr unsigned int CAPTURE_SAMPLE_RATE = 48000;
 	static constexpr unsigned int CAPTURE_CHANNELS    = 2;
@@ -87,6 +106,10 @@ private:
 	void stopCapture(std::uint32_t sinkInputIndex);
 	void mix();
 	bool isOwnStream(const pa_sink_input_info *info) const;
+	static bool isOwnStream(PulseAudio &pa, const pa_sink_input_info *info);
+	static QString applicationKey(PulseAudio &pa, const pa_sink_input_info *info);
+	/// Whether a stream is one this capture wants: not Mumble's, and the chosen application's if one was.
+	bool isWanted(const pa_sink_input_info *info) const;
 	void scheduleMix();
 	void fail(const QString &reason);
 
@@ -95,6 +118,9 @@ private:
 	pa_context *m_context            = nullptr;
 	pa_time_event *m_mixTimer        = nullptr;
 	bool m_running                   = false;
+	/// See setOnlyApplication(). Read on the mainloop thread, written only before start().
+	QString m_onlyApplicationKey;
+	QString m_onlyApplicationName;
 
 	// Mainloop thread only.
 	std::map< std::uint32_t, std::string > m_sinkMonitors;

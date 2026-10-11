@@ -10,12 +10,18 @@
 #include "WgcWindowVideoSource.h"
 
 #include <QtCore/QList>
+#include <QtGui/QImage>
 #include <QtWidgets/QDialog>
+
+#include <memory>
+#include <vector>
 
 class QCheckBox;
 class QDialogButtonBox;
 class QListWidget;
 class QListWidgetItem;
+class QTabWidget;
+class QTimer;
 
 /// What kind of thing a ScreenSharePickerDialog's selection resolved to once accepted.
 enum class ScreenShareTargetKind { None, Display, Window };
@@ -24,26 +30,26 @@ enum class ScreenShareTargetKind { None, Display, Window };
  * Lets the user choose what to share before a screen share starts: a whole display or a single window,
  * and what audio (if any) and cursor visibility should go with it.
  *
- * Deliberately not folded into VideoWizard: the wizard is a one-time guided bandwidth-measurement flow
- * run once from Configure menu, hardcoded to a camera. This is a per-share, every-time chooser - the same
- * relationship Discord's screen-share button has to its own, separate settings.
+ * Laid out like Discord's: a "Screens" and an "Applications" tab, each a grid of live thumbnails, so
+ * "Display 2" is a picture of that display rather than a name to guess at. The thumbnails are taken on a
+ * worker thread - a window that is slow to draw itself must not freeze the dialog - and refreshed every
+ * THUMBNAIL_REFRESH_MSEC for the tab that is showing. They never leave this computer.
  *
- * Displays and windows this build can enumerate are listed directly, in one combined list under two
- * section headers; there is no live preview, unlike Discord's thumbnails, since that would mean running a
- * low-rate capture per candidate just to populate a list the user may not even open - a reasonable
- * improvement for later, not required for this to work.
- *
- * "Only this application's audio" and "Show my cursor" only apply to a window selection: whole-display
- * capture here (DxgiDisplayVideoSource) has no per-process audio concept to scope to - system audio is
- * the whole point - and does not composite a cursor into its frames, so offering that checkbox for a
- * display would promise something that is not actually wired up. Both are disabled, not merely unchecked,
- * when a display is selected, so the dialog does not silently ignore a choice the user thinks they made.
+ * "Only this application's audio" and "Show my cursor" only apply to a window: whole-display capture here
+ * (DxgiDisplayVideoSource) has no single application to scope audio to and does not composite a cursor
+ * into its frames. Both are disabled, not merely unchecked, while a display is selected. Sharing a window
+ * shares only that window's sound by default, as Discord does.
  */
 class ScreenSharePickerDialog : public QDialog {
 	Q_OBJECT
 
 public:
 	explicit ScreenSharePickerDialog(QWidget *parent = nullptr);
+	~ScreenSharePickerDialog() override;
+
+	static constexpr int THUMBNAIL_WIDTH          = 256;
+	static constexpr int THUMBNAIL_HEIGHT         = 144;
+	static constexpr int THUMBNAIL_REFRESH_MSEC   = 2000;
 
 	/// None if the dialog was cancelled, or if there was nothing to pick at all. Meaningful only after
 	/// exec() has returned QDialog::Accepted.
@@ -68,16 +74,32 @@ public:
 
 protected slots:
 	void onAccepted();
-	void onCurrentRowChanged(int row);
+	void updateControls();
+	void refreshThumbnails();
 
 protected:
-	void populateList();
+	struct Thumbnail {
+		bool isWindow = false;
+		int index     = 0;
+		QImage image;
+	};
 
-	QListWidget *m_targetList      = nullptr;
+	void populateLists();
+	QListWidgetItem *currentTargetItem() const;
+	void applyThumbnails(const std::vector< Thumbnail > &thumbnails);
+
+	QTabWidget *m_tabs             = nullptr;
+	QListWidget *m_displayList     = nullptr;
+	QListWidget *m_windowList      = nullptr;
 	QCheckBox *m_includeAudio      = nullptr;
 	QCheckBox *m_windowAudioOnly   = nullptr;
 	QCheckBox *m_showCursor        = nullptr;
 	QDialogButtonBox *m_buttonBox  = nullptr;
+	QTimer *m_refreshTimer         = nullptr;
+	/// A refresh still running on the worker thread: the next one waits for it rather than piling up.
+	bool m_refreshInFlight = false;
+	/// Shared with the worker's completion callback, which may arrive after this dialog is gone.
+	std::shared_ptr< bool > m_alive;
 
 	QList< DxgiDisplayVideoSource::DisplayInfo > m_displays;
 	QList< WgcWindowVideoSource::WindowInfo > m_windows;

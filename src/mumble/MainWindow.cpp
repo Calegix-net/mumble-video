@@ -74,12 +74,15 @@
 #ifdef Q_OS_WIN
 #	include "DxgiDisplayVideoSource.h"
 #	include "ScreenSharePickerDialog.h"
+
+#	include <QtWidgets/QTabWidget>
 #	include "WasapiLoopbackSource.h"
 #	include "WasapiProcessLoopbackSource.h"
 #	include "WgcWindowVideoSource.h"
 #endif
 
 #ifdef USE_SCREEN_SHARE_PIPEWIRE
+#	include "LinuxSharePickerDialog.h"
 #	include "PipeWireScreenVideoSource.h"
 #endif
 
@@ -917,18 +920,6 @@ void MainWindow::setupScreenShare() {
 
 	qmSelf->addAction(m_shareScreenAction);
 
-#ifdef USE_PULSEAUDIO
-	// Windows asks in its own picker; on Linux the desktop portal's picker is the only one, and it knows
-	// nothing about audio, so the choice lives here. On by default, as the Windows picker's checkbox is.
-	m_shareScreenAudioAction = new QAction(tr("Include System &Audio in Screen Share"), this);
-	m_shareScreenAudioAction->setCheckable(true);
-	m_shareScreenAudioAction->setChecked(true);
-	m_shareScreenAudioAction->setStatusTip(
-		tr("Share what your computer is playing, apart from Mumble itself, along with your screen"));
-	m_shareScreenAudioAction->setVisible(PulseLoopbackSource::isAvailable());
-	qmSelf->addAction(m_shareScreenAudioAction);
-#endif
-
 	// Shown only where something can actually capture. On Linux that means a desktop portal is
 	// answering on the session bus - without one there is no way to ask for permission, so the control
 	// could only ever report its own unavailability. The action is built regardless, so every signal
@@ -947,6 +938,27 @@ void MainWindow::setupScreenShare() {
 		nativeScreenCaptureAvailable || !qEnvironmentVariableIsEmpty("MUMBLE_MOCK_SCREEN");
 
 	m_shareScreenAction->setVisible(screenCaptureAvailable);
+
+#ifdef Q_OS_WIN
+	// Testing only, gated like MUMBLE_MOCK_SCREEN: renders the share picker off screen, saves both of its
+	// tabs as MUMBLE_PICKER_SNAPSHOT-screens.png and -applications.png, and quits.
+	if (!qEnvironmentVariableIsEmpty("MUMBLE_PICKER_SNAPSHOT")) {
+		const QString base = qEnvironmentVariable("MUMBLE_PICKER_SNAPSHOT");
+		QTimer::singleShot(2000, this, [this, base]() {
+			auto *picker = new ScreenSharePickerDialog(this);
+			picker->setAttribute(Qt::WA_DontShowOnScreen);
+			picker->show();
+			QTimer::singleShot(3000, picker, [picker, base]() {
+				picker->grab().save(base + QLatin1String("-screens.png"));
+				picker->findChild< QTabWidget * >()->setCurrentIndex(1);
+				QTimer::singleShot(5000, picker, [picker, base]() {
+					picker->grab().save(base + QLatin1String("-applications.png"));
+					qApp->quit();
+				});
+			});
+		});
+	}
+#endif
 
 	// Directly after the camera action, so the two toggles that do the same kind of thing sit together.
 	const QList< QAction * > toolbarActions = qtIconToolbar->actions();
@@ -1001,12 +1013,13 @@ void MainWindow::setupScreenShare() {
 			return;
 		m_screenAwaitingFrame = false;
 		// Audio first, for the reason given where the Windows path does the same.
-		startScreenShareAudio(MumbleProto::VideoState_SourceKind_Display);
+		const auto sourceKind = static_cast< MumbleProto::VideoState_SourceKind >(m_screenSourceKind);
+		startScreenShareAudio(sourceKind);
 		MumbleProto::VideoState state;
 		state.set_stream_id(m_screenVideoBroadcaster->streamID());
 		state.set_active(true);
 		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
-		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
+		state.set_source_kind(sourceKind);
 		state.set_source_name(u8(m_screenVideoBroadcaster->describe()));
 		state.set_width(static_cast< unsigned int >(frame.width()));
 		state.set_height(static_cast< unsigned int >(frame.height()));
@@ -1241,6 +1254,11 @@ void MainWindow::toggleScreenShare(bool share) {
 		// the next timer tick.
 		m_screenAwaitingFrame = false;
 		m_screenSourceKind    = MumbleProto::VideoState_SourceKind_Display;
+		// No picker here: all system audio, as a real share's default - or, for testing the picker's "audio
+		// from" choice, only the application MUMBLE_MOCK_SCREEN_AUDIO_APP names.
+		m_shareAudioWanted          = true;
+		m_shareAudioApplicationKey  = qEnvironmentVariable("MUMBLE_MOCK_SCREEN_AUDIO_APP");
+		m_shareAudioApplicationName = m_shareAudioApplicationKey;
 
 		// Real system audio even with a synthetic picture: that is what lets a headless rig verify share
 		// audio end to end. Audio first, for the reason given on the Windows path below.
@@ -1264,12 +1282,27 @@ void MainWindow::toggleScreenShare(bool share) {
 
 #ifndef Q_OS_WIN
 #	ifdef USE_SCREEN_SHARE_PIPEWIRE
-	// No picker of our own: the desktop portal shows its own, and asking twice would be both redundant
-	// and misleading, since the portal's answer is the one that decides what is captured.
+	// Our picker first, with the same choices as on Windows; then the desktop's own, for which screen or
+	// window - only it may show them. See LinuxSharePickerDialog.
+	LinuxSharePickerDialog picker(this);
+
+	if (picker.exec() != QDialog::Accepted) {
+		m_shareScreenAction->setChecked(false);
+
+		return;
+	}
+
+	m_shareAudioWanted          = picker.includeAudio();
+	m_shareAudioApplicationKey  = picker.audioApplicationKey();
+	m_shareAudioApplicationName = picker.audioApplicationName();
+	m_screenSourceKind          = picker.sourceType() == PortalScreenCast::SourceType::Window
+							 ? MumbleProto::VideoState_SourceKind_Window
+							 : MumbleProto::VideoState_SourceKind_Display;
+
 	configureScreenBroadcaster(Global::get().s);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
-	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(PortalScreenCast::SourceType::Any, true);
+	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(picker.sourceType(), picker.showCursor());
 
 	if (!m_screenVideoBroadcaster->start(std::move(pipeWireSource))) {
 		Global::get().l->log(Log::Warning, tr("Could not start screen capture."));
@@ -1441,6 +1474,9 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 
 	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
 
+	// After an audio restart the old buffers are gone: drop them, and the next lines make a new one.
+	dropStaleScreenShareAudioBuffers();
+
 	auto it = m_screenShareAudioBuffers.find(key);
 
 	if (it == m_screenShareAudioBuffers.end()) {
@@ -1489,6 +1525,7 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		ScreenShareAudioEntry entry;
 		entry.token  = token;
 		entry.buffer = buffer;
+		entry.output = Global::get().ao;
 
 		it = m_screenShareAudioBuffers.emplace(key, entry).first;
 	}
@@ -1498,15 +1535,18 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 
 void MainWindow::startScreenShareAudio(int sourceKind) {
 #ifdef USE_PULSEAUDIO
-	if (!m_screenAudioBroadcaster || !m_shareScreenAudioAction || !m_shareScreenAudioAction->isVisible()
-		|| !m_shareScreenAudioAction->isChecked() || !Global::get().sh || !Global::get().sh->isRunning()) {
+	if (!m_screenAudioBroadcaster || !m_shareAudioWanted || !PulseLoopbackSource::isAvailable() || !Global::get().sh
+		|| !Global::get().sh->isRunning()) {
 		return;
 	}
 
 	m_screenAudioBroadcaster->configure(96);
 	const std::uint32_t audioStreamID = allocateStreamID();
 
-	if (!m_screenAudioBroadcaster->start(std::make_unique< PulseLoopbackSource >(), audioStreamID)) {
+	auto audioSource = std::make_unique< PulseLoopbackSource >();
+	audioSource->setOnlyApplication(m_shareAudioApplicationKey, m_shareAudioApplicationName);
+
+	if (!m_screenAudioBroadcaster->start(std::move(audioSource), audioStreamID)) {
 		// The picture goes ahead without it, as on Windows.
 		Global::get().l->log(Log::Warning, tr("Could not capture system audio; sharing the screen without it."));
 		return;
@@ -1574,8 +1614,18 @@ void MainWindow::forgetScreenAudioSubscription(unsigned int senderSession, std::
 	}
 }
 
+void MainWindow::dropStaleScreenShareAudioBuffers() {
+	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
+		// Compared through lock(), not by address: a new AudioOutput can be allocated where the old one was.
+		const bool current = Global::get().ao && it->second.output.lock() == Global::get().ao;
+		it                 = current ? std::next(it) : m_screenShareAudioBuffers.erase(it);
+	}
+}
+
 void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID) {
 	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+
+	dropStaleScreenShareAudioBuffers();
 
 	const auto it = m_screenShareAudioBuffers.find(key);
 
@@ -1599,6 +1649,8 @@ void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSessi
 	for (auto it = m_lastKeyframeRequestMsec.begin(); it != m_lastKeyframeRequestMsec.end();) {
 		it = ((it->first >> 32) == senderSession) ? m_lastKeyframeRequestMsec.erase(it) : std::next(it);
 	}
+
+	dropStaleScreenShareAudioBuffers();
 
 	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
 		if ((it->first >> 32) == (hi >> 32)) {
@@ -1659,6 +1711,8 @@ void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float
 	// a time per the picker's own design - so matching on the sender half of the key alone, rather than
 	// needing the exact stream id VideoGrid's slider does not itself know, is correct here, not just
 	// convenient.
+	dropStaleScreenShareAudioBuffers();
+
 	for (auto &entry : m_screenShareAudioBuffers) {
 		if ((entry.first >> 32) == senderSession && entry.second.buffer) {
 			entry.second.buffer->setVolume(multiplier);

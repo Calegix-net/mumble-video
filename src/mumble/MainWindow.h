@@ -287,10 +287,17 @@ protected:
 	/// own surfaces.
 	struct ScreenShareAudioEntry {
 		AudioOutputToken token;
+		/// Owned by the AudioOutput below, not by this entry.
 		AudioOutputScreenShare *buffer = nullptr;
+		/// The audio output the buffer was handed to. Opening Settings or the Audio Wizard restarts audio,
+		/// and the AudioOutput that goes away deletes every buffer it holds - so an entry whose output is no
+		/// longer Global::get().ao points at freed memory and must be dropped, never used.
+		std::weak_ptr< AudioOutput > output;
 	};
 
 	std::unordered_map< std::uint64_t, ScreenShareAudioEntry > m_screenShareAudioBuffers;
+	/// Forgets the entries whose AudioOutput has been replaced; their buffers are already gone.
+	void dropStaleScreenShareAudioBuffers();
 
 	/// The volume each sender's screen-share audio should play at, as last set from that sender's tile.
 	/// Kept apart from the buffers because a buffer is only created when the first audio packet arrives,
@@ -302,11 +309,15 @@ protected:
 	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);
 	/// Subscribes to a sender's screen-share audio exactly while one of their screen shares is watched.
 	void syncScreenShareAudioSubscription(unsigned int senderSession);
-	/// Linux: starts and announces the share's system audio if m_shareScreenAudioAction asks for it.
+	/// Linux: starts and announces the share's audio if the share picker asked for it.
 	/// Must run before the picture is announced. @p sourceKind is a MumbleProto::VideoState::SourceKind.
 	void startScreenShareAudio(int sourceKind);
-	/// Linux only (the Windows picker asks instead); null elsewhere.
-	QAction *m_shareScreenAudioAction = nullptr;
+	/// Linux: the share picker's audio choice for the share being started (see LinuxSharePickerDialog).
+	/// On by default, so a headless rig's mock share still carries real audio.
+	bool m_shareAudioWanted = true;
+	/// Linux: share only this application's sound; empty for everything but Mumble.
+	QString m_shareAudioApplicationKey;
+	QString m_shareAudioApplicationName;
 	/// Set when a connection dropped while sharing and a reconnect is pending: the shares are kept running
 	/// and reannounceSharesAfterReconnect() announces them again once the new connection is synchronised.
 	bool m_sharesSurvivingReconnect = false;

@@ -69,7 +69,115 @@ bool PulseLoopbackSource::isAvailable() {
 }
 
 QString PulseLoopbackSource::describe() const {
-	return tr("System audio");
+	return m_onlyApplicationKey.isEmpty() ? tr("System audio") : tr("Audio of %1").arg(m_onlyApplicationName);
+}
+
+void PulseLoopbackSource::setOnlyApplication(const QString &key, const QString &name) {
+	m_onlyApplicationKey  = key;
+	m_onlyApplicationName = name.isEmpty() ? key : name;
+}
+
+QList< PulseLoopbackSource::Application > PulseLoopbackSource::playingApplications(int timeoutMsec) {
+	QList< Application > applications;
+
+	PulseAudio pa;
+	if (!pa.m_ok) {
+		return applications;
+	}
+
+	pa_threaded_mainloop *mainloop = pa.threaded_mainloop_new();
+	if (!mainloop) {
+		return applications;
+	}
+
+	struct Query {
+		PulseAudio *pa = nullptr;
+		bool requested = false;
+		bool done      = false;
+		QList< Application > found;
+	} query;
+	query.pa = &pa;
+
+	pa_proplist *props = pa.proplist_new();
+	pa.proplist_sets(props, PA_PROP_APPLICATION_NAME, "Mumble");
+	pa_context *context =
+		pa.context_new_with_proplist(pa.threaded_mainloop_get_api(mainloop), "Mumble share picker", props);
+	pa.proplist_free(props);
+
+	if (!context) {
+		pa.threaded_mainloop_free(mainloop);
+		return applications;
+	}
+
+	if (pa.context_connect(context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0
+		|| pa.threaded_mainloop_start(mainloop) < 0) {
+		pa.context_unref(context);
+		pa.threaded_mainloop_free(mainloop);
+		return applications;
+	}
+
+	const auto callback = [](pa_context *, const pa_sink_input_info *info, int eol, void *userdata) {
+		auto *q = static_cast< Query * >(userdata);
+		if (eol) {
+			q->done = true;
+			return;
+		}
+		if (!info || isOwnStream(*q->pa, info)) {
+			return;
+		}
+
+		const QString key = applicationKey(*q->pa, info);
+		if (key.isEmpty()) {
+			return;
+		}
+		for (const Application &known : q->found) {
+			if (known.key == key) {
+				return;
+			}
+		}
+
+		const char *name = q->pa->proplist_gets(info->proplist, PA_PROP_APPLICATION_NAME);
+		q->found.push_back({ key, name ? QString::fromUtf8(name) : key });
+	};
+
+	// Polled rather than waited on: PulseAudio's wrapper does not expose the mainloop's wait and signal,
+	// and this runs once, when the picker opens.
+	const std::uint64_t deadline = monotonicUsec() + static_cast< std::uint64_t >(std::max(timeoutMsec, 0)) * 1000;
+	bool finished                = false;
+	while (!finished && monotonicUsec() < deadline) {
+		pa.threaded_mainloop_lock(mainloop);
+		const pa_context_state_t state = pa.context_get_state(context);
+		if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
+			finished = true;
+		} else if (state == PA_CONTEXT_READY && !query.requested) {
+			query.requested = true;
+			if (pa_operation *op = pa.context_get_sink_input_info_list(context, callback, &query)) {
+				pa.operation_unref(op);
+			} else {
+				finished = true;
+			}
+		}
+		finished = finished || query.done;
+		pa.threaded_mainloop_unlock(mainloop);
+
+		if (!finished) {
+			usleep(5000);
+		}
+	}
+
+	pa.threaded_mainloop_lock(mainloop);
+	pa.context_disconnect(context);
+	pa.context_unref(context);
+	applications = query.found;
+	pa.threaded_mainloop_unlock(mainloop);
+	pa.threaded_mainloop_stop(mainloop);
+	pa.threaded_mainloop_free(mainloop);
+
+	std::sort(applications.begin(), applications.end(), [](const Application &a, const Application &b) {
+		return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+	});
+
+	return applications;
 }
 
 bool PulseLoopbackSource::start() {
@@ -239,6 +347,27 @@ void PulseLoopbackSource::sinkInfoCallback(pa_context *, const pa_sink_info *inf
 }
 
 bool PulseLoopbackSource::isOwnStream(const pa_sink_input_info *info) const {
+	return isOwnStream(*m_pa, info);
+}
+
+QString PulseLoopbackSource::applicationKey(PulseAudio &pa, const pa_sink_input_info *info) {
+	if (const char *binary = pa.proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_BINARY)) {
+		return QString::fromUtf8(binary);
+	}
+	if (const char *name = pa.proplist_gets(info->proplist, PA_PROP_APPLICATION_NAME)) {
+		return QString::fromUtf8(name);
+	}
+	return QString();
+}
+
+bool PulseLoopbackSource::isWanted(const pa_sink_input_info *info) const {
+	if (isOwnStream(info)) {
+		return false;
+	}
+	return m_onlyApplicationKey.isEmpty() || applicationKey(*m_pa, info) == m_onlyApplicationKey;
+}
+
+bool PulseLoopbackSource::isOwnStream(PulseAudio &pa, const pa_sink_input_info *info) {
 	if (info->name) {
 		for (const char *own : OWN_STREAM_NAMES) {
 			if (std::strcmp(info->name, own) == 0) {
@@ -247,13 +376,13 @@ bool PulseLoopbackSource::isOwnStream(const pa_sink_input_info *info) const {
 		}
 	}
 
-	if (const char *pid = m_pa->proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_ID)) {
+	if (const char *pid = pa.proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_ID)) {
 		if (std::strtol(pid, nullptr, 10) == static_cast< long >(getpid())) {
 			return true;
 		}
 	}
 
-	if (const char *app = m_pa->proplist_gets(info->proplist, PA_PROP_APPLICATION_NAME)) {
+	if (const char *app = pa.proplist_gets(info->proplist, PA_PROP_APPLICATION_NAME)) {
 		if (std::strcmp(app, "Mumble") == 0) {
 			return true;
 		}
@@ -266,7 +395,7 @@ void PulseLoopbackSource::sinkInputInfoCallback(pa_context *, const pa_sink_inpu
 	auto *self = static_cast< PulseLoopbackSource * >(userdata);
 
 	if (!eol) {
-		if (info && !self->isOwnStream(info)) {
+		if (info && self->isWanted(info)) {
 			self->m_seenSinkInputs[info->index] = info->sink;
 		}
 		return;
