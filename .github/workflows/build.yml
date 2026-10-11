@@ -54,14 +54,24 @@ jobs:
           cache-from: type=gha,scope=linux-image
           cache-to: type=gha,scope=linux-image,mode=max
 
+      # What the build reports itself as: the release on a tag, the last release plus -dev and the commit
+      # otherwise. Worked out here because the checkout is shallow and only the runner can ask the remote
+      # for tags.
+      - name: Release version
+        run: |
+          release_version="$(bash scripts/installer-version.sh --release)"
+          echo "Release version: ${release_version}"
+          echo "RELEASE_VERSION=${release_version}" >> "$GITHUB_ENV"
+
       - name: Configure, build and test
         run: |
           # Pre-created so docker does not create them root-owned: the zip step below runs as the
           # unprivileged runner user and must be able to write here.
           mkdir -p build out
-          docker run --rm -v "$PWD":/src -v "$PWD/build":/build mumble-build bash -c '
+          docker run --rm -v "$PWD":/src -v "$PWD/build":/build -e RELEASE_VERSION mumble-build bash -c '
             set -e
-            cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF
+            cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF \
+              -Drelease-version="${RELEASE_VERSION}"
             cmake --build /build -j"$(nproc)"
             cd /build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure'
 
@@ -142,18 +152,24 @@ jobs:
           cache-from: type=gha,scope=windows-image
           cache-to: type=gha,scope=windows-image,mode=max
 
+      # Before the build, which reports the display version as its own (see the linux job).
+      - name: Installer version
+        run: |
+          read -r msi_version display_version < <(bash scripts/installer-version.sh)
+          echo "Installer version: MSI ${msi_version}, shown as ${display_version}"
+          echo "MSI_VERSION=${msi_version}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${display_version}" >> "$GITHUB_ENV"
+
       - name: Cross-compile
         run: |
           mkdir -p build-win out
-          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build mumble-build-windows \
+          docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -e RELEASE_VERSION mumble-build-windows \
             bash /src/scripts/build-windows.sh
 
       - name: Bundle and build the installers
         run: |
-          read -r msi_version display_version < <(bash scripts/installer-version.sh)
-          echo "Installer version: MSI ${msi_version}, shown as ${display_version}"
           docker run --rm -v "$PWD":/src -v "$PWD/build-win":/build -v "$PWD/out":/out \
-            -e MSI_VERSION="${msi_version}" -e DISPLAY_VERSION="${display_version}" mumble-build-windows bash -c '
+            -e MSI_VERSION -e DISPLAY_VERSION="${RELEASE_VERSION}" mumble-build-windows bash -c '
             set -e
             bash /src/scripts/bundle-windows.sh /build /out/mumble-windows
             bash /src/scripts/build-msi.sh /out/mumble-windows /out/mumble-video-x64.msi "${MSI_VERSION}"
@@ -189,6 +205,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # See the linux job.
+      - name: Release version
+        run: |
+          release_version="$(bash scripts/installer-version.sh --release)"
+          echo "Release version: ${release_version}"
+          echo "RELEASE_VERSION=${release_version}" >> "$GITHUB_ENV"
+
       - name: Build the flatpak build image
         uses: docker/build-push-action@v6
         with:
@@ -212,7 +235,7 @@ jobs:
           # --privileged because flatpak-builder isolates each module with bubblewrap, which cannot
           # set up its namespaces in a default container.
           docker run --rm --privileged \
-            -v "$PWD":/src -v "$PWD/flatpak-state":/state -v "$PWD/out":/out \
+            -v "$PWD":/src -v "$PWD/flatpak-state":/state -v "$PWD/out":/out -e RELEASE_VERSION \
             mumble-flatpak-build \
             bash /src/scripts/build-flatpak.sh /src /state /out/mumble-video.flatpak
           # The container writes as root; the cache and artifact steps that follow run as the runner

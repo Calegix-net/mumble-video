@@ -34,8 +34,8 @@ VS_VERSION_INFO VERSIONINFO
 			BEGIN
 				VALUE "CompanyName", "The Mumble Developers"
 				VALUE "FileDescription", "Mumble - Low-latency VoIP client"
-				VALUE "FileVersion", "@PROJECT_VERSION@"
-				VALUE "ProductVersion", "@PROJECT_VERSION@"
+				VALUE "FileVersion", "@MUMBLE_RELEASE_VERSION@"
+				VALUE "ProductVersion", "@MUMBLE_RELEASE_VERSION@"
 				VALUE "LegalCopyright", "Copyright (c) 2005-@MUMBLE_BUILD_YEAR@ The Mumble Developers"
 				VALUE "OriginalFilename", "mumble.exe"
 				VALUE "ProductName", "Mumble"
