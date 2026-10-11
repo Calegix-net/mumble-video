@@ -15,6 +15,7 @@
 #	include "ManualPlugin.h"
 #endif
 
+#include <cstdint>
 #include <memory>
 
 #ifndef SPEAKER_FRONT_LEFT
@@ -43,7 +44,9 @@
 class AudioOutput;
 class ClientUser;
 class AudioOutputBuffer;
+class AudioOutputScreenShare;
 class AudioOutputToken;
+class QByteArray;
 
 using AudioOutputPtr = std::shared_ptr< AudioOutput >;
 
@@ -81,6 +84,8 @@ private:
 	/// Used when panning stereo stream w.r.t. each speaker.
 	float *fStereoPanningFactor = nullptr;
 	void invalidateBuffer(const void *);
+	/// The screen-share audio buffer for (sender, streamID), or nullptr. qrwlOutputs must be held.
+	AudioOutputScreenShare *findScreenShare(const ClientUser *sender, unsigned int streamID) const;
 
 private slots:
 	void removeBuffer(const void *, bool acquireWriteLock = true);
@@ -126,16 +131,30 @@ public:
 	AudioOutputToken playSample(const QString &filename, float volume, bool loop = false);
 
 	/**
-	 * Adds an already-constructed AudioOutputBuffer to the mixer, associated with sender.
+	 * Feeds one Opus packet of a screen share's audio to the mixer.
 	 *
-	 * For sources that are neither the ordinary one-voice-per-user path (addFrameToBuffer, which
-	 * replaces whatever buffer a sender already has) nor a positionless UI sound (playSample, which
-	 * inserts under a null sender): screen-share audio is the first such case, keyed on its sender so a
-	 * future per-user volume/mute control could find it, but inserted alongside - not in place of - that
-	 * sender's ordinary voice buffer, since the two coexist and must not be confused for each other.
-	 * Ownership of buffer passes to the mixer; the returned token is how the caller later removes it.
+	 * Kept the way voice is kept (see addFrameToBuffer): the buffer for (sender, streamID) is looked up
+	 * under qrwlOutputs and created here if it is missing, and nobody outside this class holds a pointer to
+	 * it. It lives under its sender, next to that sender's voice buffer, so the local-mute gate in mix()
+	 * applies to it. The mixer may delete it at any time - removeUser(), wipe() when audio restarts - and
+	 * the next packet then starts a new one.
+	 *
+	 * Packets arriving before the mixer has started are dropped: a buffer created then could not know
+	 * whether to resample.
+	 *
+	 * @param volume Applied on every packet, so a buffer created again after a restart plays at the volume
+	 * the listener chose, not the default.
+	 * @returns Whether this packet created a new buffer for the stream.
 	 */
-	AudioOutputToken addExternalBuffer(const ClientUser *sender, AudioOutputBuffer *buffer);
+	bool addScreenShareUnit(const ClientUser *sender, unsigned int streamID, std::uint64_t sequence,
+							const QByteArray &packet, float volume);
+	/// Removes the buffer for this one screen-share audio stream, if there is one.
+	void removeScreenShare(const ClientUser *sender, unsigned int streamID);
+	/// Removes every screen-share audio buffer of this sender, leaving their voice alone.
+	void removeScreenShares(const ClientUser *sender);
+	/// Sets the volume of every screen-share audio buffer this sender has right now. Later buffers get theirs
+	/// from addScreenShareUnit().
+	void setScreenShareVolume(const ClientUser *sender, float volume);
 	void run() Q_DECL_OVERRIDE = 0;
 	virtual bool isAlive() const;
 	const float *getSpeakerPos(unsigned int &nspeakers);

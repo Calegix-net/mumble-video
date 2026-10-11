@@ -77,7 +77,6 @@ public:
 };
 
 
-class AudioOutputScreenShare;
 class ScreenAudioBroadcaster;
 class VideoBroadcaster;
 class VideoGrid;
@@ -280,32 +279,15 @@ protected:
 	/// Creates the share-screen action and its wiring.
 	void setupScreenShare();
 
-	/// Received screen-share audio, one entry per (sender, stream) currently playing. `buffer` is a
-	/// non-owning pointer used only to call addOpusPacket() - actual ownership belongs to AudioOutput
-	/// from the moment addExternalBuffer() hands it over, which is also why removal has to go through
-	/// `token` (AudioOutput::invalidateToken), not a raw delete. Keyed the same way VideoGrid keys its
-	/// own surfaces.
-	struct ScreenShareAudioEntry {
-		AudioOutputToken token;
-		/// Owned by the AudioOutput below, not by this entry.
-		AudioOutputScreenShare *buffer = nullptr;
-		/// The audio output the buffer was handed to. Opening Settings or the Audio Wizard restarts audio,
-		/// and the AudioOutput that goes away deletes every buffer it holds - so an entry whose output is no
-		/// longer Global::get().ao points at freed memory and must be dropped, never used.
-		std::weak_ptr< AudioOutput > output;
-	};
-
-	std::unordered_map< std::uint64_t, ScreenShareAudioEntry > m_screenShareAudioBuffers;
-	/// Forgets the entries whose AudioOutput has been replaced; their buffers are already gone.
-	void dropStaleScreenShareAudioBuffers();
-
 	/// The volume each sender's screen-share audio should play at, as last set from that sender's tile.
-	/// Kept apart from the buffers because a buffer is only created when the first audio packet arrives,
-	/// which can be after the slider has already been moved.
+	/// Handed to AudioOutput with every packet, because AudioOutput owns the buffers and creates them on the
+	/// first packet - after the slider may have moved, and again whenever audio restarts. This class keeps
+	/// only these preferences, never a pointer to a buffer.
 	std::unordered_map< unsigned int, float > m_screenShareVolumes;
 
 	/// No-op if (senderSession, streamID) is not currently a screen-share audio stream - callers do not
-	/// need to know whether a given ending stream was one before asking this to check.
+	/// need to know whether a given ending stream was one before asking this to check. Goes through
+	/// AudioOutput::removeScreenShare(); there is no buffer pointer here to free.
 	void removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID);
 	/// Subscribes to a sender's screen-share audio exactly while one of their screen shares is watched.
 	void syncScreenShareAudioSubscription(unsigned int senderSession);
@@ -330,7 +312,7 @@ protected:
 	std::vector< std::pair< QString, int > > m_resumeWatchAfterReconnect;
 	qint64 m_resumeWatchDeadlineMsec = 0;
 	static QString videoSenderIdentity(const ClientUser *user);
-	/// Screen-share audio streams this client is subscribed to, keyed like m_screenShareAudioBuffers - so
+	/// Screen-share audio streams this client is subscribed to, keyed by screenShareAudioKey() - so
 	/// syncScreenShareAudioSubscription() only ever sends a change.
 	std::unordered_map< std::uint64_t, bool > m_subscribedScreenAudio;
 	/// Unsubscribes this client sent for screen-share audio and the server has not echoed yet. The echo is
@@ -366,7 +348,7 @@ protected:
 	void refreshOwnViewers();
 	/// Own stream id -> (viewer session -> volume percent, -1 for none).
 	std::unordered_map< unsigned int, std::map< unsigned int, int > > m_ownStreamViewers;
-	/// Viewer side: the streams this client reported watching, keyed like m_screenShareAudioBuffers, so a
+	/// Viewer side: the streams this client reported watching, keyed by screenShareAudioKey(), so a
 	/// volume change can be reported to the senders it concerns.
 	std::set< std::uint64_t > m_reportedWatching;
 	/// Senders whose volume changed since the last report: a slider drag is reported once it settles, not
@@ -379,7 +361,7 @@ protected:
 	}
 
 	/// When a keyframe was last requested from each (sender, stream), so a stuck decoder asks at most
-	/// once per interval rather than on every failing unit. Keyed like m_screenShareAudioBuffers.
+	/// once per interval rather than on every failing unit. Keyed by screenShareAudioKey().
 	std::unordered_map< std::uint64_t, qint64 > m_lastKeyframeRequestMsec;
 	/// A resize handle in the bottom-right corner. Wayland compositors draw no server-side frame for
 	/// Qt windows (GNOME never does), leaving only Qt's own thin client-side border to grab, which in
@@ -413,8 +395,8 @@ public slots:
 	void onVideoNackReceived(const QByteArray &serializedNack);
 
 	/// One Opus packet belonging to some sender's screen-share audio, forwarded from
-	/// VideoStreamDispatcher::opusUnitReceived. Finds or creates that (sender, stream)'s
-	/// AudioOutputScreenShare and feeds it.
+	/// VideoStreamDispatcher::opusUnitReceived. Hands it to AudioOutput::addScreenShareUnit(), which finds
+	/// or creates that (sender, stream)'s AudioOutputScreenShare and feeds it.
 	void onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 sequence,
 									   const QByteArray &opusPacket);
 

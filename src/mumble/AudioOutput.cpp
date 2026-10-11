@@ -7,6 +7,7 @@
 
 #include "AudioInput.h"
 #include "AudioOutputSample.h"
+#include "AudioOutputScreenShare.h"
 #include "AudioOutputSpeech.h"
 #include "Channel.h"
 #include "ChannelListenerManager.h"
@@ -185,7 +186,7 @@ void AudioOutput::addFrameToBuffer(ClientUser *sender, const Mumble::Protocol::A
 		// removed from this map and deleted.
 		// Searched among every buffer under this sender, not just the most recently inserted one that
 		// QMultiHash::value() hands back. A sender who is also sharing a screen with audio holds two
-		// buffers under one key - their voice and that screen-share audio (see addExternalBuffer) - and
+		// buffers under one key - their voice and that screen-share audio (see addScreenShareUnit) - and
 		// whichever was inserted last is what value() returns. When that was the screen-share buffer, the
 		// cast below came back null, a "new" speech buffer was created, and replace() below overwrote the
 		// most recent entry - the screen-share buffer - with it: the share's audio silently dropped out of
@@ -283,7 +284,7 @@ void AudioOutput::invalidateBuffer(const void *buffer) {
 
 void AudioOutput::removeUser(const ClientUser *user) {
 	// Every buffer under the user, not only the most recently inserted one: a user sharing a screen
-	// with audio holds two (see addExternalBuffer), and the one value() did not return was left in the
+	// with audio holds two (see addScreenShareUnit), and the one value() did not return was left in the
 	// mixer, attached to a user that no longer exists.
 	QList< AudioOutputBuffer * > buffers;
 	{
@@ -329,19 +330,83 @@ AudioOutputToken AudioOutput::playSample(const QString &filename, float volume, 
 	return AudioOutputToken(sample);
 }
 
-AudioOutputToken AudioOutput::addExternalBuffer(const ClientUser *sender, AudioOutputBuffer *buffer) {
-	if (!buffer) {
-		return AudioOutputToken();
+AudioOutputScreenShare *AudioOutput::findScreenShare(const ClientUser *sender, unsigned int streamID) const {
+	for (auto iter = qmOutputs.constFind(sender); iter != qmOutputs.constEnd() && iter.key() == sender; ++iter) {
+		auto *share = qobject_cast< AudioOutputScreenShare * >(iter.value());
+
+		if (share && share->streamID() == streamID) {
+			return share;
+		}
 	}
 
-	// insert(), not the single-entry replace() addFrameToBuffer uses for voice: a sender's ordinary voice
-	// buffer, if they have one, must keep playing exactly as it does today. QMultiHash allows any number
-	// of values under one key for precisely this reason - playSample's own non-speech sounds already rely
-	// on it, just under a null key instead of a real sender.
-	QWriteLocker locker(&qrwlOutputs);
-	qmOutputs.insert(sender, buffer);
+	return nullptr;
+}
 
-	return AudioOutputToken(buffer);
+bool AudioOutput::addScreenShareUnit(const ClientUser *sender, unsigned int streamID, std::uint64_t sequence,
+									 const QByteArray &packet, float volume) {
+	{
+		// A read lock is enough to feed a buffer that already exists, as in addFrameToBuffer: everything that
+		// deletes a buffer takes the write lock first, so it cannot go away inside addOpusPacket(). The mixer
+		// reads at the same time; the buffer's own mutex covers what the two threads share.
+		QReadLocker lock(&qrwlOutputs);
+
+		if (AudioOutputScreenShare *share = findScreenShare(sender, streamID)) {
+			share->setVolume(volume);
+			share->addOpusPacket(sequence, packet);
+
+			return false;
+		}
+	}
+
+	if (!iMixerFreq) {
+		return false;
+	}
+
+	QWriteLocker lock(&qrwlOutputs);
+
+	// Looked up again: the lock was let go in between.
+	AudioOutputScreenShare *share = findScreenShare(sender, streamID);
+	const bool created            = !share;
+
+	if (created) {
+		share = new AudioOutputScreenShare(streamID, iMixerFreq);
+		// insert(), not replace(), so the sender's voice buffer stays where it is.
+		qmOutputs.insert(sender, share);
+	}
+
+	share->setVolume(volume);
+	share->addOpusPacket(sequence, packet);
+
+	return created;
+}
+
+void AudioOutput::removeScreenShare(const ClientUser *sender, unsigned int streamID) {
+	QWriteLocker lock(&qrwlOutputs);
+
+	removeBuffer(findScreenShare(sender, streamID), false);
+}
+
+void AudioOutput::removeScreenShares(const ClientUser *sender) {
+	QWriteLocker lock(&qrwlOutputs);
+
+	for (auto iter = qmOutputs.find(sender); iter != qmOutputs.end() && iter.key() == sender;) {
+		if (qobject_cast< AudioOutputScreenShare * >(iter.value())) {
+			delete iter.value();
+			iter = qmOutputs.erase(iter);
+		} else {
+			++iter;
+		}
+	}
+}
+
+void AudioOutput::setScreenShareVolume(const ClientUser *sender, float volume) {
+	QReadLocker lock(&qrwlOutputs);
+
+	for (auto iter = qmOutputs.constFind(sender); iter != qmOutputs.constEnd() && iter.key() == sender; ++iter) {
+		if (auto *share = qobject_cast< AudioOutputScreenShare * >(iter.value())) {
+			share->setVolume(volume);
+		}
+	}
 }
 
 void AudioOutput::initializeMixer(const unsigned int *chanmasks, bool forceheadphone) {

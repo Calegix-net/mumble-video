@@ -26,8 +26,8 @@ constexpr int MAX_DECODED_FRAMES = 5760;
 
 } // namespace
 
-AudioOutputScreenShare::AudioOutputScreenShare(unsigned int mixerFreq)
-	: m_mixerFreq(mixerFreq ? mixerFreq : SOURCE_SAMPLE_RATE) {
+AudioOutputScreenShare::AudioOutputScreenShare(unsigned int streamID, unsigned int mixerFreq)
+	: m_streamID(streamID), m_mixerFreq(mixerFreq ? mixerFreq : SOURCE_SAMPLE_RATE) {
 	bStereo     = true;
 	iBufferSize = 0;
 
