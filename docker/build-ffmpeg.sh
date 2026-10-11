@@ -22,7 +22,7 @@ AMF_VERSION=v1.4.36
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-git -c advice.detachedHead=false clone -q --depth 1 --branch "${FFMPEG_VERSION}" https://git.ffmpeg.org/ffmpeg.git "${WORK}/ffmpeg"
+git -c advice.detachedHead=false clone -q --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK}/ffmpeg"
 git -c advice.detachedHead=false clone -q --depth 1 --branch "${NV_CODEC_HEADERS_VERSION}" \
     https://github.com/FFmpeg/nv-codec-headers.git "${WORK}/nv-codec-headers"
 make -C "${WORK}/nv-codec-headers" PREFIX="${PREFIX}" install >/dev/null
