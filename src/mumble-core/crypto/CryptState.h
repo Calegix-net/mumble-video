@@ -6,8 +6,6 @@
 #ifndef MUMBLE_CRYPTSTATE_H_
 #define MUMBLE_CRYPTSTATE_H_
 
-#include <QtGlobal>
-
 #include "Timer.h"
 
 #include <chrono>
@@ -28,7 +26,8 @@ struct PacketStatsSnapshot {
 
 class CryptState {
 private:
-	Q_DISABLE_COPY(CryptState)
+	CryptState(const CryptState &)            = delete;
+	CryptState &operator=(const CryptState &) = delete;
 
 	const std::chrono::seconds m_rollingScanInterval                             = std::chrono::seconds(5);
 	std::chrono::time_point< std::chrono::steady_clock > m_rollingLastSampleTime = {};

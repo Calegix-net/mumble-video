@@ -3,6 +3,7 @@
 // that can be found in the LICENSE file at the root of the
 // Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
+#include "CoreLogBridge.h"
 #include "DBWrapper.h"
 #include "EnvUtils.h"
 #include "ExceptionUtils.h"
@@ -370,6 +371,7 @@ int main(int argc, char **argv) {
 		// Initialize meta parameter
 		Meta::mp = std::make_unique< MetaParams >();
 
+		installCoreLogHandler();
 		MumbleSSL::initialize();
 
 		qInstallMessageHandler(murmurMessageOutputWithContext);

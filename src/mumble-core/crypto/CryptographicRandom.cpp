@@ -7,7 +7,7 @@
 
 #include "arc4random_uniform.h"
 
-#include <QtCore/QDebug>
+#include "CoreLog.h"
 
 #include <openssl/rand.h>
 
@@ -16,7 +16,7 @@ void CryptographicRandom::fillBuffer(void *buf, int numBytes) {
 	// fatal errors in the program. Abort the program if such
 	// a value is passed to fillBuffer().
 	if (numBytes <= 0) {
-		qFatal("CryptographicRandom::fillBuffer(): numBytes is <= 0");
+		Mumble::Core::logFatal("CryptographicRandom::fillBuffer(): numBytes is <= 0");
 	}
 
 	// RAND_bytes only returns an error if the entropy pool has not yet been sufficiently filled,
@@ -25,8 +25,9 @@ void CryptographicRandom::fillBuffer(void *buf, int numBytes) {
 	// If OpenSSL cannot acquire enough random data to seed its CSPRNG at the time Mumble and Murmur
 	// are running, there is not much we can do about it other than aborting the program.
 	if (RAND_bytes(reinterpret_cast< unsigned char * >(buf), numBytes) != 1) {
-		qFatal("CryptographicRandom::fillBuffer(): internal error in OpenSSL's RAND_bytes or entropy pool not yet "
-			   "filled.");
+		Mumble::Core::logFatal(
+			"CryptographicRandom::fillBuffer(): internal error in OpenSSL's RAND_bytes or entropy pool not yet "
+			"filled.");
 	}
 }
 

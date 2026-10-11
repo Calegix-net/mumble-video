@@ -20,18 +20,18 @@ public:
 	CryptStateOCB2();
 	~CryptStateOCB2() noexcept override;
 
-	virtual bool isValid() const Q_DECL_OVERRIDE;
-	virtual void genKey() Q_DECL_OVERRIDE;
-	virtual bool setKey(const std::string &rkey, const std::string &eiv, const std::string &div) Q_DECL_OVERRIDE;
-	virtual bool setRawKey(const std::string &rkey) Q_DECL_OVERRIDE;
-	virtual bool setEncryptIV(const std::string &iv) Q_DECL_OVERRIDE;
-	virtual bool setDecryptIV(const std::string &iv) Q_DECL_OVERRIDE;
-	virtual std::string getRawKey() Q_DECL_OVERRIDE;
-	virtual std::string getEncryptIV() Q_DECL_OVERRIDE;
-	virtual std::string getDecryptIV() Q_DECL_OVERRIDE;
+	virtual bool isValid() const override;
+	virtual void genKey() override;
+	virtual bool setKey(const std::string &rkey, const std::string &eiv, const std::string &div) override;
+	virtual bool setRawKey(const std::string &rkey) override;
+	virtual bool setEncryptIV(const std::string &iv) override;
+	virtual bool setDecryptIV(const std::string &iv) override;
+	virtual std::string getRawKey() override;
+	virtual std::string getEncryptIV() override;
+	virtual std::string getDecryptIV() override;
 
-	virtual bool decrypt(const unsigned char *source, unsigned char *dst, unsigned int crypted_length) Q_DECL_OVERRIDE;
-	virtual bool encrypt(const unsigned char *source, unsigned char *dst, unsigned int plain_length) Q_DECL_OVERRIDE;
+	virtual bool decrypt(const unsigned char *source, unsigned char *dst, unsigned int crypted_length) override;
+	virtual bool encrypt(const unsigned char *source, unsigned char *dst, unsigned int plain_length) override;
 
 	bool ocb_encrypt(const unsigned char *plain, unsigned char *encrypted, unsigned int len, const unsigned char *nonce,
 					 unsigned char *tag, bool modifyPlainOnXEXStarAttack = true);

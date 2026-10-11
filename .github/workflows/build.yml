@@ -77,6 +77,18 @@ jobs:
             cmake --build /build -j"$(nproc)"
             cd /build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure'
 
+      # The protocol core on its own, the way a non-Qt host (the Android app) builds it. Nothing here
+      # finds Qt, so this is what proves the core does not need it. Built outside /build so the bundle
+      # steps never see it.
+      - name: Build and test the protocol core without Qt
+        run: |
+          docker run --rm -v "$PWD":/src mumble-build bash -c '
+            set -e
+            cmake -S /src/src/mumble-core -B /tmp/core -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wsign-conversion -Werror"
+            cmake --build /tmp/core -j"$(nproc)"
+            cd /tmp/core && ctest --output-on-failure'
+
       - name: Bundle
         run: |
           docker run --rm -v "$PWD":/src -v "$PWD/build":/build -v "$PWD/out":/out mumble-build \
