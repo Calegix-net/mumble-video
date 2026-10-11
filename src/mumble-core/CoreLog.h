@@ -10,7 +10,11 @@
 // desktop client and server point at Qt's message handling (see CoreLogBridge in shared) and another
 // host can point at its own log. Until one is set, messages go to stderr.
 
-#if defined(__GNUC__) || defined(__clang__)
+// MinGW's GCC checks plain "printf" against the Microsoft runtime, which has no %zu. The messages are
+// formatted by the C++ library's vsnprintf, which on MinGW is the GNU-compatible one.
+#if defined(__MINGW32__) && !defined(__clang__)
+#	define MUMBLE_CORE_PRINTF_FORMAT(fmt, args) __attribute__((format(gnu_printf, fmt, args)))
+#elif defined(__GNUC__) || defined(__clang__)
 #	define MUMBLE_CORE_PRINTF_FORMAT(fmt, args) __attribute__((format(printf, fmt, args)))
 #else
 #	define MUMBLE_CORE_PRINTF_FORMAT(fmt, args)

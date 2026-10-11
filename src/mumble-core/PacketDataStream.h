@@ -6,10 +6,18 @@
 #ifndef MUMBLE_PACKETDATASTREAM_H_
 #define MUMBLE_PACKETDATASTREAM_H_
 
-#include <QByteArray>
-#include <QPair>
-#include <QString>
+// The Qt conveniences (QByteArray, QString and the containers) are only there when the includer has
+// Qt, which is everywhere but the core. Nothing in the core uses them.
+#ifdef QT_CORE_LIB
+#	include <QByteArray>
+#	include <QList>
+#	include <QPair>
+#	include <QSet>
+#	include <QString>
+#endif
 
+#include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <type_traits>
 
@@ -19,29 +27,29 @@
 
 class PacketDataStream {
 private:
-	Q_DISABLE_COPY(PacketDataStream)
+	PacketDataStream(const PacketDataStream &)            = delete;
+	PacketDataStream &operator=(const PacketDataStream &) = delete;
+
 private:
 	unsigned char *data;
-	quint32 maxsize;
-	quint32 offset;
-	quint32 overshoot;
+	std::uint32_t maxsize;
+	std::uint32_t offset;
+	std::uint32_t overshoot;
 	bool ok;
 
 public:
-	quint32 size() const { return offset; }
+	std::uint32_t size() const { return offset; }
 
-	quint32 capacity() const { return maxsize; }
+	std::uint32_t capacity() const { return maxsize; }
 
 	bool isValid() const { return ok; }
 
-	quint32 left() const { return maxsize - offset; }
+	std::uint32_t left() const { return maxsize - offset; }
 
-	quint32 undersize() const { return overshoot; }
+	std::uint32_t undersize() const { return overshoot; }
 
-	void append(const quint64 v) {
-#ifndef QT_NO_DEBUG
-		Q_ASSERT(v <= 0xff);
-#endif
+	void append(const std::uint64_t v) {
+		assert(v <= 0xff);
 		if (offset < maxsize)
 			data[offset++] = static_cast< unsigned char >(v);
 		else {
@@ -50,7 +58,7 @@ public:
 		}
 	};
 
-	void append(const char *d, quint32 len) {
+	void append(const char *d, std::uint32_t len) {
 		if (left() >= len) {
 			memcpy(&data[offset], d, len);
 			offset += len;
@@ -63,14 +71,14 @@ public:
 		}
 	}
 
-	void skip(quint32 len) {
+	void skip(std::uint32_t len) {
 		if (left() >= len)
 			offset += len;
 		else
 			ok = false;
 	}
 
-	quint64 next() {
+	std::uint64_t next() {
 		if (offset < maxsize)
 			return data[offset++];
 		else {
@@ -79,7 +87,7 @@ public:
 		}
 	};
 
-	quint8 next8() {
+	std::uint8_t next8() {
 		if (offset < maxsize)
 			return data[offset++];
 		else {
@@ -98,7 +106,8 @@ public:
 
 	const char *charPtr() const { return reinterpret_cast< const char * >(&data[offset]); }
 
-	QByteArray dataBlock(quint32 len) {
+#ifdef QT_CORE_LIB
+	QByteArray dataBlock(std::uint32_t len) {
 		if (len <= left()) {
 			QByteArray a(charPtr(), static_cast< int >(len));
 			offset += len;
@@ -108,6 +117,7 @@ public:
 			return QByteArray();
 		}
 	}
+#endif
 
 protected:
 	void setup(unsigned char *d, unsigned int msize) {
@@ -129,6 +139,7 @@ public:
 
 	PacketDataStream(unsigned char *d, unsigned int msize) { setup(d, msize); };
 
+#ifdef QT_CORE_LIB
 	PacketDataStream(const QByteArray &qba) {
 		setup(const_cast< unsigned char * >(reinterpret_cast< const unsigned char * >(qba.constData())),
 			  static_cast< unsigned int >(qba.size()));
@@ -138,9 +149,10 @@ public:
 		unsigned char *ptr = reinterpret_cast< unsigned char * >(qba.data());
 		setup(ptr, static_cast< unsigned int >(qba.capacity()));
 	}
+#endif
 
-	PacketDataStream &operator<<(const quint64 value) {
-		quint64 i = value;
+	PacketDataStream &operator<<(const std::uint64_t value) {
+		std::uint64_t i = value;
 
 		if ((i & 0x8000000000000000LL) && (~i < 0x100000000LL)) {
 			// Signed number.
@@ -199,8 +211,8 @@ public:
 		return *this;
 	}
 
-	quint64 decode_next_int(std::size_t recursionLevel = 0) {
-		quint64 v = next();
+	std::uint64_t decode_next_int(std::size_t recursionLevel = 0) {
+		std::uint64_t v = next();
 
 		if ((v & 0x80) == 0x00) {
 			// most significant bit is unset
@@ -220,7 +232,7 @@ public:
 				case 0xF0: {
 					// Of the first six most significant bits, only the first four are set
 					// -> this is followed by a regular 32-bit positive integer
-					quint64 result = next() << 24;
+					std::uint64_t result = next() << 24;
 					result |= next() << 16;
 					result |= next() << 8;
 					result |= next();
@@ -229,7 +241,7 @@ public:
 				case 0xF4: {
 					// Bit pattern 111101
 					// -> this is followed by a 64-bit integer
-					quint64 result = next() << 56;
+					std::uint64_t result = next() << 56;
 					result |= next() << 48;
 					result |= next() << 40;
 					result |= next() << 32;
@@ -269,7 +281,7 @@ public:
 			// Among the four most significant bits, only the first three are set
 			// -> remaining 4 bits along with the next 3 bytes encode a
 			// 28-bit positive number
-			quint64 result = (v & 0x0F) << 24;
+			std::uint64_t result = (v & 0x0F) << 24;
 			result |= next() << 16;
 			result |= next() << 8;
 			result |= next();
@@ -279,7 +291,7 @@ public:
 			// Among the three most significant bits, only the first two are set
 			// -> remaining 5 bits along with the 2 following bytes, this encodes
 			// a 21-bit positive number
-			quint64 result = (v & 0x1F) << 16;
+			std::uint64_t result = (v & 0x1F) << 16;
 			result |= next() << 8;
 			result |= next();
 			return result;
@@ -291,12 +303,13 @@ public:
 		return 0;
 	}
 
-	PacketDataStream &operator>>(quint64 &i) {
+	PacketDataStream &operator>>(std::uint64_t &i) {
 		i = decode_next_int();
 
 		return *this;
 	}
 
+#ifdef QT_CORE_LIB
 	PacketDataStream &operator<<(const QByteArray &a) {
 		*this << a.size();
 		append(a.constData(), static_cast< unsigned int >(a.size()));
@@ -304,7 +317,7 @@ public:
 	}
 
 	PacketDataStream &operator>>(QByteArray &a) {
-		quint32 len;
+		std::uint32_t len;
 		*this >> len;
 		if (len > left()) {
 			len = left();
@@ -319,7 +332,7 @@ public:
 
 	// Using the data directly instead of through qbuff avoids a copy.
 	PacketDataStream &operator>>(QString &s) {
-		quint32 len;
+		std::uint32_t len;
 		*this >> len;
 		if (len > left()) {
 			len = left();
@@ -329,14 +342,15 @@ public:
 		offset += len;
 		return *this;
 	}
+#endif
 
 	PacketDataStream &operator<<(const bool b) {
-		quint32 v = b ? 1 : 0;
+		std::uint32_t v = b ? 1 : 0;
 		return *this << v;
 	}
 
 	PacketDataStream &operator>>(bool &b) {
-		quint32 v;
+		std::uint32_t v;
 		*this >> v;
 		b = v ? true : false;
 		return *this;
@@ -344,19 +358,19 @@ public:
 
 	template< typename Integer, typename = std::enable_if_t< std::is_integral_v< Integer > > >
 	PacketDataStream &operator<<(const Integer v) {
-		return *this << static_cast< quint64 >(v);
+		return *this << static_cast< std::uint64_t >(v);
 	}
 
 	template< typename Integer, typename = std::enable_if_t< std::is_integral_v< Integer > > >
 	PacketDataStream &operator>>(Integer &v) {
-		quint64 vv;
+		std::uint64_t vv;
 		*this >> vv;
 		v = static_cast< Integer >(vv);
 		return *this;
 	}
 
 	union double64u {
-		quint64 ui;
+		std::uint64_t ui;
 		double d;
 	};
 
@@ -374,7 +388,7 @@ public:
 	}
 
 	union float32u {
-		quint8 ui[4];
+		std::uint8_t ui[4];
 		float f;
 	};
 
@@ -402,6 +416,7 @@ public:
 		return *this;
 	}
 
+#ifdef QT_CORE_LIB
 	template< typename T > PacketDataStream &operator<<(const QList< T > &l) {
 		*this << l.size();
 		for (int i = 0; i < l.size(); i++)
@@ -411,13 +426,13 @@ public:
 
 	template< typename T > PacketDataStream &operator>>(QList< T > &l) {
 		l.clear();
-		quint32 len;
+		std::uint32_t len;
 		*this >> len;
 		if (len > left()) {
 			len = left();
 			ok  = false;
 		}
-		for (quint32 i = 0; i < len; i++) {
+		for (std::uint32_t i = 0; i < len; i++) {
 			if (left() == 0) {
 				ok = false;
 				break;
@@ -440,13 +455,13 @@ public:
 
 	template< typename T > PacketDataStream &operator>>(QSet< T > &s) {
 		s.clear();
-		quint32 len;
+		std::uint32_t len;
 		*this >> len;
 		if (len > left()) {
 			len = left();
 			ok  = false;
 		}
-		for (quint32 i = 0; i < len; i++) {
+		for (std::uint32_t i = 0; i < len; i++) {
 			if (left() == 0) {
 				ok = false;
 				break;
@@ -466,6 +481,7 @@ public:
 	template< typename T, typename U > PacketDataStream &operator>>(QPair< T, U > &p) {
 		return *this >> p.first >> p.second;
 	}
+#endif
 };
 
 #endif
