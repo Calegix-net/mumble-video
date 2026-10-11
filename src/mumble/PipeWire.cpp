@@ -128,13 +128,15 @@ void PipeWireInit::destroy() {
 static PipeWireInit pwi;
 
 PipeWireSystem::PipeWireSystem() : m_ok(false), m_users(0) {
+	// The runtime SONAME first. Screen capture links libpipewire-0.3.so.0 directly, so in the portable
+	// bundle that name is the copy already loaded, and audio shares it. The unversioned development
+	// names can resolve to a second, different libpipewire from the host; two copies in one process
+	// crash when the Audio Wizard or Settings restarts the audio engine.
 	// clang-format off
 	const QStringList names {
-		// Common names used by Linux distributions.
-		"libpipewire.so",
+		"libpipewire-0.3.so.0",
 		"libpipewire-0.3.so",
-		// Name used by the Flatpak FreeDesktop runtime.
-		"libpipewire-0.3.so.0"
+		"libpipewire.so"
 	};
 	// clang-format on
 
