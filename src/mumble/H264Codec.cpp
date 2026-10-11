@@ -12,6 +12,8 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/log.h>
+#include <libavutil/macros.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
@@ -69,6 +71,11 @@ bool hasSps(const std::uint8_t *data, std::size_t size) {
 		}
 	}
 	return false;
+}
+
+/// Frees a decoded picture's pixels once the last QImage sharing them is gone.
+void freePicture(void *pixels) {
+	av_free(pixels);
 }
 
 } // namespace
@@ -640,13 +647,30 @@ bool H264Decoder::decode(const QByteArray &accessUnit, QImage *image) {
 										 AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
 
 			if (m_sws) {
-				QImage out(m_frame->width, m_frame->height, QImage::Format_RGB32);
-				std::uint8_t *destinationPlanes[1] = { out.bits() };
-				const int destinationStrides[1]    = { static_cast< int >(out.bytesPerLine()) };
+				// swscale's x86 YUV-to-RGB conversion works in whole blocks of 8 pixels, and where a block would
+				// not fit in the row stride it is given, it drops the block. A plain QImage's rows are exactly
+				// width * 4 bytes, so the last width % 8 columns were never written: a strip of whatever memory
+				// the image was given, down the right edge of a 1670-pixel-wide window share. Other widths ran a
+				// few pixels past the end of the last row instead. So the rows are padded to whole blocks, with a
+				// spare row at the end, and the image shows only the real width.
+				const int stride           = FFALIGN(m_frame->width, 32) * 4;
+				std::uint8_t *const pixels = static_cast< std::uint8_t * >(
+					av_malloc(static_cast< std::size_t >(stride) * static_cast< std::size_t >(m_frame->height + 1)));
+				const QImage out = pixels ? QImage(pixels, m_frame->width, m_frame->height, stride,
+												   QImage::Format_RGB32, freePicture, pixels)
+										  : QImage();
 
-				sws_scale(m_sws, m_frame->data, m_frame->linesize, 0, m_frame->height, destinationPlanes,
-						  destinationStrides);
-				*image = out;
+				if (!out.isNull()) {
+					std::uint8_t *destinationPlanes[1] = { pixels };
+					const int destinationStrides[1]    = { stride };
+
+					sws_scale(m_sws, m_frame->data, m_frame->linesize, 0, m_frame->height, destinationPlanes,
+							  destinationStrides);
+					*image = out;
+				} else {
+					av_free(pixels);
+					decoded = false;
+				}
 			} else {
 				decoded = false;
 			}

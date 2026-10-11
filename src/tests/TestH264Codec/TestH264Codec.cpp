@@ -34,6 +34,15 @@ const std::uint8_t INTER2[] = {
 	0x00, 0x00, 0x00, 0x01, 0x09, 0x30, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x54, 0x02, 0xfe, 0x36
 };
 
+// A keyframe of a 70x48 solid red clip (x264, baseline, SEI stripped). 70 is not a multiple of 8, which is
+// what a window share's width usually is.
+const std::uint8_t KEYFRAME_70[] = { 0x00, 0x00, 0x00, 0x01, 0x09, 0x10, 0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0,
+									 0x0a, 0xdc, 0x57, 0xe6, 0xf0, 0x11, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00,
+									 0x03, 0x00, 0x3c, 0x0f, 0x12, 0x27, 0x80, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce,
+									 0x0f, 0xc8, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x04, 0xbf, 0xff, 0xff, 0x04,
+									 0x51, 0x40, 0x00, 0x44, 0xb7, 0xc7, 0x00, 0x01, 0x1f, 0x58, 0xe0, 0x00, 0x2c,
+									 0x21, 0x27, 0x27, 0x27, 0x27, 0x5d, 0x75, 0xd7, 0x5d, 0x75, 0xd7, 0x5d, 0x78 };
+
 QByteArray bytes(const std::uint8_t *data, std::size_t size) {
 	return QByteArray(reinterpret_cast< const char * >(data), static_cast< int >(size));
 }
@@ -179,6 +188,24 @@ private slots:
 		QVERIFY(!decoder.decode(bytes(KEYFRAME, sizeof(KEYFRAME))).isNull());
 	}
 
+	void decodesEveryColumnOfAWidthThatIsNotAMultipleOfEight() {
+		// The colour conversion works in blocks of 8 pixels; the last few columns of a picture like this one
+		// used to be left as whatever memory the image was given, a garbage strip down a window share's right
+		// edge.
+		H264Decoder decoder;
+		const QImage picture = decoder.decode(bytes(KEYFRAME_70, sizeof(KEYFRAME_70)));
+		QVERIFY(!picture.isNull());
+		QCOMPARE(picture.size(), QSize(70, 48));
+
+		for (int y = 0; y < picture.height(); ++y) {
+			for (int x = 0; x < picture.width(); ++x) {
+				const QRgb pixel = picture.pixel(x, y);
+				QVERIFY2(qRed(pixel) > 200 && qGreen(pixel) < 50 && qBlue(pixel) < 50,
+						 qPrintable(QString("pixel %1,%2 is not red").arg(x).arg(y)));
+			}
+		}
+	}
+
 	void rejectsGarbage() {
 		H264Decoder decoder;
 		QVERIFY(decoder.decode(QByteArray()).isNull());
@@ -227,6 +254,47 @@ private slots:
 		QVERIFY2(decoded >= 28, qPrintable(QString("only %1 of 30 frames decoded").arg(decoded)));
 		QCOMPARE(encoder.stats().droppedOversize, 0u);
 		qInfo("encoded with %s", qPrintable(encoder.backendName()));
+	}
+
+	void roundTripsAWindowSizedPictureToItsRightEdge() {
+		if (!H264Encoder::isAvailable()) {
+			QSKIP("no hardware H.264 encoder on this machine");
+		}
+
+		// A window's size is anything at all: odd, which the encoder rounds down to even, and neither a
+		// multiple of the 16-pixel macroblock nor of 8.
+		QImage image(1671, 1041, QImage::Format_RGB32);
+		image.fill(QColor(0, 0, 255));
+
+		H264Encoder encoder;
+		H264Decoder decoder;
+		H264FrameAssembler assembler;
+		QImage picture;
+
+		// A few frames, since a hardware encoder may hold the first one back.
+		for (int frame = 0; frame < 5; ++frame) {
+			for (const EncodedVideoUnit &unit : encoder.encode(image, 1, static_cast< std::uint64_t >(frame), 0)) {
+				H264FrameAssembler::Complete out;
+				if (assembler.add(unit.header.frameNumber, unit.header.isKeyframe, unit.header.x, unit.header.y,
+								  part(unit), out)) {
+					const QImage decoded = decoder.decode(out.accessUnit);
+					if (!decoded.isNull()) {
+						picture = decoded;
+					}
+				}
+			}
+		}
+
+		QVERIFY(!picture.isNull());
+		QCOMPARE(picture.size(), QSize(1670, 1040));
+
+		for (int y = 0; y < picture.height(); y += 7) {
+			for (int x = picture.width() - 16; x < picture.width(); ++x) {
+				const QRgb pixel = picture.pixel(x, y);
+				QVERIFY2(qBlue(pixel) > 200 && qRed(pixel) < 50 && qGreen(pixel) < 50,
+						 qPrintable(QString("pixel %1,%2 is not blue").arg(x).arg(y)));
+			}
+		}
 	}
 };
 
