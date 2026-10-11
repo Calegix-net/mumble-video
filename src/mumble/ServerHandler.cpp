@@ -321,7 +321,7 @@ void ServerHandler::udpReady() {
 				case Mumble::Protocol::UDPMessageType::Video: {
 					// Unreachable: UDPDecoder::decode returns false for Video, so getMessageType() never
 					// yields it. Asserted rather than logged so that a hostile server cannot drive log output
-					// here. This is also where video reception will be implemented.
+					// here. Video arrives on its own channel and is handled in handleVideoDatagram().
 					assert(false);
 					break;
 				};
@@ -1046,10 +1046,9 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 		// send us packages via TCP but has now switched to UDP again and the first UDP packages arrive at the same time
 		// as the last TCP ones), we want to use a dedicated decoder for this (to make sure there is no concurrent
 		// access to the decoder's internal buffer).
-		// Note: when video is implemented, it has to be handled here as well as in the raw UDP path in
-		// ServerHandler::run. Forgetting this branch would silently disable video whenever media is
-		// tunnelled over TCP. For exactly the reason given just above, it also needs its own
-		// VideoReassembler instance, separate from the one the raw UDP path uses.
+		// Note: only audio is handled here. Video is never tunnelled over TCP: sendVideoUnit() stops
+		// sending it once the connection has fallen back to the tunnel, and the server relays it only
+		// over UDP.
 		if (m_tcpTunnelDecoder.decode(
 				{ reinterpret_cast< const Mumble::Protocol::byte * >(ptr), static_cast< std::size_t >(qbaMsg.size()) })
 			&& m_tcpTunnelDecoder.getMessageType() == Mumble::Protocol::UDPMessageType::Audio) {
