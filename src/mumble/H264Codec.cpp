@@ -141,7 +141,7 @@ QString H264Encoder::availableBackend() {
 			qInfo("H264Encoder: hardware encoder %s available", qPrintable(probe.backendName()));
 			return probe.backendName();
 		}
-		qInfo("H264Encoder: no hardware H.264 encoder opened; screen shares stay on tiled images");
+		qInfo("H264Encoder: no hardware H.264 encoder opened; screen shares use VP9");
 		return QString();
 	}();
 	return backend;
@@ -159,6 +159,18 @@ bool H264Encoder::open(int width, int height) {
 		}
 		destroy();
 	}
+
+	// For tests on machines without a hardware encoder (a headless rig, CI): MUMBLE_H264_SOFTWARE=1 lets the
+	// software x264 encoder stand in, when the FFmpeg build has it. Never used otherwise - a software H.264
+	// encoder on the sender's processor has none of the benefit hardware H.264 is chosen for, and VP9 is the
+	// better software codec for a screen.
+	if (!qEnvironmentVariableIsEmpty("MUMBLE_H264_SOFTWARE") && openBackend("libx264", false, width, height)) {
+		m_backend = QStringLiteral("libx264");
+		m_width   = width;
+		m_height  = height;
+		return true;
+	}
+	destroy();
 
 	return false;
 }
@@ -206,6 +218,11 @@ bool H264Encoder::openBackend(const char *name, bool hardwareOnly, int width, in
 		setOption(m_context, "rc", "cbr");
 		setOption(m_context, "quality", "speed");
 		setOption(m_context, "forced_idr", "1");
+	} else if (std::strcmp(name, "libx264") == 0) {
+		// Tests only (see open()): low latency, constant bitrate, as close to the hardware settings as x264 gets.
+		setOption(m_context, "preset", "veryfast");
+		setOption(m_context, "tune", "zerolatency");
+		setOption(m_context, "x264-params", "nal-hrd=cbr:force-cfr=1");
 	} else if (std::strcmp(name, "h264_mf") == 0) {
 		setOption(m_context, "scenario", "display_remoting");
 		setOption(m_context, "rate_control", "cbr");
@@ -589,12 +606,17 @@ H264Decoder::~H264Decoder() {
 }
 
 QImage H264Decoder::decode(const QByteArray &accessUnit) {
+	QImage image;
+	return decode(accessUnit, &image) ? image : QImage();
+}
+
+bool H264Decoder::decode(const QByteArray &accessUnit, QImage *image) {
 	if (!m_context || accessUnit.isEmpty()) {
-		return QImage();
+		return false;
 	}
 
 	if (av_new_packet(m_packet, static_cast< int >(accessUnit.size())) < 0) {
-		return QImage();
+		return false;
 	}
 	std::memcpy(m_packet->data, accessUnit.constData(), static_cast< std::size_t >(accessUnit.size()));
 
@@ -602,15 +624,17 @@ QImage H264Decoder::decode(const QByteArray &accessUnit) {
 	av_packet_unref(m_packet);
 
 	if (sent < 0) {
-		return QImage();
+		return false;
 	}
 
-	QImage image;
+	bool decoded = false;
 
 	while (avcodec_receive_frame(m_context, m_frame) == 0) {
 		const bool damaged = m_frame->decode_error_flags != 0 || (m_frame->flags & AV_FRAME_FLAG_CORRUPT) != 0;
 
-		if (!damaged && m_frame->width > 0 && m_frame->height > 0) {
+		decoded = !damaged && m_frame->width > 0 && m_frame->height > 0;
+
+		if (decoded && image) {
 			m_sws = sws_getCachedContext(m_sws, m_frame->width, m_frame->height,
 										 static_cast< AVPixelFormat >(m_frame->format), m_frame->width, m_frame->height,
 										 AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
@@ -622,14 +646,14 @@ QImage H264Decoder::decode(const QByteArray &accessUnit) {
 
 				sws_scale(m_sws, m_frame->data, m_frame->linesize, 0, m_frame->height, destinationPlanes,
 						  destinationStrides);
-				image = out;
+				*image = out;
+			} else {
+				decoded = false;
 			}
-		} else {
-			image = QImage();
 		}
 
 		av_frame_unref(m_frame);
 	}
 
-	return image;
+	return decoded;
 }

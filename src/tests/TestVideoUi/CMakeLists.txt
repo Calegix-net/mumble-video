@@ -13,8 +13,8 @@ pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
 set(TESTVIDEOUI_SOURCES
 	TestVideoUi.cpp
 
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.cpp"
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.h"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.cpp"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.h"
 	"${MUMBLE_SOURCE_DIR}/VideoBandwidthProbe.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoBandwidthProbe.h"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.cpp"

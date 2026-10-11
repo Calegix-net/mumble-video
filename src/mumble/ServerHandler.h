@@ -37,6 +37,7 @@
 #include "Timer.h"
 #include "VideoFragmentation.h"
 
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -154,6 +155,21 @@ protected:
 	unsigned int m_nackMessagesInWindow = 0;
 	/// Asks for re-sends of whatever m_videoReassembler has been missing for long enough. UDP thread only.
 	void sendPendingNacks(std::uint64_t nowUsec);
+
+	/// MUMBLE_VIDEO_STATS: retransmission in both directions since the last "VideoNackStats" line. Updated
+	/// from the UDP thread (requests sent) and the GUI thread (requests answered), hence atomic.
+	struct NackStats {
+		bool enabled = false;
+		std::atomic< std::uint64_t > requestsSent{ 0 };
+		std::atomic< std::uint64_t > unitsRequested{ 0 };
+		std::atomic< std::uint64_t > wholeFramesRequested{ 0 };
+		std::atomic< std::uint64_t > requestsAnswered{ 0 };
+		std::atomic< std::uint64_t > fragmentsResent{ 0 };
+		std::atomic< std::uint64_t > unitsNoLongerHeld{ 0 };
+		std::atomic< std::uint64_t > resendBudgetHit{ 0 };
+		std::atomic< std::uint64_t > lastLogUsec{ 0 };
+	} m_nackStats;
+	void maybeLogNackStats(std::uint64_t nowUsec);
 
 public:
 	/// Fragments one encoded unit and sends it on the video channel. Silently does nothing when there is
@@ -289,8 +305,11 @@ signals:
 	/// without them: an inter-frame whose reference was lost decodes "successfully" into garbage (the
 	/// green-frame artifact), so the consumer has to see the gap in frame numbers to know not to feed
 	/// the decoder at all until the next keyframe.
+	///
+	/// captureTimestampUsec is the sender's capture time on its own clock, which a viewer uses to show frames
+	/// at the pace they were captured (see VideoGrid::presentFrame()).
 	void videoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
-						   unsigned int x, unsigned int y, const QByteArray &encodedTile);
+						   unsigned int x, unsigned int y, const QByteArray &encodedTile, quint64 captureTimestampUsec);
 
 	/// A serialised MumbleUDP::VideoNack the server forwarded: a viewer wants parts of our stream again.
 	void videoNackReceived(const QByteArray &serializedNack);

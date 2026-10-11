@@ -36,7 +36,135 @@ private slots:
 	void vp8SendsOneWholeFrameUnit();
 	void theCodecCanBeSwitched();
 	void aMockScreenKeepsMovingWithoutRepaintingEverything();
+	void vp9StopsSendingAStillScreenAfterASecond();
+	void threadedEncodingDeliversInOrderWithoutGaps();
+	void stoppingWhileEncodingIsSafe();
+	void aDroppedFrameLeavesNoGap();
 };
+
+// A frame the encoder had to drop - here a keyframe of noise too large for one transport unit - must not use
+// up a frame number: viewers would take the gap for a lost frame and wait for it.
+void TestVideoBroadcaster::aDroppedFrameLeavesNoGap() {
+	VideoBroadcaster broadcaster;
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 30, 80, 128);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(1280, 720);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(100);
+	QVERIFY(broadcaster.start(std::move(owned)));
+
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+	for (int i = 0; i < 6; ++i) {
+		source->pump(static_cast< std::uint64_t >(i) * 33333 + 1);
+	}
+
+	QVERIFY(spy.count() > 0);
+	for (qsizetype i = 0; i < spy.count(); ++i) {
+		QCOMPARE(spy.at(i).at(0).value< Mumble::Protocol::VideoUnitHeader >().frameNumber,
+				 static_cast< std::uint64_t >(i));
+	}
+}
+
+// Encoding on its own thread: frames pumped faster than the encoder keeps up with are dropped (the newest
+// waiting frame wins), but the units that do come out carry consecutive frame numbers - a gap would tell a
+// viewer a frame was lost and make it wait for one that never existed.
+void TestVideoBroadcaster::threadedEncodingDeliversInOrderWithoutGaps() {
+	VideoBroadcaster broadcaster;
+	broadcaster.setThreadedEncoding(true);
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 30, 80, 128);
+
+	// Small enough that even a keyframe of this noise-like picture fits one transport unit.
+	auto owned                   = std::make_unique< SyntheticVideoSource >(640, 360);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(100);
+
+	QVERIFY(broadcaster.start(std::move(owned)));
+
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+
+	// A burst: 60 frames handed over at once, faster than VP9 encodes them.
+	for (int i = 0; i < 60; ++i) {
+		source->pump(static_cast< std::uint64_t >(i) * 33333 + 1);
+	}
+
+	// The first frame, and then the newest of those that arrived while it was being encoded.
+	QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 2, 10000);
+	QTest::qWait(500);
+
+	const qsizetype delivered = spy.count();
+	QVERIFY2(delivered < 60, "every frame of the burst was encoded: nothing was dropped");
+
+	for (qsizetype i = 0; i < delivered; ++i) {
+		const auto header = spy.at(i).at(0).value< Mumble::Protocol::VideoUnitHeader >();
+		QCOMPARE(header.frameNumber, static_cast< std::uint64_t >(i));
+		QCOMPARE(header.isKeyframe, i == 0);
+	}
+}
+
+void TestVideoBroadcaster::stoppingWhileEncodingIsSafe() {
+	auto broadcaster = std::make_unique< VideoBroadcaster >();
+	broadcaster->setThreadedEncoding(true);
+	broadcaster->configure(VideoBroadcaster::CODEC_VP9, 3000, 30, 80, 128);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(1920, 1080);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(100);
+	QVERIFY(broadcaster->start(std::move(owned)));
+
+	QSignalSpy spy(broadcaster.get(), &VideoBroadcaster::unitReady);
+
+	// A frame on its way through the encoder when the share stops: nothing of it may come out afterwards.
+	source->pump(1);
+	broadcaster->stop();
+	QTest::qWait(300);
+	QCOMPARE(spy.count(), 0);
+
+	// And destroyed while a frame is being encoded, without waiting for it.
+	auto again = std::make_unique< SyntheticVideoSource >(1920, 1080);
+	again->setChangeRatio(100);
+	SyntheticVideoSource *second = again.get();
+	QVERIFY(broadcaster->start(std::move(again)));
+	second->pump(2);
+	broadcaster.reset();
+	QTest::qWait(100);
+}
+
+void TestVideoBroadcaster::vp9StopsSendingAStillScreenAfterASecond() {
+	VideoBroadcaster broadcaster;
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 30, 80, 128);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(640, 360);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(0);
+
+	QVERIFY(broadcaster.start(std::move(owned)));
+
+	QSignalSpy spy(&broadcaster, &VideoBroadcaster::unitReady);
+	constexpr std::uint64_t FRAME_USEC = 1000000 / 30;
+
+	// The same picture, delivered at 30 fps for just under two seconds.
+	std::vector< qsizetype > sentBy(60);
+	for (int i = 0; i < 59; ++i) {
+		source->pump(static_cast< std::uint64_t >(i) * FRAME_USEC + 1);
+		sentBy[static_cast< std::size_t >(i)] = spy.count();
+	}
+
+	// The first frame and one second of refinement go out; after that, nothing.
+	QCOMPARE(sentBy[0], 1);
+	QCOMPARE(sentBy[30], 31);
+	QCOMPARE(sentBy[58], sentBy[32]);
+
+	// Two seconds after the last frame sent, a keep-alive does go out.
+	source->pump(static_cast< std::uint64_t >(31) * FRAME_USEC + 2000000 + 1);
+	QCOMPARE(spy.count(), sentBy[58] + 1);
+	QVERIFY(!spy.last().at(0).value< Mumble::Protocol::VideoUnitHeader >().isKeyframe);
+
+	// And the moment the picture changes, frames flow again.
+	source->setChangeRatio(1);
+	const qsizetype before = spy.count();
+	source->pump(static_cast< std::uint64_t >(31) * FRAME_USEC + 2000000 + FRAME_USEC + 1);
+	QCOMPARE(spy.count(), before + 1);
+}
 
 void TestVideoBroadcaster::startingAndStoppingReportsItself() {
 	VideoBroadcaster broadcaster;

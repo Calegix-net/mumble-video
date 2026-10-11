@@ -246,9 +246,25 @@ namespace Protocol {
 				continue;
 			}
 
-			const std::uint64_t missing = unit.completeMask() & ~unit.receivedMask;
-			if (missing == 0) {
+			if (unit.receivedCount >= unit.fragmentCount) {
 				continue;
+			}
+
+			// A unit of up to 64 fragments names what it is missing in a 64-bit mask. A larger one - a VP9
+			// keyframe - lists the missing indices instead, with an empty mask: re-sending a whole 100-fragment
+			// keyframe because one fragment was lost loses another fragment as often as not under the very
+			// loss that caused the request, and the picture never recovers.
+			std::uint64_t missing = 0;
+			std::vector< std::uint32_t > missingIndices;
+			for (std::uint32_t i = 0; i < unit.fragmentCount; ++i) {
+				if (unit.received[i]) {
+					continue;
+				}
+				if (unit.fragmentCount > 64) {
+					missingIndices.push_back(i);
+				} else {
+					missing |= std::uint64_t{ 1 } << i;
+				}
 			}
 
 			++unit.nackAttempts;
@@ -260,7 +276,8 @@ namespace Protocol {
 			request.frameNumber      = entry.first.frameNumber;
 			request.unitID           = entry.first.unitID;
 			request.missingFragments = missing;
-			out.push_back(request);
+			request.missingIndices   = std::move(missingIndices);
+			out.push_back(std::move(request));
 		}
 	}
 
@@ -438,6 +455,7 @@ namespace Protocol {
 			PendingUnit fresh;
 			fresh.fragmentCount = fragmentCount;
 			fresh.fragments.resize(fragmentCount);
+			fresh.received.assign(fragmentCount, false);
 			fresh.firstSeenUsec = nowUsec;
 
 			const std::uint64_t deadline = nowUsec + VIDEO_REASSEMBLY_TIMEOUT_USEC;
@@ -464,9 +482,7 @@ namespace Protocol {
 			return VideoReassemblyResult::Invalid;
 		}
 
-		const std::uint64_t fragmentBit = std::uint64_t{ 1 } << fragmentIndex;
-
-		if (pending.receivedMask & fragmentBit) {
+		if (pending.received[fragmentIndex]) {
 			// A duplicate, which UDP produces routinely. Keep the copy already held.
 			return VideoReassemblyResult::Incomplete;
 		}
@@ -485,7 +501,8 @@ namespace Protocol {
 		const byte *payloadBegin = reinterpret_cast< const byte * >(payload.data());
 
 		pending.fragments[fragmentIndex].assign(payloadBegin, payloadBegin + payload.size());
-		pending.receivedMask |= fragmentBit;
+		pending.received[fragmentIndex] = true;
+		++pending.receivedCount;
 		pending.totalBytes += payload.size();
 		m_bufferedBytes += payload.size();
 
@@ -507,7 +524,7 @@ namespace Protocol {
 			pending.haveGeometry  = true;
 		}
 
-		if (pending.receivedMask != pending.completeMask()) {
+		if (pending.receivedCount != pending.fragmentCount) {
 			return VideoReassemblyResult::Incomplete;
 		}
 

@@ -7,9 +7,9 @@
 #define MUMBLE_MUMBLE_VIDEOCONFIGDIALOG_H_
 
 #include "ConfigDialog.h"
-#include "VP8Codec.h"
 #include "VideoEncoder.h"
 #include "VideoPreview.h"
+#include "VpxCodec.h"
 
 #include <QtCore/QTimer>
 #include <QtGui/QImage>
@@ -26,12 +26,13 @@ class QSpinBox;
 class VideoSource;
 
 /**
- * The video settings page.
+ * The video settings page: the camera (device, resolution, frame rate, bitrate) and screen sharing
+ * (bitrate, frame rate).
  *
- * Deliberately built to mirror the audio pages: pick a device, pick a codec, then adjust the quality
- * knobs that codec actually has. The two codecs have genuinely different controls -- a bitrate target
- * means nothing to tiled JPEG, and a tile size means nothing to VP8 -- so the page shows whichever set
- * applies rather than presenting both and hoping the user knows which half is inert.
+ * There is no codec to choose any more. Cameras are always VP8 and screens always VP9 in its
+ * screen-content mode (see VpxCodec.h); the tiled-JPEG codec this page used to offer as an alternative
+ * cost several times the bandwidth for either. What is left are the two numbers that decide what a share
+ * costs everyone watching it: its bitrate and its frame rate.
  */
 class VideoConfigDialog : public ConfigWidget {
 	Q_OBJECT
@@ -52,26 +53,20 @@ public slots:
 	void load(const Settings &r) override;
 
 protected slots:
-	void onCodecChanged(int index);
 	void onPreviewToggled();
 	void onFrameReady(const QImage &frame, std::uint64_t captureTimestampUsec);
 	void refreshDevices();
 
 protected:
 	QComboBox *m_device     = nullptr;
-	QComboBox *m_codec      = nullptr;
 	QComboBox *m_resolution = nullptr;
 	QSpinBox *m_framerate   = nullptr;
+	QSpinBox *m_bitrate     = nullptr;
 
-	QWidget *m_vp8Group = nullptr;
-	QSpinBox *m_bitrate = nullptr;
-
-	QWidget *m_tiledGroup   = nullptr;
-	QSpinBox *m_tileQuality = nullptr;
-	QComboBox *m_tileSize   = nullptr;
-
-	QComboBox *m_screenCodec  = nullptr;
-	QSpinBox *m_screenBitrate = nullptr;
+	QComboBox *m_screenCodec     = nullptr;
+	QSpinBox *m_screenBitrate    = nullptr;
+	QSpinBox *m_screenVp9Bitrate = nullptr;
+	QSpinBox *m_screenFramerate  = nullptr;
 
 	QPushButton *m_previewButton = nullptr;
 	VideoPreview *m_preview      = nullptr;
@@ -81,9 +76,8 @@ protected:
 
 	// Owned rather than function-static: statics would be shared between dialog instances and would
 	// outlive the settings they were configured for.
-	VP8Encoder m_vp8;
-	VP8Decoder m_vp8Decoder;
-	TiledImageEncoder m_tiled;
+	VpxEncoder m_vp8;
+	VpxDecoder m_vp8Decoder;
 	std::uint64_t m_previewFrameNumber = 0;
 
 	// Rolling measurement of what the current settings would actually cost on the wire, which is the

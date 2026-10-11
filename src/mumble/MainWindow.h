@@ -23,8 +23,10 @@
 #include "UserLocalNicknameDialog.h"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stack>
 #include <unordered_map>
 
@@ -259,6 +261,8 @@ protected:
 	std::uint32_t allocateStreamID() { return m_nextVideoStreamID++; }
 	void announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
 							 unsigned int streamID, QSize size);
+	/// Applies the codec and screen-share settings to m_screenVideoBroadcaster before it starts.
+	void configureScreenBroadcaster(const Settings &settings);
 	bool m_screenAwaitingFrame = false;
 	int m_screenSourceKind     = 2; // VideoState::Display
 
@@ -338,6 +342,26 @@ protected:
 	/// Applies a per-tile volume slider's value to whichever screen-share audio buffer(s) belong to this
 	/// sender. Sender-keyed rather than stream-keyed, same reasoning as removeScreenShareAudioBuffersForSender.
 	void setScreenShareVolumeForSender(unsigned int senderSession, float multiplier);
+
+	/// "Who is watching your screen". Nothing on the server tracks it, so each viewer's client tells the
+	/// sender itself, through the server's ordinary plugin-data relay: whether it is watching a stream, and
+	/// at what volume it plays a share's audio. Clients without this ignore the messages.
+	static constexpr const char *WATCH_REPORT_DATA_ID = "mumble-video/watch";
+	/// Viewer side: tells a sender whether this client is watching one of its streams, and how loud.
+	void sendWatchReport(unsigned int senderSession, unsigned int streamID, bool watching);
+	/// Sender side: a report from a viewer. False if the data was not a watch report.
+	bool handleWatchReport(unsigned int viewerSession, const std::string &dataID, const std::string &data);
+	/// Sender side: shows the current viewers of this client's own streams on their tiles.
+	void refreshOwnViewers();
+	/// Own stream id -> (viewer session -> volume percent, -1 for none).
+	std::unordered_map< unsigned int, std::map< unsigned int, int > > m_ownStreamViewers;
+	/// Viewer side: the streams this client reported watching, keyed like m_screenShareAudioBuffers, so a
+	/// volume change can be reported to the senders it concerns.
+	std::set< std::uint64_t > m_reportedWatching;
+	/// Senders whose volume changed since the last report: a slider drag is reported once it settles, not
+	/// at every step - the server allows only a few plugin messages a second.
+	std::set< unsigned int > m_volumeReportPending;
+	QTimer *m_volumeReportTimer = nullptr;
 
 	static std::uint64_t screenShareAudioKey(unsigned int senderSession, unsigned int streamID) {
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;

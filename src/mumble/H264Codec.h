@@ -35,7 +35,8 @@ struct SwsContext;
  *
  * Only hardware encoders are tried - NVENC, AMF and Media Foundation on Windows (the last covers Intel
  * Quick Sync, and falls back to Windows' own software encoder), VA-API and NVENC on Linux - through a
- * small FFmpeg build. When none opens, isAvailable() is false and the caller keeps TiledImage.
+ * small FFmpeg build. When none opens, isAvailable() is false and the caller uses VP9 (see VpxCodec.h), the
+ * software codec for screens. MUMBLE_H264_SOFTWARE=1 lets x264 stand in for tests without a graphics card.
  *
  * Decoding is FFmpeg's software H.264 decoder everywhere, which comfortably keeps up with one 1080p share.
  *
@@ -207,6 +208,10 @@ public:
 	 *   previous frame staying up until a keyframe repairs it.
 	 */
 	QImage decode(const QByteArray &accessUnit);
+
+	/// Decodes one access unit, converting it to an image only when @p image is given (see
+	/// VpxDecoder::decode() for why). @returns Whether an undamaged frame came out.
+	bool decode(const QByteArray &accessUnit, QImage *image);
 
 protected:
 	AVCodecContext *m_context = nullptr;

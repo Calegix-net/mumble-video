@@ -16,8 +16,8 @@ set(TESTVIDEOBROADCASTER_SOURCES
 
 	"${MUMBLE_SOURCE_DIR}/VideoBroadcaster.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoBroadcaster.h"
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.cpp"
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.h"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.cpp"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.h"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.h"
 	"${MUMBLE_SOURCE_DIR}/VideoSource.cpp"

@@ -10,7 +10,11 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QFutureWatcher>
+#include <QtCore/QMetaObject>
+#include <QtCore/QPointer>
+#include <QtCore/QThread>
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
 #include <QtGui/QKeyEvent>
@@ -20,6 +24,7 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QMenu>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QToolButton>
@@ -30,6 +35,8 @@
 #include <memory>
 #include <utility>
 #include <vector>
+
+static QWidget *makeTileControlStrip(QWidget *parent);
 
 namespace {
 
@@ -67,24 +74,42 @@ public:
 	/// short-lived read-only view - see the class comment.
 	using ContentProvider = std::function< void(QImage &image, QString &label) >;
 
+	/// The volume control the bar shows: whether there is one (a stream with audio of its own - a screen
+	/// share, not a camera), and its level in percent.
+	struct VolumeState {
+		bool available = false;
+		int percent    = 0;
+	};
+	using VolumeProvider = std::function< VolumeState() >;
+	using VolumeSetter   = std::function< void(int percent) >;
+
 	/// About 30 repaints a second at most. Screen shares are rarely sent faster than that, and a paint
 	/// here is a real, CPU-side scale of the sender's whole desktop onto the whole monitor when everything
 	/// is dirty - not something worth doing more often than the eye can tell apart.
 	static constexpr int REPAINT_INTERVAL_MSEC = 33;
+	/// The control bar hides after the mouse has been still this long, like a video player's.
+	static constexpr int CONTROLS_HIDE_MSEC = 3000;
+	static constexpr int CONTROLS_HEIGHT    = 44;
 
-	explicit FullscreenVideoWindow(VideoGrid *owner, ContentProvider provider)
-		: QWidget(owner, Qt::Window), m_owner(owner), m_provider(std::move(provider)) {
+	explicit FullscreenVideoWindow(VideoGrid *owner, ContentProvider provider, VolumeProvider volume,
+								   VolumeSetter setVolume)
+		: QWidget(owner, Qt::Window), m_owner(owner), m_provider(std::move(provider)), m_volume(std::move(volume)),
+		  m_setVolume(std::move(setVolume)) {
 		setWindowTitle(tr("Mumble"));
 
 		QPalette pal = palette();
 		pal.setColor(QPalette::Window, Qt::black);
 		setPalette(pal);
 		setAutoFillBackground(true);
+		// Moving the mouse, without a button held, is what brings the controls back.
+		setMouseTracking(true);
 
 		m_repaintTimer = new QTimer(this);
 		m_repaintTimer->setSingleShot(true);
 		m_repaintTimer->setInterval(REPAINT_INTERVAL_MSEC);
 		connect(m_repaintTimer, &QTimer::timeout, this, &FullscreenVideoWindow::flushRepaint);
+
+		buildControls();
 	}
 
 	/// The whole picture is different - a different tile was focused, or the stream restarted. Everything
@@ -92,6 +117,26 @@ public:
 	void contentReplaced() {
 		m_wholeDirty = true;
 		scheduleRepaint();
+		refreshVolume();
+		showControls();
+	}
+
+	/// The level changed somewhere else - the tile's own slider - so the bar's follows it.
+	void refreshVolume() {
+		const VolumeState state = m_volume ? m_volume() : VolumeState();
+
+		m_muteButton->setVisible(state.available);
+		m_volumeSlider->setVisible(state.available);
+		m_volumeLabel->setVisible(state.available);
+
+		if (state.available) {
+			const QSignalBlocker blocker(m_volumeSlider);
+			m_volumeSlider->setValue(state.percent);
+			showLevel(state.percent);
+			if (state.percent > 0) {
+				m_volumeBeforeMute = state.percent;
+			}
+		}
 	}
 
 	/// Only the given rectangle of the picture, in the picture's own pixel coordinates, changed.
@@ -181,14 +226,23 @@ protected:
 			painter.setPen(Qt::white);
 			painter.drawText(margin, Qt::AlignTop | Qt::AlignLeft, label);
 		}
-
-		painter.setPen(QColor(200, 200, 200));
-		painter.drawText(margin, Qt::AlignBottom | Qt::AlignRight, tr("Esc or double-click to exit fullscreen"));
 	}
 
 	void resizeEvent(QResizeEvent *event) override {
 		QWidget::resizeEvent(event);
 		m_wholeDirty = true;
+		m_controls->setGeometry(0, height() - CONTROLS_HEIGHT, width(), CONTROLS_HEIGHT);
+	}
+
+	void showEvent(QShowEvent *event) override {
+		QWidget::showEvent(event);
+		refreshVolume();
+		showControls();
+	}
+
+	void mouseMoveEvent(QMouseEvent *event) override {
+		showControls();
+		QWidget::mouseMoveEvent(event);
 	}
 
 	void keyPressEvent(QKeyEvent *event) override {
@@ -204,9 +258,106 @@ protected:
 	void mouseDoubleClickEvent(QMouseEvent *) override { m_owner->clearFocusedTile(); }
 
 private:
+	/// The bar along the bottom: the stream's volume (speaker button, slider, level), and a button out of
+	/// fullscreen - which double-click and Esc also are, but a button is what people look for.
+	void buildControls() {
+		m_controls = makeTileControlStrip(this);
+		m_controls->setMouseTracking(true);
+
+		auto *layout = new QHBoxLayout(m_controls);
+		layout->setContentsMargins(12, 4, 12, 4);
+		layout->setSpacing(8);
+
+		m_muteButton = new QToolButton(m_controls);
+		m_muteButton->setAutoRaise(true);
+		m_muteButton->setIconSize(QSize(20, 20));
+		m_muteButton->setFocusPolicy(Qt::NoFocus);
+		layout->addWidget(m_muteButton);
+
+		m_volumeSlider = new QSlider(Qt::Horizontal, m_controls);
+		m_volumeSlider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
+		m_volumeSlider->setSingleStep(5);
+		m_volumeSlider->setPageStep(25);
+		m_volumeSlider->setFixedWidth(160);
+		m_volumeSlider->setFocusPolicy(Qt::NoFocus);
+		m_volumeSlider->setToolTip(tr("Stream volume"));
+		layout->addWidget(m_volumeSlider);
+
+		m_volumeLabel = new QLabel(m_controls);
+		m_volumeLabel->setFixedWidth(m_volumeLabel->fontMetrics().horizontalAdvance(QStringLiteral("200%")) + 4);
+		layout->addWidget(m_volumeLabel);
+
+		layout->addStretch();
+
+		// Words, not just an icon: the theme's "restore" icon is small and grey and was easy to miss on top of
+		// video. The glyph is the one the tile's own fullscreen button uses.
+		auto *exitButton = new QToolButton(m_controls);
+		exitButton->setAutoRaise(true);
+		exitButton->setText(tr("⛶  Exit fullscreen"));
+		exitButton->setCursor(Qt::PointingHandCursor);
+		exitButton->setStyleSheet(QStringLiteral("QToolButton { color: white; padding: 4px 10px; border-radius: 4px; }"
+												 "QToolButton:hover { background: rgba(255, 255, 255, 40); }"));
+		exitButton->setFocusPolicy(Qt::NoFocus);
+		exitButton->setToolTip(tr("Exit fullscreen (Esc or double-click)"));
+		layout->addWidget(exitButton);
+
+		connect(exitButton, &QToolButton::clicked, this, [this]() { m_owner->clearFocusedTile(); });
+
+		connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int value) {
+			if (value > 0) {
+				m_volumeBeforeMute = value;
+			}
+			showLevel(value);
+			if (m_setVolume) {
+				m_setVolume(value);
+			}
+		});
+
+		connect(m_muteButton, &QToolButton::clicked, this,
+				[this]() { m_volumeSlider->setValue(m_volumeSlider->value() == 0 ? m_volumeBeforeMute : 0); });
+
+		m_hideTimer = new QTimer(this);
+		m_hideTimer->setSingleShot(true);
+		m_hideTimer->setInterval(CONTROLS_HIDE_MSEC);
+		connect(m_hideTimer, &QTimer::timeout, this, [this]() {
+			// Not while the pointer is on the bar itself: someone is about to use it.
+			if (!m_controls->underMouse()) {
+				m_controls->hide();
+				setCursor(Qt::BlankCursor);
+			} else {
+				m_hideTimer->start();
+			}
+		});
+
+		m_controls->hide();
+	}
+
+	void showControls() {
+		m_controls->setGeometry(0, height() - CONTROLS_HEIGHT, width(), CONTROLS_HEIGHT);
+		m_controls->show();
+		m_controls->raise();
+		unsetCursor();
+		m_hideTimer->start();
+	}
+
+	void showLevel(int value) {
+		m_volumeLabel->setText(tr("%1%").arg(value));
+		m_muteButton->setIcon(style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
+		m_muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+	}
+
 	VideoGrid *m_owner;
 	ContentProvider m_provider;
+	VolumeProvider m_volume;
+	VolumeSetter m_setVolume;
 	QTimer *m_repaintTimer = nullptr;
+
+	QWidget *m_controls       = nullptr;
+	QToolButton *m_muteButton = nullptr;
+	QSlider *m_volumeSlider   = nullptr;
+	QLabel *m_volumeLabel     = nullptr;
+	QTimer *m_hideTimer       = nullptr;
+	int m_volumeBeforeMute    = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
 
 	/// Accumulated since the last repaint, in picture pixels. Ignored while m_wholeDirty is set.
 	QRect m_dirtySource;
@@ -259,6 +410,29 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 		m_statsTimer = new QTimer(this);
 		connect(m_statsTimer, &QTimer::timeout, this, &VideoGrid::logStats);
 		m_statsTimer->start(2000);
+
+		// How late a 10 ms timer fires on the GUI thread: every millisecond late is a millisecond the
+		// window could not paint or react to input - what stutter is, measured. "GuiLag" every 2 seconds.
+		auto *lagTimer = new QTimer(this);
+		lagTimer->setTimerType(Qt::PreciseTimer);
+		auto lastTick  = std::make_shared< QElapsedTimer >();
+		auto worstMsec = std::make_shared< qint64 >(0);
+		auto lateTicks = std::make_shared< int >(0);
+		auto window    = std::make_shared< QElapsedTimer >();
+		lastTick->start();
+		window->start();
+		connect(lagTimer, &QTimer::timeout, this, [lastTick, worstMsec, lateTicks, window]() {
+			const qint64 late = lastTick->restart() - 10;
+			*worstMsec        = std::max(*worstMsec, late);
+			*lateTicks += late >= 16 ? 1 : 0;
+			if (window->elapsed() >= 2000) {
+				qInfo("GuiLag worstMs=%lld ticksOver16ms=%d", static_cast< long long >(*worstMsec), *lateTicks);
+				*worstMsec = 0;
+				*lateTicks = 0;
+				window->restart();
+			}
+		});
+		lagTimer->start(10);
 	}
 }
 
@@ -296,7 +470,8 @@ void VideoGrid::logStats() {
 		const qint64 openGap = stats.lastPaintMsec > 0 ? now - stats.lastPaintMsec : 0;
 
 		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
-			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d",
+			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d gapsRecovered=%u "
+			  "gapsAbandoned=%u held=%zu",
 			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
 			  static_cast< unsigned long long >(stats.tilesPainted),
 			  static_cast< unsigned long long >(stats.framesPainted),
@@ -306,7 +481,8 @@ void VideoGrid::logStats() {
 			  static_cast< unsigned long long >(stats.keyframeRequestsOverload),
 			  static_cast< unsigned long long >(stats.keyframeRequestsLoss),
 			  static_cast< unsigned long long >(stats.keyframeRequestsFailure), surface.pendingTiles.size(),
-			  surface.awaitingKeyframe ? 1 : 0);
+			  surface.awaitingKeyframe ? 1 : 0, surface.vp8GapsRecovered, surface.vp8GapsAbandoned,
+			  surface.vp8Held.size());
 
 		stats.units = stats.tilesPainted = stats.framesPainted = 0;
 		stats.keyframeRequestsOverload = stats.keyframeRequestsLoss = stats.keyframeRequestsFailure = 0;
@@ -423,41 +599,188 @@ QImage VideoGrid::decodeJpegTile(const QByteArray &payload) {
 	return tile;
 }
 
-QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
+bool VideoGrid::prepareDecoder(Surface &surface) {
 	switch (surface.codec) {
-		case MumbleProto::VideoState_Codec_TiledImage:
-			return decodeJpegTile(payload);
-		case MumbleProto::VideoState_Codec_VP8: {
-			if (!surface.vp8) {
-				surface.vp8 = std::make_unique< VP8Decoder >();
+		case MumbleProto::VideoState_Codec_VP8:
+		case MumbleProto::VideoState_Codec_VP9: {
+			const VpxCodec codec = surface.codec == MumbleProto::VideoState_Codec_VP9 ? VpxCodec::VP9 : VpxCodec::VP8;
+
+			if (!surface.vp8 || surface.vp8->codec() != codec) {
+				surface.vp8 = std::make_shared< VpxDecoder >(codec);
 			}
 
-			if (!surface.vp8->isValid()) {
-				return QImage();
-			}
-
-			const auto *bytes = reinterpret_cast< const Mumble::Protocol::byte * >(payload.constData());
-
-			return surface.vp8->decode(
-				std::vector< Mumble::Protocol::byte >(bytes, bytes + static_cast< std::size_t >(payload.size())));
+			return surface.vp8->isValid();
 		}
 #ifdef USE_H264
-		case MumbleProto::VideoState_Codec_H264: {
+		case MumbleProto::VideoState_Codec_H264:
 			if (!surface.h264) {
-				surface.h264 = std::make_unique< H264Decoder >();
+				surface.h264 = std::make_shared< H264Decoder >();
 			}
 
-			if (!surface.h264->isValid()) {
-				return QImage();
-			}
-
-			return surface.h264->decode(payload);
-		}
+			return surface.h264->isValid();
 #endif
 		default:
 			// CODEC_UNKNOWN, or a codec this build has no decoder for. Dropped rather than guessed at,
 			// as the protocol requires.
-			return QImage();
+			return false;
+	}
+}
+
+QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
+	if (surface.codec == MumbleProto::VideoState_Codec_TiledImage) {
+		return decodeJpegTile(payload);
+	}
+
+	if (!prepareDecoder(surface)) {
+		return QImage();
+	}
+
+#ifdef USE_H264
+	if (surface.codec == MumbleProto::VideoState_Codec_H264) {
+		return surface.h264->decode(payload);
+	}
+#endif
+
+	const auto *bytes = reinterpret_cast< const Mumble::Protocol::byte * >(payload.constData());
+
+	return surface.vp8->decode(
+		std::vector< Mumble::Protocol::byte >(bytes, bytes + static_cast< std::size_t >(payload.size())));
+}
+
+VideoGrid::~VideoGrid() {
+	// The decode thread may be working on a frame; it finishes that one, and its result, queued to this
+	// object, is discarded with it.
+	if (m_decodeThread) {
+		m_decodeThread->quit();
+		m_decodeThread->wait();
+	}
+}
+
+void VideoGrid::setThreadedDecoding(bool threaded) {
+	if (threaded == (m_decodeThread != nullptr)) {
+		return;
+	}
+
+	if (!threaded) {
+		m_decodeThread->quit();
+		m_decodeThread->wait();
+		delete m_decodeThread;
+		m_decodeThread = nullptr;
+		m_decodeWorker = nullptr;
+		return;
+	}
+
+	m_playoutTimer = new QTimer(this);
+	m_playoutTimer->setSingleShot(true);
+	m_playoutTimer->setTimerType(Qt::PreciseTimer);
+	connect(m_playoutTimer, &QTimer::timeout, this, &VideoGrid::flushPlayout);
+
+	m_decodeThread = new QThread(this);
+	m_decodeThread->setObjectName(QStringLiteral("VideoDecode"));
+	// An object living on the thread, for queued calls to run there. Deleted with the thread's event loop.
+	m_decodeWorker = new QObject();
+	m_decodeWorker->moveToThread(m_decodeThread);
+	connect(m_decodeThread, &QThread::finished, m_decodeWorker, &QObject::deleteLater);
+	m_decodeThread->start();
+}
+
+void VideoGrid::noteDecodeFailure(Surface &surface) {
+	if (++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
+		// Reset on emit, so a sender that ignores the request is asked again only after another full run
+		// of failures rather than on every subsequent unit.
+		surface.consecutiveFailures = 0;
+
+		++surface.stats.keyframeRequestsFailure;
+		emit keyframeNeeded(surface.senderSession, surface.streamID);
+	}
+}
+
+void VideoGrid::onFrameDecoded(std::uint64_t key, std::uint64_t epoch, quint64 frameNumber, unsigned int x,
+							   unsigned int y, bool decoded, const QImage &image) {
+	const auto it = m_surfaces.find(key);
+
+	if (it == m_surfaces.end() || it->second.decodeEpoch != epoch || !it->second.watching) {
+		// The stream ended, started over or stopped being watched while this frame was being decoded.
+		return;
+	}
+
+	Surface &surface = it->second;
+
+	if (!decoded) {
+		// Undecodable - typically a frame whose reference was itself damaged. The frames after it fail the
+		// same way until a keyframe, which a run of failures asks for.
+		noteDecodeFailure(surface);
+		return;
+	}
+
+	surface.consecutiveFailures = 0;
+
+	if (image.isNull()) {
+		// Decoded but not converted: the decode thread had fallen well behind, and a newer frame is shown.
+		return;
+	}
+
+	presentFrame(key, surface, frameNumber, x, y, image);
+}
+
+void VideoGrid::resetPlayout(Surface &surface) {
+	surface.playout = Surface::Playout();
+}
+
+void VideoGrid::presentFrame(std::uint64_t key, Surface &surface, quint64 frameNumber, unsigned int x, unsigned int y,
+							 const QImage &image) {
+	Surface::Playout &playout = surface.playout;
+	const auto capture        = playout.captureUsec.find(frameNumber);
+	const qint64 offset       = std::min(playout.windowMin, playout.previousMin);
+
+	if (capture == playout.captureUsec.end() || offset == std::numeric_limits< qint64 >::max()) {
+		noteStatsPaint(surface, frameNumber);
+		applyDecodedTile(key, surface, x, y, image);
+		return;
+	}
+
+	const qint64 due = static_cast< qint64 >(capture->second / 1000) + offset + PLAYOUT_DELAY_MSEC;
+	playout.captureUsec.erase(playout.captureUsec.begin(), std::next(capture));
+
+	Surface::Playout::Pending pending;
+	pending.image              = image;
+	pending.x                  = x;
+	pending.y                  = y;
+	pending.dueMsec            = due;
+	playout.queue[frameNumber] = pending;
+
+	flushPlayout();
+}
+
+void VideoGrid::flushPlayout() {
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	qint64 nextDue   = std::numeric_limits< qint64 >::max();
+
+	for (auto &entry : m_surfaces) {
+		Surface &surface = entry.second;
+		auto &queue      = surface.playout.queue;
+
+		while (!queue.empty()) {
+			const auto front = queue.begin();
+
+			// Its time has come - or the queue is longer than any re-send can explain, and the oldest goes now
+			// rather than the picture falling further behind.
+			if (front->second.dueMsec > now && queue.size() <= MAX_PLAYOUT_QUEUE) {
+				nextDue = std::min(nextDue, front->second.dueMsec);
+				break;
+			}
+
+			const quint64 frameNumber               = front->first;
+			const Surface::Playout::Pending pending = front->second;
+			queue.erase(front);
+
+			noteStatsPaint(surface, frameNumber);
+			applyDecodedTile(entry.first, surface, pending.x, pending.y, pending.image);
+		}
+	}
+
+	if (m_playoutTimer && nextDue != std::numeric_limits< qint64 >::max()) {
+		m_playoutTimer->start(static_cast< int >(std::max< qint64 >(0, nextDue - now)));
 	}
 }
 
@@ -566,6 +889,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		surface.vp8RequestedThrough = 0;
 		surface.canvas = QImage();
 		surface.vp8.reset();
+		++surface.decodeEpoch;
+		resetPlayout(surface);
 		surface.tileFrameNumbers.clear();
 		surface.lastFrameNumber    = 0;
 		surface.hasDecodedFrame    = false;
@@ -627,6 +952,8 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 		it->second.vp8RequestedThrough = 0;
 		it->second.hasDecodedFrame = false;
 		it->second.lastFrameNumber = 0;
+		++it->second.decodeEpoch;
+		resetPlayout(it->second);
 	}
 
 	if (watching) {
@@ -700,7 +1027,8 @@ bool VideoGrid::consumeUnsubscribeAcknowledgement(unsigned int senderSession, un
 }
 
 void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
-									bool isKeyframe, unsigned int x, unsigned int y, const QByteArray &encodedTile) {
+									bool isKeyframe, unsigned int x, unsigned int y, const QByteArray &encodedTile,
+									quint64 captureTimestampUsec) {
 	// Only streams that announced themselves are decoded. Units arriving for an unannounced stream have
 	// no codec, and are dropped rather than assumed to be anything.
 	const auto existing = m_surfaces.find(surfaceKey(senderSession, streamID));
@@ -725,7 +1053,28 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		return;
 	}
 
-	if (surface.codec == MumbleProto::VideoState_Codec_VP8) {
+	// Capture times, for showing whole frames at the pace they were captured (see presentFrame()). Only with
+	// threaded decoding, where frames come back from the decode thread asynchronously anyway.
+	if (m_decodeWorker && captureTimestampUsec != 0 && surface.codec != MumbleProto::VideoState_Codec_TiledImage) {
+		Surface::Playout &playout = surface.playout;
+		const qint64 now          = QDateTime::currentMSecsSinceEpoch();
+
+		playout.captureUsec[frameNumber] = captureTimestampUsec;
+		while (playout.captureUsec.size() > 2 * MAX_PLAYOUT_QUEUE + MAX_VP8_HELD) {
+			playout.captureUsec.erase(playout.captureUsec.begin());
+		}
+
+		if (playout.windowStartMsec == 0 || now - playout.windowStartMsec >= 10000) {
+			playout.previousMin     = playout.windowMin;
+			playout.windowMin       = std::numeric_limits< qint64 >::max();
+			playout.windowStartMsec = now;
+		}
+		playout.windowMin = std::min(playout.windowMin, now - static_cast< qint64 >(captureTimestampUsec / 1000));
+	}
+
+	// VP9 (screen shares) goes through the same whole-frame path as VP8 (cameras): frame ordering, holding
+	// frames across a gap while it is retransmitted, and keyframe requests are the same for both.
+	if (surface.codec == MumbleProto::VideoState_Codec_VP8 || surface.codec == MumbleProto::VideoState_Codec_VP9) {
 		onVp8UnitReceived(existing->first, surface, frameNumber, isKeyframe, x, y, encodedTile);
 		return;
 	}
@@ -813,7 +1162,36 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 	// fail - it returns a plausible-looking corrupted image, classically green. So frames are only ever
 	// decoded in order: a frame that arrives after a gap is held while the missing ones are re-sent.
 	if (!surface.hasDecodedFrame) {
-		decodeVp8Unit(key, surface, frameNumber, x, y, payload);
+		if (isKeyframe) {
+			if (decodeVp8Unit(key, surface, frameNumber, x, y, payload)) {
+				drainHeldVp8(key, surface);
+				noteVp8Progress(surface);
+			}
+			return;
+		}
+
+		// An inter-frame before the stream's first keyframe has been decoded - typically because that
+		// keyframe, many times larger (a VP9 screen keyframe is around a hundred fragments), is still being
+		// reassembled or retransmitted while the small frames after it complete. These used to be decoded
+		// on the spot, which fails, and so discarded - for good, since the reassembler will not rebuild a unit
+		// it has already completed, and asking for them again gets nothing. Every stream then broke at the
+		// frame after its first keyframe. Held instead, to be decoded in order once the keyframe is.
+		Surface::HeldVp8Unit early;
+		early.payload                = payload;
+		early.x                      = x;
+		early.y                      = y;
+		surface.vp8Held[frameNumber] = early;
+		while (surface.vp8Held.size() > MAX_VP8_HELD) {
+			surface.vp8Held.erase(surface.vp8Held.begin());
+		}
+
+		// No keyframe yet: ask now and then, in case the request that should have produced one was lost.
+		if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
+			surface.unitsWhileAwaiting = 0;
+
+			++surface.stats.keyframeRequestsFailure;
+			emit keyframeNeeded(senderSession, streamID);
+		}
 		return;
 	}
 
@@ -825,6 +1203,20 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 
 	if (surface.awaitingKeyframe && !isKeyframe) {
 		// Frozen: the last good picture stays up, which reads as a pause instead of a burst of green.
+		//
+		// Held all the same, for the same reason as before the first keyframe above: the keyframe asked for
+		// is large, often completes after the frames that follow it, and those are decoded after it, in order,
+		// rather than discarded and lost for good. Held frames older than the keyframe are dropped when it
+		// arrives (drainHeldVp8()).
+		Surface::HeldVp8Unit waiting;
+		waiting.payload              = payload;
+		waiting.x                    = x;
+		waiting.y                    = y;
+		surface.vp8Held[frameNumber] = waiting;
+		while (surface.vp8Held.size() > MAX_VP8_HELD) {
+			surface.vp8Held.erase(surface.vp8Held.begin());
+		}
+
 		// Re-ask occasionally in case the request was lost in the same loss burst that caused the gap.
 		if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
 			surface.unitsWhileAwaiting = 0;
@@ -843,26 +1235,25 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 		}
 		if (decodeVp8Unit(key, surface, frameNumber, x, y, payload)) {
 			drainHeldVp8(key, surface);
+			noteVp8Progress(surface);
 		}
 		return;
 	}
 
-	// Nothing has ever come back for this stream - its sender or the server predates retransmission - so
-	// holding the picture first would only delay the keyframe it is going to need anyway.
-	if (surface.vp8GapsRecovered == 0 && surface.vp8GapsAbandoned >= 3) {
-		surface.awaitingKeyframe   = true;
-		surface.unitsWhileAwaiting = 0;
-
-		++surface.stats.keyframeRequestsLoss;
-		emit keyframeNeeded(senderSession, streamID);
-		return;
-	}
-
-	// A gap: the frames between were lost, or are late. Hold this one, ask for each missing frame once, and
-	// carry on in order as soon as they arrive - a retransmission costs about a round trip, where waiting for
-	// a keyframe cost seconds.
+	// A gap: the frames between were lost, or are late. Hold this one, ask for each missing frame, and carry
+	// on in order as soon as they arrive - a retransmission costs about a round trip, where waiting for a
+	// keyframe cost seconds.
+	//
+	// There used to be a shortcut here that skipped holding once a stream had abandoned three gaps without
+	// ever recovering one, on the theory that its server predated retransmission. Under steady loss two or
+	// three early gaps can be lost for good on a server that does retransmit, and the shortcut then turned
+	// every later loss into a keyframe for the rest of the stream: measured, one run in four of a VP9 screen
+	// share at 2% loss stuck at 1 fps that way. Against a server that really cannot retransmit, holding
+	// costs VP8_HOLD_MSEC before the keyframe request, which is the better trade.
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
-	if (surface.vp8Held.empty()) {
+	// Frames held while waiting for a keyframe never started the clock, so a gap left after that keyframe
+	// starts it here too.
+	if (surface.vp8Held.empty() || surface.vp8GapSinceMsec == 0) {
 		surface.vp8GapSinceMsec = now;
 	}
 
@@ -872,14 +1263,20 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 	held.y                       = y;
 	surface.vp8Held[frameNumber] = held;
 
-	const quint64 firstMissing = std::max(surface.lastFrameNumber + 1, surface.vp8RequestedThrough + 1);
-	for (quint64 missing = firstMissing; missing < frameNumber && missing <= surface.lastFrameNumber + MAX_VP8_HELD;
-		 ++missing) {
-		if (surface.vp8Held.find(missing) == surface.vp8Held.end()) {
-			requestRetransmit(surface, missing);
+	// Whole frames are asked for only once the gap is VP8_WHOLE_FRAME_REQUEST_MSEC old. Most frames
+	// "missing" here are only partly arrived, and the reassembler already asks for exactly the fragments
+	// they lack; asking for the whole frame as well re-sent it in full - measured at about two thirds on
+	// top of a 3 Mbit/s screen share at 2% loss. A frame of which nothing arrived at all is still asked for.
+	if (now - surface.vp8GapSinceMsec >= VP8_WHOLE_FRAME_REQUEST_MSEC) {
+		const quint64 firstMissing = std::max(surface.lastFrameNumber + 1, surface.vp8RequestedThrough + 1);
+		for (quint64 missing = firstMissing; missing < frameNumber && missing <= surface.lastFrameNumber + MAX_VP8_HELD;
+			 ++missing) {
+			if (surface.vp8Held.find(missing) == surface.vp8Held.end()) {
+				requestRetransmit(surface, missing);
+			}
 		}
+		surface.vp8RequestedThrough = std::max(surface.vp8RequestedThrough, frameNumber - 1);
 	}
-	surface.vp8RequestedThrough = std::max(surface.vp8RequestedThrough, frameNumber - 1);
 
 	if (surface.vp8Held.size() > MAX_VP8_HELD || now - surface.vp8GapSinceMsec > VP8_HOLD_MSEC) {
 		// Not coming back in time: fall back to freezing until a keyframe, as before retransmission.
@@ -899,18 +1296,70 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 
 bool VideoGrid::decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frameNumber, unsigned int x, unsigned int y,
 							  const QByteArray &payload) {
+	if (m_decodeWorker) {
+		// Threaded: the frame goes to the decode thread in order, and counts as decoded for the ordering
+		// logic here. If it turns out undecodable, the failures that follow ask for a keyframe (see
+		// onFrameDecoded()), as they would have done here.
+		if (!prepareDecoder(surface)) {
+			noteDecodeFailure(surface);
+			return false;
+		}
+
+		surface.lastFrameNumber    = frameNumber;
+		surface.hasDecodedFrame    = true;
+		surface.awaitingKeyframe   = false;
+		surface.unitsWhileAwaiting = 0;
+
+		const std::shared_ptr< std::atomic< int > > inFlight = surface.decodesInFlight;
+		inFlight->fetch_add(1);
+
+		const std::shared_ptr< VpxDecoder > vpx = surface.vp8;
+#ifdef USE_H264
+		const std::shared_ptr< H264Decoder > h264 =
+			surface.codec == MumbleProto::VideoState_Codec_H264 ? surface.h264 : nullptr;
+#endif
+		const std::uint64_t epoch = surface.decodeEpoch;
+		const QPointer< VideoGrid > self(this);
+
+		QMetaObject::invokeMethod(
+			m_decodeWorker,
+			[=]() {
+				// Every frame is converted, to be shown at its own time (see presentFrame()), unless the decode
+				// thread has fallen well behind: then only the frame at the end of the queue is worth it.
+				const bool latest = inFlight->load() <= 8;
+				QImage image;
+				bool decoded = false;
+#ifdef USE_H264
+				if (h264) {
+					decoded = h264->decode(payload, latest ? &image : nullptr);
+				} else
+#endif
+				{
+					const auto *bytes = reinterpret_cast< const Mumble::Protocol::byte * >(payload.constData());
+					decoded           = vpx->decode(std::vector< Mumble::Protocol::byte >(
+                                              bytes, bytes + static_cast< std::size_t >(payload.size())),
+                                          latest ? &image : nullptr);
+				}
+				inFlight->fetch_sub(1);
+
+				QMetaObject::invokeMethod(
+					self.data(),
+					[=]() {
+						if (self) {
+							self->onFrameDecoded(key, epoch, frameNumber, x, y, decoded, image);
+						}
+					},
+					Qt::QueuedConnection);
+			},
+			Qt::QueuedConnection);
+
+		return true;
+	}
+
 	const QImage tile = decodeUnit(surface, payload);
 
 	if (tile.isNull()) {
-		if (++surface.consecutiveFailures >= KEYFRAME_REQUEST_AFTER_FAILURES) {
-			// Reset on emit, so a sender that ignores the request is asked again only after another full run
-			// of failures rather than on every subsequent unit.
-			surface.consecutiveFailures = 0;
-
-			++surface.stats.keyframeRequestsFailure;
-			emit keyframeNeeded(surface.senderSession, surface.streamID);
-		}
-
+		noteDecodeFailure(surface);
 		return false;
 	}
 
@@ -950,6 +1399,15 @@ void VideoGrid::drainHeldVp8(std::uint64_t key, Surface &surface) {
 	}
 
 	surface.vp8GapSinceMsec = 0;
+}
+
+void VideoGrid::noteVp8Progress(Surface &surface) {
+	// The hold deadline is for the gap the picture is stuck on now, not for the first gap of a run of them.
+	// Under steady loss a new gap often opens before the last one is fully drained; timing from the first
+	// one abandoned streams that were recovering frame after frame.
+	if (!surface.vp8Held.empty()) {
+		surface.vp8GapSinceMsec = QDateTime::currentMSecsSinceEpoch();
+	}
 }
 
 void VideoGrid::requestRetransmit(Surface &surface, quint64 frameNumber) {
@@ -1101,11 +1559,16 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 	const bool wasBlank    = surface.canvas.isNull();
 	const QSize sizeBefore = surface.canvas.size();
 
-	if (!growToFit(surface.canvas, static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height())) {
-		return;
-	}
+	if (!wasBlank && x == 0 && y == 0 && tile.size() == sizeBefore && tile.format() == surface.canvas.format()) {
+		// A whole frame (VP8, VP9, H.264) replacing a picture of the same size: taken as it is, sharing the
+		// decoded image's pixels, instead of painted over the old one - which copied every pixel of every frame
+		// on the GUI thread, about 8 MB a frame at 1080p.
+		surface.canvas = tile;
+	} else {
+		if (!growToFit(surface.canvas, static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height())) {
+			return;
+		}
 
-	{
 		QPainter painter(&surface.canvas);
 		painter.drawImage(static_cast< int >(x), static_cast< int >(y), tile);
 	}
@@ -1486,6 +1949,17 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	auto *layout = new QHBoxLayout(controls->bar);
 	layout->setContentsMargins(4, 2, 4, 2);
 	layout->setSpacing(4);
+
+	// Who is watching: the count, and on click the names - with the volume each has you at, for a share.
+	controls->viewersButton = new QToolButton(controls->bar);
+	controls->viewersButton->setAutoRaise(true);
+	controls->viewersButton->setFocusPolicy(Qt::NoFocus);
+	controls->viewersButton->setPopupMode(QToolButton::InstantPopup);
+	controls->viewersButton->setMenu(new QMenu(controls->viewersButton));
+	layout->addWidget(controls->viewersButton);
+	refreshViewersButton(controls.get(),
+						 target == FocusTarget::SelfScreen ? m_ownScreenViewers : m_ownCameraViewers);
+
 	layout->addStretch();
 
 	controls->fullscreenButton = new QToolButton(controls->bar);
@@ -1574,6 +2048,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 			}
 			showLevel(value);
 			emit volumeChanged(senderSession, static_cast< float >(value) / 100.0f);
+
+			// The fullscreen bar shows the same level, so it follows.
+			if (m_fullscreenWindow) {
+				static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->refreshVolume();
+			}
 		});
 
 		connect(muteButton, &QToolButton::clicked, slider,
@@ -1832,22 +2311,50 @@ void VideoGrid::updateFullscreenWindow() {
 	// than being handed a copy. See FullscreenVideoWindow's class comment for why the copy was the whole
 	// problem.
 	if (!m_fullscreenWindow) {
-		m_fullscreenWindow = new FullscreenVideoWindow(this, [this](QImage &image, QString &label) {
-			if (m_focus == FocusTarget::SelfCamera) {
-				image = m_selfCameraFrame;
-				label = tr("You");
-			} else if (m_focus == FocusTarget::SelfScreen) {
-				image = m_selfScreenFrame;
-				label = tr("You (screen)");
-			} else if (m_focus == FocusTarget::Surface) {
-				const auto it = m_surfaces.find(m_focusedSurfaceKey);
+		m_fullscreenWindow = new FullscreenVideoWindow(
+			this,
+			[this](QImage &image, QString &label) {
+				if (m_focus == FocusTarget::SelfCamera) {
+					image = m_selfCameraFrame;
+					label = ownTileLabel(false);
+				} else if (m_focus == FocusTarget::SelfScreen) {
+					image = m_selfScreenFrame;
+					label = ownTileLabel(true);
+				} else if (m_focus == FocusTarget::Surface) {
+					const auto it = m_surfaces.find(m_focusedSurfaceKey);
 
-				if (it != m_surfaces.end()) {
-					image = it->second.canvas;
-					label = labelForSurface(it->second);
+					if (it != m_surfaces.end()) {
+						image = it->second.canvas;
+						label = labelForSurface(it->second);
+					}
 				}
-			}
-		});
+			},
+			[this]() {
+				FullscreenVideoWindow::VolumeState state;
+				if (m_focus != FocusTarget::Surface) {
+					return state;
+				}
+
+				const auto it = m_surfaces.find(m_focusedSurfaceKey);
+				// Only a stream with audio of its own has a volume here - a screen share; a camera's sound is
+				// its sender's voice, adjusted from the user list as always.
+				if (it == m_surfaces.end() || it->second.sourceKind == MumbleProto::VideoState_SourceKind_Camera) {
+					return state;
+				}
+
+				const auto level = m_shareVolumePercent.find(it->second.senderSession);
+				state.available  = true;
+				state.percent    = level != m_shareVolumePercent.end()
+									   ? level->second
+									   : static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+				return state;
+			},
+			[this](int percent) {
+				const auto it = m_surfaces.find(m_focusedSurfaceKey);
+				if (m_focus == FocusTarget::Surface && it != m_surfaces.end()) {
+					setShareVolumePercent(it->second.senderSession, percent);
+				}
+			});
 	}
 
 	// A relayout() is the "something structural changed" path - a different tile focused, a stream
@@ -1859,6 +2366,77 @@ void VideoGrid::updateFullscreenWindow() {
 	if (!m_fullscreenWindow->isVisible()) {
 		m_fullscreenWindow->showFullScreen();
 	}
+}
+
+void VideoGrid::setOwnViewers(bool screen, const std::vector< Viewer > &viewers) {
+	(screen ? m_ownScreenViewers : m_ownCameraViewers) = viewers;
+
+	if (TileControlBar *controls = screen ? m_ownScreenControls.get() : m_ownCameraControls.get()) {
+		refreshViewersButton(controls, viewers);
+	}
+
+	if (m_fullscreenWindow && m_focus == (screen ? FocusTarget::SelfScreen : FocusTarget::SelfCamera)) {
+		static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
+	}
+
+	update();
+}
+
+void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector< Viewer > &viewers) {
+	if (!controls || !controls->viewersButton) {
+		return;
+	}
+
+	QStringList lines;
+	QMenu *menu = controls->viewersButton->menu();
+	menu->clear();
+
+	for (const Viewer &viewer : viewers) {
+		const QString line = viewer.volumePercent >= 0
+								 ? tr("%1 - hears you at %2%").arg(viewer.name).arg(viewer.volumePercent)
+								 : viewer.name;
+		lines << line;
+		// Enabled, though they do nothing: a disabled entry is greyed out and hard to read.
+		menu->addAction(line);
+	}
+
+	if (viewers.empty()) {
+		menu->addAction(tr("Nobody is watching"))->setEnabled(false);
+	}
+
+	controls->viewersButton->setText(QStringLiteral("👁 %1").arg(viewers.size()));
+	controls->viewersButton->setToolTip(viewers.empty() ? tr("Nobody is watching")
+														: tr("Watching:\n%1").arg(lines.join(QLatin1Char('\n'))));
+}
+
+QString VideoGrid::ownTileLabel(bool screen) const {
+	const QString base           = screen ? tr("You (screen)") : tr("You");
+	const std::size_t watching = (screen ? m_ownScreenViewers : m_ownCameraViewers).size();
+
+	return watching == 0 ? base : tr("%1 - %n watching", nullptr, static_cast< int >(watching)).arg(base);
+}
+
+int VideoGrid::shareVolumePercent(unsigned int senderSession) const {
+	const auto it = m_shareVolumePercent.find(senderSession);
+
+	return it != m_shareVolumePercent.end() ? it->second
+											: static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+}
+
+void VideoGrid::setShareVolumePercent(unsigned int senderSession, int percent) {
+	// Through the tile's own slider when there is one, so that it, its label and the audio all follow from
+	// the one place a level is set.
+	for (auto &entry : m_remoteControls) {
+		const auto surface = m_surfaces.find(entry.first);
+		if (surface != m_surfaces.end() && surface->second.senderSession == senderSession
+			&& entry.second->volumeSlider) {
+			entry.second->volumeSlider->setValue(percent);
+			return;
+		}
+	}
+
+	m_shareVolumePercent[senderSession] = percent;
+	emit volumeChanged(senderSession, static_cast< float >(percent) / 100.0f);
 }
 
 void VideoGrid::notifyFullscreenContentChanged(const QRect &changed) {
@@ -2030,11 +2608,11 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	int index = 0;
 
 	if (!m_selfCameraFrame.isNull()) {
-		drawInto(m_selfCameraFrame, cellRect(layout, index++), tr("You"));
+		drawInto(m_selfCameraFrame, cellRect(layout, index++), ownTileLabel(false));
 	}
 
 	if (!m_selfScreenFrame.isNull()) {
-		drawInto(m_selfScreenFrame, cellRect(layout, index++), tr("You (screen)"));
+		drawInto(m_selfScreenFrame, cellRect(layout, index++), ownTileLabel(true));
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {

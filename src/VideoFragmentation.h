@@ -37,7 +37,12 @@ namespace Protocol {
 	//
 	// It must stay comfortably below VIDEO_REPLAY_WINDOW, since a unit delivered in reverse needs that
 	// many slots of tolerance.
-	constexpr std::uint32_t MAX_VIDEO_FRAGMENTS_PER_UNIT = 64;
+	//
+	// 256 (about 275 KB) rather than the original 64 (about 69 KB): screen sharing encodes whole frames
+	// with VP9, and a keyframe of a 1080p screen measured 58-123 KB, more for larger screens. Only
+	// keyframes come near this; ordinary frames are a few kilobytes. The server relays fragments one by one
+	// and never applies this limit, so raising it needs no server change.
+	constexpr std::uint32_t MAX_VIDEO_FRAGMENTS_PER_UNIT = 256;
 
 	// How many partially received units a receiver keeps per sender.
 	//
@@ -77,7 +82,10 @@ namespace Protocol {
 	// short against the round trip the retransmission itself costs.
 	constexpr std::uint64_t VIDEO_NACK_DELAY_USEC = 25 * 1000;
 	// A unit is asked for at most this many times, this far apart: a lost retransmission gets one more try.
-	constexpr unsigned int VIDEO_NACK_MAX_ATTEMPTS = 2;
+	// Three: with a whole-frame codec a unit that stays lost freezes the picture until a keyframe, so one
+	// more try (at 325 ms) is worth far more than the few bytes it costs, and still well inside
+	// VIDEO_REASSEMBLY_TIMEOUT_USEC.
+	constexpr unsigned int VIDEO_NACK_MAX_ATTEMPTS = 3;
 	constexpr std::uint64_t VIDEO_NACK_RETRY_USEC  = 150 * 1000;
 	// Units per VideoNack message, which both ends enforce: it bounds what one request can make a sender
 	// re-send.
@@ -93,6 +101,8 @@ namespace Protocol {
 		std::uint64_t frameNumber      = 0;
 		std::uint32_t unitID           = 0;
 		std::uint64_t missingFragments = 0;
+		// Every missing fragment by index, for a unit of more than 64 fragments; missingFragments is then 0.
+		std::vector< std::uint32_t > missingIndices;
 	};
 
 	/**
@@ -283,10 +293,11 @@ namespace Protocol {
 			// Indexed by fragment index. Sized to fragmentCount, which is bounded by
 			// MAX_VIDEO_FRAGMENTS_PER_UNIT before this is allocated.
 			std::vector< std::vector< byte > > fragments;
-			// Bit i is set once fragment i has been stored. A plain integer rather than a vector<bool>
-			// because MAX_VIDEO_FRAGMENTS_PER_UNIT is exactly the width of one, which turns the
-			// completeness test into a single comparison and removes an allocation per unit.
-			std::uint64_t receivedMask  = 0;
+			// Entry i is set once fragment i has been stored; receivedCount reaching fragmentCount means the
+			// unit is complete. A unit can have more fragments than a 64-bit mask holds (a VP9 keyframe of
+			// a whole screen runs to well over a hundred), so this is no longer a single integer.
+			std::vector< bool > received;
+			std::uint32_t receivedCount = 0;
 			std::size_t totalBytes      = 0;
 			std::uint64_t firstSeenUsec = 0;
 			// Whether the geometry fields have been filled in, which only happens once fragment 0 arrives.
@@ -294,12 +305,6 @@ namespace Protocol {
 			// Retransmission requests already made for this unit, and when the last one was.
 			unsigned int nackAttempts  = 0;
 			std::uint64_t lastNackUsec = 0;
-
-			/// The mask value that means "every fragment of this unit has arrived".
-			std::uint64_t completeMask() const {
-				return fragmentCount >= 64 ? ~std::uint64_t{ 0 }
-										   : (std::uint64_t{ 1 } << fragmentCount) - std::uint64_t{ 1 };
-			}
 		};
 
 		std::map< UnitKey, PendingUnit > m_pending;

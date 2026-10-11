@@ -9,10 +9,10 @@
 // sees, so a mistake in tile placement shows up as a wrong picture here rather than as a bug report.
 
 #include "Mumble.pb.h"
-#include "VP8Codec.h"
 #include "VideoEncoder.h"
 #include "VideoGrid.h"
 #include "VideoSource.h"
+#include "VpxCodec.h"
 
 #include <QObject>
 #include <QSignalSpy>
@@ -119,6 +119,10 @@ private slots:
 	void aSenderKeepsItsNameAcrossANewStream();
 	void aStuckDecoderAsksForAKeyframe();
 	void aGapInVp8FramesFreezesInsteadOfCorrupting();
+	void framesBeforeTheFirstKeyframeAreKeptForIt();
+	void threadedDecodingPaintsTheNewestFrame();
+	void bunchedFramesArePlayedOutAtTheirOwnPace();
+	void threadedDecodingDropsFramesOfAStoppedStream();
 	void decodeResumesAtTheNextKeyframe();
 	void anUnrecoverableGapFallsBackToAKeyframe();
 	void aStaleVp8FrameArrivingLateIsDropped();
@@ -468,7 +472,7 @@ void TestVideoGrid::theSenderCountIsCapped() {
 void TestVideoGrid::aVp8StreamIsDecoded() {
 	// Not checking isValid() here: the encoder builds its context on the first frame, once it knows the
 	// resolution, so it is legitimately invalid until then.
-	VP8Encoder encoder;
+	VpxEncoder encoder;
 
 	encoder.setBitrate(600);
 	encoder.setFramerate(30);
@@ -539,7 +543,7 @@ void TestVideoGrid::anUnknownCodecIsDropped() {
 // The grid enforces frame continuity itself: a gap freezes the picture on the last good frame and asks
 // for the missing frame to be re-sent - once, not per held unit. A keyframe is the fallback, below.
 void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
-	VP8Encoder encoder;
+	VpxEncoder encoder;
 	encoder.setBitrate(600);
 	encoder.setFramerate(30);
 
@@ -564,20 +568,25 @@ void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
 	QVERIFY(!afterKeyframe.isNull());
 
 	// Frame 1 has not arrived; frame 2 does. Feeding it to the decoder would "succeed" with garbage, so
-	// the grid must not: the canvas stays exactly the frame-0 picture and frame 1 is asked for again.
+	// the grid must not: the canvas stays exactly the frame-0 picture.
 	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
-	QCOMPARE(retransmit.count(), 1);
-	QCOMPARE(retransmit.at(0).at(2).value< quint64 >(), quint64(1));
 	QCOMPARE(needed.count(), 0);
+	// Not asked for whole yet: a frame that is only partly arrived is completed by the reassembler's own
+	// request for its missing fragments, so the whole frame is asked for only once the gap has lasted.
+	QCOMPARE(retransmit.count(), 0);
 
-	// Further inter-frames while frozen change nothing and do not spam requests.
+	// Further inter-frames while frozen change nothing; once the gap is old enough, frame 1 is asked for -
+	// once, not per held frame.
+	// Longer than VideoGrid::VP8_WHOLE_FRAME_REQUEST_MSEC (100 ms), well short of the hold limit.
+	QTest::qWait(150);
 	const auto f3 = encoder.encode(source.render(3), STREAM, 3, 3, false);
 	deliverFrame(grid, f3, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
 
 	QCOMPARE(meanDifference(grid.surfaceFor(SENDER, STREAM), afterKeyframe), 0.0);
 	QCOMPARE(retransmit.count(), 1);
+	QCOMPARE(retransmit.at(0).at(2).value< quint64 >(), quint64(1));
 	QCOMPARE(needed.count(), 0);
 
 	// The re-sent frame 1 arrives: frames 1, 2 and 3 are decoded in order, with no keyframe needed.
@@ -587,8 +596,138 @@ void TestVideoGrid::aGapInVp8FramesFreezesInsteadOfCorrupting() {
 	QCOMPARE(needed.count(), 0);
 }
 
+// A keyframe is many fragments where an inter-frame is a few, so under loss the frames after it routinely
+// complete first while it is still being retransmitted. They must wait for it, not be thrown away: the
+// reassembler never rebuilds a unit it has already completed, so a discarded frame is gone for good.
+void TestVideoGrid::framesBeforeTheFirstKeyframeAreKeptForIt() {
+	VpxEncoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	QSignalSpy needed(&grid, &VideoGrid::keyframeNeeded);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const auto f0 = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	const auto f1 = encoder.encode(source.render(1), STREAM, 1, 1, false);
+	const auto f2 = encoder.encode(source.render(2), STREAM, 2, 2, false);
+	QVERIFY(!f0.empty() && !f1.empty() && !f2.empty());
+
+	// Frames 1 and 2 first: nothing to show yet.
+	deliverFrame(grid, f1, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	deliverFrame(grid, f2, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	// The keyframe completes last; frames 1 and 2 are then decoded after it, so the picture is frame 2's.
+	deliverFrame(grid, f0, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	VpxDecoder reference;
+	reference.decode(f0[0].payload);
+	reference.decode(f1[0].payload);
+	const QImage expected = reference.decode(f2[0].payload);
+	QVERIFY(!expected.isNull());
+
+	QVERIFY(meanDifference(grid.surfaceFor(SENDER, STREAM), expected) < 1.0);
+	QCOMPARE(needed.count(), 0);
+}
+
+// Threaded decoding: frames are decoded on the decode thread in order and painted when they come back; a
+// burst delivered faster than the thread decodes ends on the last frame's picture.
+void TestVideoGrid::threadedDecodingPaintsTheNewestFrame() {
+	VpxEncoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(320, 240);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	grid.setThreadedDecoding(true);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	VpxDecoder reference;
+	QImage expected;
+	for (int i = 0; i < 20; ++i) {
+		const auto units = encoder.encode(source.render(i), STREAM, static_cast< std::uint64_t >(i),
+										  static_cast< std::uint64_t >(i), i == 0);
+		QVERIFY(!units.empty());
+		expected = reference.decode(units[0].payload);
+		deliverFrame(grid, units, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	}
+	QVERIFY(!expected.isNull());
+
+	QTRY_VERIFY_WITH_TIMEOUT(meanDifference(grid.surfaceFor(SENDER, STREAM), expected) < 1.0, 5000);
+}
+
+// Frames captured 33 ms apart that arrive all at once - as they do right after a lost one is re-sent - are
+// shown at the pace they were captured, not all in the same instant.
+void TestVideoGrid::bunchedFramesArePlayedOutAtTheirOwnPace() {
+	VpxEncoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(320, 240);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	grid.setThreadedDecoding(true);
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	VpxDecoder reference;
+	QImage last;
+	std::vector< std::vector< EncodedVideoUnit > > frames;
+	for (int i = 0; i < 10; ++i) {
+		frames.push_back(encoder.encode(source.render(i), STREAM, static_cast< std::uint64_t >(i),
+										static_cast< std::uint64_t >(i) * 33333 + 1000000, i == 0));
+		QVERIFY(!frames.back().empty());
+		last = reference.decode(frames.back()[0].payload);
+	}
+
+	for (const auto &units : frames) {
+		for (const EncodedVideoUnit &unit : units) {
+			grid.onVideoUnitReceived(SENDER, STREAM, unit.header.frameNumber, unit.header.isKeyframe, unit.header.x,
+									 unit.header.y,
+									 QByteArray(reinterpret_cast< const char * >(unit.payload.data()),
+												static_cast< int >(unit.payload.size())),
+									 unit.header.captureTimestampUsec);
+		}
+	}
+
+	// Something is shown promptly, but not yet the last frame: that one is due a playout delay later.
+	QTRY_VERIFY_WITH_TIMEOUT(!grid.surfaceFor(SENDER, STREAM).isNull(), 2000);
+	QVERIFY(meanDifference(grid.surfaceFor(SENDER, STREAM), last) > 1.0);
+
+	// And then it is.
+	QTRY_VERIFY_WITH_TIMEOUT(meanDifference(grid.surfaceFor(SENDER, STREAM), last) < 1.0, 2000);
+}
+
+void TestVideoGrid::threadedDecodingDropsFramesOfAStoppedStream() {
+	VpxEncoder encoder;
+	encoder.setBitrate(600);
+
+	SyntheticVideoSource source(320, 240);
+	source.setChangeRatio(100);
+
+	VideoGrid grid;
+	grid.setThreadedDecoding(true);
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const auto key = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	deliverFrame(grid, key, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	// Stopped watching before the decode thread is done with the frame: nothing of it is painted.
+	grid.setWatching(SENDER, STREAM, false);
+	QTest::qWait(300);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+}
+
 void TestVideoGrid::decodeResumesAtTheNextKeyframe() {
-	VP8Encoder encoder;
+	VpxEncoder encoder;
 	encoder.setBitrate(600);
 	encoder.setFramerate(30);
 
@@ -620,7 +759,7 @@ void TestVideoGrid::decodeResumesAtTheNextKeyframe() {
 // When the missing frame does not come back in time, the old recovery takes over: one keyframe request,
 // and the picture stays frozen (not corrupted) until it is answered.
 void TestVideoGrid::anUnrecoverableGapFallsBackToAKeyframe() {
-	VP8Encoder encoder;
+	VpxEncoder encoder;
 	encoder.setBitrate(600);
 	encoder.setFramerate(30);
 
@@ -654,7 +793,7 @@ void TestVideoGrid::anUnrecoverableGapFallsBackToAKeyframe() {
 // reassembling long after frame N+1 played. Decoding the latecomer would rewind the decoder's reference
 // state and corrupt everything after it, so stale frames are dropped before the decoder sees them.
 void TestVideoGrid::aStaleVp8FrameArrivingLateIsDropped() {
-	VP8Encoder encoder;
+	VpxEncoder encoder;
 	encoder.setBitrate(600);
 	encoder.setFramerate(30);
 

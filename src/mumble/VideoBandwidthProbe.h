@@ -6,7 +6,7 @@
 #ifndef MUMBLE_MUMBLE_VIDEOBANDWIDTHPROBE_H_
 #define MUMBLE_MUMBLE_VIDEOBANDWIDTHPROBE_H_
 
-#include "VP8Codec.h"
+#include "VpxCodec.h"
 
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QObject>
@@ -79,7 +79,7 @@ protected slots:
 
 protected:
 	std::unique_ptr< VideoSource > m_source;
-	VP8Encoder m_encoder;
+	VpxEncoder m_encoder;
 
 	QSize m_resolution;
 	unsigned int m_framerate = 30;

@@ -15,8 +15,8 @@ pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
 set(TESTVIDEOGRID_SOURCES
 	TestVideoGrid.cpp
 
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.cpp"
-	"${MUMBLE_SOURCE_DIR}/VP8Codec.h"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.cpp"
+	"${MUMBLE_SOURCE_DIR}/VpxCodec.h"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.h"
 	"${MUMBLE_SOURCE_DIR}/VideoGrid.cpp"

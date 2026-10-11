@@ -296,11 +296,17 @@ struct Settings {
 	int iVideoTileSize = 128;
 	/// Whether the video wizard has been shown once already.
 	bool videoWizardShown = false;
-	/// Screen-share codec: 0 = automatic (H.264 when a hardware encoder opens, else TiledImage),
-	/// 1 = TiledImage always, 2 = H.264 (TiledImage when no hardware encoder opens).
+	/// Screen-share codec: 0 = automatic (H.264 when a hardware encoder opens, else VP9), 1 = VP9 always,
+	/// 2 = H.264 (VP9 when no hardware encoder opens - in effect the same as automatic). 1 meant TiledImage
+	/// in earlier versions; VP9 replaced it as the codec that needs no graphics card.
 	int screenShareCodec = 0;
 	/// H.264 screen-share target bitrate, kbit/s. Separate from iVideoBitrate, which is a camera's.
 	int iScreenShareBitrate = 6000;
+	/// VP9 screen-share target bitrate, kbit/s. VP9 needs about half what a hardware H.264 encoder does for
+	/// the same picture: 3 Mbit/s held text sharp and a playing video smooth at 1080p in measurement.
+	int iScreenShareVp9Bitrate = 3000;
+	/// Screen-share frame rate, either codec.
+	int iScreenShareFramerate = 30;
 
 	int iFramesPerPacket                = 2;
 	QString qsAudioInput                = {};

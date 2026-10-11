@@ -1320,6 +1320,11 @@ void MainWindow::msgPluginDataTransmission(const MumbleProto::PluginDataTransmis
 	const ClientUser *sender   = ClientUser::get(msg.sendersession());
 	const std::string &msgData = msg.data();
 
+	// Mumble Video's own "who is watching" reports travel this way too; they are not for plugins.
+	if (sender && handleWatchReport(msg.sendersession(), msg.dataid(), msgData)) {
+		return;
+	}
+
 	if (sender) {
 		static_assert(sizeof(unsigned char) == sizeof(uint8_t), "Unsigned char does not have expected 8bit size");
 		// As long as above assertion is true, we are only casting away the sign, which is fine

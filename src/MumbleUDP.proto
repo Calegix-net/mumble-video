@@ -133,6 +133,11 @@ message VideoNack {
 		// Bit i set: fragment i is missing. 0 means the whole unit is missing (no fragment of it arrived,
 		// so the receiver cannot know how many it had).
 		fixed64 missing_fragments = 3;
+		// The missing fragments by index, for a unit with more fragments than missing_fragments has bits
+		// (a VP9 keyframe runs to over a hundred). When present it takes precedence over
+		// missing_fragments, which is then 0 so that a sender predating this field re-sends the whole
+		// unit. A server predating it relays it unchanged, as an unknown field.
+		repeated uint32 missing_indices = 4;
 	}
 
 	// Session of the stream's sender.

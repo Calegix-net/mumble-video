@@ -67,9 +67,11 @@ namespace Protocol {
 	//
 	// This replaces the fixed 30-packet tolerance that comes from OCB2's one-byte rolling IV, which is
 	// what previously made a burst of more than 30 fragments undeliverable if the network reordered it.
-	// 128 is comfortably more than the largest unit's fragment count, so a whole unit arriving in
-	// reverse order still decrypts.
-	constexpr std::size_t VIDEO_REPLAY_WINDOW = 128;
+	// 512 is comfortably more than the largest unit's fragment count (MAX_VIDEO_FRAGMENTS_PER_UNIT, 256),
+	// so a whole unit arriving in reverse order still decrypts. An endpoint with a smaller window - a server
+	// built before this was raised - only rejects packets reordered by more than its own window, which an
+	// in-order burst never is.
+	constexpr std::size_t VIDEO_REPLAY_WINDOW = 512;
 
 	// Sequence 0 is never sent, so a receiver can use "highest seen == 0" to mean "nothing yet".
 	constexpr std::uint32_t VIDEO_FIRST_SEQUENCE = 1;

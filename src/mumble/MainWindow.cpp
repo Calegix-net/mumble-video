@@ -504,6 +504,9 @@ void MainWindow::createActions() {
 
 void MainWindow::setupVideoGrid() {
 	m_videoGrid = new VideoGrid(this);
+	// Decoding off the GUI thread, so that watching a share cannot make the window stutter.
+	// MUMBLE_VIDEO_UNTHREADED keeps decoding and encoding on the GUI thread, to measure what threading buys.
+	m_videoGrid->setThreadedDecoding(qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_UNTHREADED"));
 
 	// Not a widget, and not shown - it exists purely to pull OpusAudio-coded units off the same
 	// video-unit signal the grid listens to and hand them to whatever plays screen-share audio.
@@ -645,6 +648,8 @@ void MainWindow::setupVideoGrid() {
 				if (m_videoGrid->isScreenStream(senderSession, streamID)) {
 					syncScreenShareAudioSubscription(senderSession);
 				}
+
+				sendWatchReport(senderSession, streamID, wantToWatch);
 			});
 
 	// A camera frame that never arrived at all: ask for it again rather than waiting for a keyframe.
@@ -665,6 +670,23 @@ void MainWindow::setupVideoGrid() {
 
 	connect(m_videoGrid, &VideoGrid::volumeChanged, this, [this](unsigned int senderSession, float multiplier) {
 		setScreenShareVolumeForSender(senderSession, multiplier);
+
+		m_volumeReportPending.insert(senderSession);
+		m_volumeReportTimer->start();
+	});
+
+	m_volumeReportTimer = new QTimer(this);
+	m_volumeReportTimer->setSingleShot(true);
+	m_volumeReportTimer->setInterval(600);
+	connect(m_volumeReportTimer, &QTimer::timeout, this, [this]() {
+		for (const unsigned int senderSession : m_volumeReportPending) {
+			for (const std::uint64_t key : m_reportedWatching) {
+				if ((key >> 32) == senderSession) {
+					sendWatchReport(senderSession, static_cast< unsigned int >(key & 0xffffffffu), true);
+				}
+			}
+		}
+		m_volumeReportPending.clear();
 	});
 
 	// A stream the grid gave up on for having gone silent too long - see VideoGrid's stale-stream
@@ -692,6 +714,8 @@ void MainWindow::setupVideoGrid() {
 
 void MainWindow::setupVideoBroadcast() {
 	m_videoBroadcaster = new VideoBroadcaster(this);
+	// Encoding off the GUI thread, so that it cannot make the window stutter - see setThreadedEncoding().
+	m_videoBroadcaster->setThreadedEncoding(qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_UNTHREADED"));
 	m_videoBroadcaster->setNextStreamID(allocateStreamID());
 	m_videoBroadcaster->setStreamIDAllocator([this]() { return allocateStreamID(); });
 	connect(m_videoBroadcaster, &VideoBroadcaster::streamResized, this,
@@ -763,6 +787,7 @@ void MainWindow::setupVideoBroadcast() {
 		if (!active) {
 			m_videoGrid->clearSelfCameraFrame();
 		}
+		refreshOwnViewers();
 	});
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::unitReady, this,
@@ -776,17 +801,22 @@ void MainWindow::setupVideoBroadcast() {
 /// The protocol codec a broadcaster's codec number (see VideoBroadcaster::setCodec()) is announced as.
 static MumbleProto::VideoState_Codec announcedCodec(int codec) {
 	switch (codec) {
-		case 1:
+		case VideoBroadcaster::CODEC_TILED:
 			return MumbleProto::VideoState_Codec_TiledImage;
 		case VideoBroadcaster::CODEC_H264:
 			return MumbleProto::VideoState_Codec_H264;
+		case VideoBroadcaster::CODEC_VP9:
+			return MumbleProto::VideoState_Codec_VP9;
 		default:
 			return MumbleProto::VideoState_Codec_VP8;
 	}
 }
 
-/// The codec a new screen share uses: H.264 when the settings allow it and a hardware encoder opens on
-/// this machine, TiledImage otherwise - never VP8, whose software encoder would sit on the GUI thread.
+/// The codec a new screen share uses: H.264 when the settings allow it and a hardware encoder opens on this
+/// machine - the graphics card does the work, as with Discord's Go Live - and VP9 in its screen-content mode
+/// otherwise, which needs no graphics card and about half the bitrate for the same picture (see
+/// VpxCodec.h). Never VP8 or TiledImage any more: VP8 has no screen tuning, and TiledImage cost 17-77 Mbit/s
+/// the moment anything moved.
 static int screenShareCodec(const Settings &settings) {
 #ifdef USE_H264
 	if (settings.screenShareCodec != 1 && H264Encoder::isAvailable()) {
@@ -795,13 +825,23 @@ static int screenShareCodec(const Settings &settings) {
 #else
 	Q_UNUSED(settings);
 #endif
-	return 1;
+	return VideoBroadcaster::CODEC_VP9;
 }
 
-/// The bitrate a screen share in the given codec is configured with. TiledImage ignores it.
+/// The bitrate a screen share in the given codec is configured with.
 static unsigned int screenShareBitrate(const Settings &settings, int codec) {
 	return static_cast< unsigned int >(codec == VideoBroadcaster::CODEC_H264 ? settings.iScreenShareBitrate
-																			 : settings.iVideoBitrate);
+																			 : settings.iScreenShareVp9Bitrate);
+}
+
+void MainWindow::configureScreenBroadcaster(const Settings &settings) {
+	const int codec = screenShareCodec(settings);
+	m_screenVideoBroadcaster->configure(codec, screenShareBitrate(settings, codec),
+										static_cast< unsigned int >(settings.iScreenShareFramerate),
+										settings.iVideoTileQuality, settings.iVideoTileSize);
+	qInfo("Screen share: %s at %d kbit/s, %d fps",
+		  codec == VideoBroadcaster::CODEC_H264 ? "hardware H.264" : "VP9 (software)",
+		  static_cast< int >(screenShareBitrate(settings, codec)), settings.iScreenShareFramerate);
 }
 
 void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
@@ -853,6 +893,7 @@ void MainWindow::remoteWatchAll(bool watching) {
 
 void MainWindow::setupScreenShare() {
 	m_screenVideoBroadcaster = new VideoBroadcaster(this);
+	m_screenVideoBroadcaster->setThreadedEncoding(qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_UNTHREADED"));
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 	m_screenVideoBroadcaster->setStreamIDAllocator([this]() { return allocateStreamID(); });
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::streamResized, this,
@@ -978,6 +1019,7 @@ void MainWindow::setupScreenShare() {
 		if (!active) {
 			m_videoGrid->clearSelfScreenFrame();
 		}
+		refreshOwnViewers();
 	});
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::unitReady, this,
@@ -1069,7 +1111,9 @@ void MainWindow::toggleCameraShare(bool share) {
 		return;
 	}
 
-	m_videoBroadcaster->configure(settings.videoCodec, static_cast< unsigned int >(settings.iVideoBitrate),
+	// Always VP8: Settings::videoCodec may still say tiled from an earlier version, which cost a camera
+	// several times the bandwidth.
+	m_videoBroadcaster->configure(VideoBroadcaster::CODEC_VP8, static_cast< unsigned int >(settings.iVideoBitrate),
 								  static_cast< unsigned int >(settings.iVideoFramerate), settings.iVideoTileQuality,
 								  settings.iVideoTileSize);
 
@@ -1098,8 +1142,7 @@ void MainWindow::toggleCameraShare(bool share) {
 	MumbleProto::VideoState mpvs;
 	mpvs.set_stream_id(m_videoBroadcaster->streamID());
 	mpvs.set_active(true);
-	mpvs.set_codec(settings.videoCodec == 1 ? MumbleProto::VideoState_Codec_TiledImage
-											: MumbleProto::VideoState_Codec_VP8);
+	mpvs.set_codec(announcedCodec(m_videoBroadcaster->codec()));
 	mpvs.set_width(static_cast< unsigned int >(settings.iVideoWidth));
 	mpvs.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 	mpvs.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
@@ -1171,12 +1214,9 @@ void MainWindow::toggleScreenShare(bool share) {
 			}
 		}
 
-		// The same codec choice as a real share (see screenShareCodec()), so a headless rig exercises
-		// whichever one a real share on this machine would use.
-		const int screenCodec = screenShareCodec(mockSettings);
-		m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(mockSettings, screenCodec),
-											static_cast< unsigned int >(mockSettings.iVideoFramerate),
-											mockSettings.iVideoTileQuality, mockSettings.iVideoTileSize);
+		// The same codec choice and settings as a real share (see configureScreenBroadcaster()), so a headless
+		// rig exercises whichever codec a real share on this machine would use.
+		configureScreenBroadcaster(mockSettings);
 		m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
 		auto mock = std::make_unique< SyntheticVideoSource >(mockWidth, mockHeight);
@@ -1185,7 +1225,8 @@ void MainWindow::toggleScreenShare(bool share) {
 		const bool motion = qEnvironmentVariable("MUMBLE_MOCK_SCREEN") == QLatin1String("motion");
 		mock->setScreenLike(!motion);
 		mock->setFilmLike(motion);
-		mock->setInterval(mockSettings.iVideoFramerate > 0 ? std::max(1, 1000 / mockSettings.iVideoFramerate) : 66);
+		mock->setInterval(
+			mockSettings.iScreenShareFramerate > 0 ? std::max(1, 1000 / mockSettings.iScreenShareFramerate) : 66);
 
 		const QString description = mock->describe();
 
@@ -1213,7 +1254,7 @@ void MainWindow::toggleScreenShare(bool share) {
 		state.set_source_name(u8(description));
 		state.set_width(static_cast< unsigned int >(mockWidth));
 		state.set_height(static_cast< unsigned int >(mockHeight));
-		state.set_max_framerate(static_cast< unsigned int >(mockSettings.iVideoFramerate));
+		state.set_max_framerate(static_cast< unsigned int >(mockSettings.iScreenShareFramerate));
 		Global::get().sh->sendMessage(state);
 
 		Global::get().l->log(Log::Information, tr("Sharing screen: %1").arg(description));
@@ -1225,12 +1266,7 @@ void MainWindow::toggleScreenShare(bool share) {
 #	ifdef USE_SCREEN_SHARE_PIPEWIRE
 	// No picker of our own: the desktop portal shows its own, and asking twice would be both redundant
 	// and misleading, since the portal's answer is the one that decides what is captured.
-	const Settings &pwSettings = Global::get().s;
-
-	const int screenCodec = screenShareCodec(pwSettings);
-	m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(pwSettings, screenCodec),
-										static_cast< unsigned int >(pwSettings.iVideoFramerate),
-										pwSettings.iVideoTileQuality, pwSettings.iVideoTileSize);
+	configureScreenBroadcaster(Global::get().s);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
 	auto pipeWireSource = std::make_unique< PipeWireScreenVideoSource >(PortalScreenCast::SourceType::Any, true);
@@ -1285,14 +1321,8 @@ void MainWindow::toggleScreenShare(bool share) {
 	}
 
 	const ScreenShareTargetKind targetKind = picker.targetKind();
-	const Settings &settings               = Global::get().s;
 
-	// H.264 on the graphics card when there is one (see screenShareCodec()), else TiledImage. Never VP8:
-	// its software encoder would run on this thread, and a still desktop is what TiledImage is built for.
-	const int screenCodec = screenShareCodec(settings);
-	m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(settings, screenCodec),
-										static_cast< unsigned int >(settings.iVideoFramerate),
-										settings.iVideoTileQuality, settings.iVideoTileSize);
+	configureScreenBroadcaster(Global::get().s);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
 	MumbleProto::VideoState_SourceKind sourceKind = MumbleProto::VideoState_SourceKind_Display;
@@ -1617,6 +1647,9 @@ void MainWindow::pruneDepartedVideoSenders() {
 
 		removeScreenShareAudioBuffersForSender(senderSession);
 	}
+
+	// Viewers who have left, likewise.
+	refreshOwnViewers();
 }
 
 void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float multiplier) {
@@ -1631,6 +1664,123 @@ void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float
 			entry.second.buffer->setVolume(multiplier);
 		}
 	}
+}
+
+void MainWindow::sendWatchReport(unsigned int senderSession, unsigned int streamID, bool watching) {
+	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+
+	if (watching) {
+		m_reportedWatching.insert(key);
+	} else {
+		m_reportedWatching.erase(key);
+	}
+
+	if (!Global::get().sh || !Global::get().sh->isRunning() || !ClientUser::get(senderSession)) {
+		return;
+	}
+
+	// Version, stream, watching, volume: "1 <stream id> <0|1> <percent, or -1 for a camera>".
+	const int volume = m_videoGrid->isScreenStream(senderSession, streamID)
+						   ? m_videoGrid->shareVolumePercent(senderSession)
+						   : -1;
+	const QByteArray data =
+		QStringLiteral("1 %1 %2 %3").arg(streamID).arg(watching ? 1 : 0).arg(volume).toUtf8();
+
+	MumbleProto::PluginDataTransmission mpdt;
+	mpdt.set_sendersession(Global::get().uiSession);
+	mpdt.add_receiversessions(senderSession);
+	mpdt.set_data(data.constData(), static_cast< std::size_t >(data.size()));
+	mpdt.set_dataid(WATCH_REPORT_DATA_ID);
+
+	Global::get().sh->sendMessage(mpdt);
+}
+
+bool MainWindow::handleWatchReport(unsigned int viewerSession, const std::string &dataID, const std::string &data) {
+	if (dataID != WATCH_REPORT_DATA_ID) {
+		return false;
+	}
+
+	const QStringList fields = QString::fromUtf8(data.data(), static_cast< int >(data.size())).split(QLatin1Char(' '));
+	bool ok[3]               = { false, false, false };
+
+	if (fields.size() < 4 || fields[0] != QLatin1String("1")) {
+		return true;
+	}
+
+	const unsigned int streamID = fields[1].toUInt(&ok[0]);
+	const bool watching         = fields[2].toInt(&ok[1]) != 0;
+	const int volume            = fields[3].toInt(&ok[2]);
+
+	if (!ok[0] || !ok[1] || !ok[2]) {
+		return true;
+	}
+
+	// Only about a stream this client is sending right now: a report that arrives after the share it was
+	// about has ended must not make it look watched once the next one starts.
+	const bool own = (m_videoBroadcaster && m_videoBroadcaster->isActive() && m_videoBroadcaster->streamID() == streamID)
+					 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive()
+						 && m_screenVideoBroadcaster->streamID() == streamID);
+
+	if (own && watching) {
+		m_ownStreamViewers[streamID][viewerSession] = std::clamp(volume, -1, 1000);
+	} else {
+		const auto it = m_ownStreamViewers.find(streamID);
+		if (it != m_ownStreamViewers.end()) {
+			it->second.erase(viewerSession);
+		}
+	}
+
+	refreshOwnViewers();
+
+	return true;
+}
+
+void MainWindow::refreshOwnViewers() {
+	if (!m_videoGrid) {
+		return;
+	}
+
+	const auto viewersOf = [this](const VideoBroadcaster *broadcaster) {
+		std::vector< VideoGrid::Viewer > viewers;
+
+		if (!broadcaster || !broadcaster->isActive()) {
+			return viewers;
+		}
+
+		const auto it = m_ownStreamViewers.find(broadcaster->streamID());
+		if (it == m_ownStreamViewers.end()) {
+			return viewers;
+		}
+
+		// Anyone who has left the server is not watching any more, whether or not their client said so.
+		for (auto viewer = it->second.begin(); viewer != it->second.end();) {
+			const ClientUser *user = ClientUser::get(viewer->first);
+			if (!user) {
+				viewer = it->second.erase(viewer);
+				continue;
+			}
+			viewers.push_back({ user->qsName, viewer->second });
+			++viewer;
+		}
+
+		std::sort(viewers.begin(), viewers.end(), [](const VideoGrid::Viewer &a, const VideoGrid::Viewer &b) {
+			return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+		});
+
+		return viewers;
+	};
+
+	// Streams that have ended are forgotten: their ids will not be reported on again.
+	for (auto it = m_ownStreamViewers.begin(); it != m_ownStreamViewers.end();) {
+		const bool current = (m_videoBroadcaster && m_videoBroadcaster->isActive()
+							  && m_videoBroadcaster->streamID() == it->first)
+							 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive()
+								 && m_screenVideoBroadcaster->streamID() == it->first);
+		it = current ? std::next(it) : m_ownStreamViewers.erase(it);
+	}
+
+	m_videoGrid->setOwnViewers(false, viewersOf(m_videoBroadcaster));
+	m_videoGrid->setOwnViewers(true, viewersOf(m_screenVideoBroadcaster));
 }
 
 void MainWindow::setupGui() {
@@ -4855,6 +5005,11 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 
 	m_subscribedScreenAudio.clear();
 	m_pendingScreenAudioUnsubscribes.clear();
+
+	// Sessions are renumbered on reconnect; viewers report again when they resume watching.
+	m_ownStreamViewers.clear();
+	m_reportedWatching.clear();
+	refreshOwnViewers();
 
 	// Shares are not stopped here. If this drop is about to be retried (decided at the end of this
 	// function), they keep capturing and are re-announced once the new connection is synchronised - see

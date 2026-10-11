@@ -112,6 +112,7 @@ static HANDLE loadQoS() {
 #endif
 
 ServerHandler::ServerHandler() : database(new Database(QLatin1String("ServerHandler"))) {
+	m_nackStats.enabled = !qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS");
 	cConnection.reset();
 	qusUdp                  = nullptr;
 	bStrong                 = false;
@@ -492,6 +493,7 @@ void ServerHandler::resendVideoUnits(const MumbleUDP::VideoNack &request) {
 	}
 
 	const std::uint64_t nowUsec = static_cast< std::uint64_t >(tTimestamp.elapsed().count());
+	maybeLogNackStats(nowUsec);
 	if (nowUsec - m_resendWindowStartUsec >= 1000 * 1000) {
 		m_resendWindowStartUsec = nowUsec;
 		m_resendWindowBytes     = 0;
@@ -506,23 +508,45 @@ void ServerHandler::resendVideoUnits(const MumbleUDP::VideoNack &request) {
 		const auto sent = m_sentHistory.find(SentUnitKey{ request.stream_id(), unit.frame_number(), unit.unit_id() });
 		if (sent == m_sentHistory.end()) {
 			// Already gone from the history: too old to be worth sending now anyway.
+			++m_nackStats.unitsNoLongerHeld;
+			continue;
+		}
+		++m_nackStats.requestsAnswered;
+
+		const std::vector< std::vector< Mumble::Protocol::byte > > &fragments = sent->second.fragments;
+
+		const auto resend = [&](std::size_t i) {
+			const std::vector< Mumble::Protocol::byte > &fragment = fragments[i];
+			if (m_resendWindowBytes + fragment.size() > MAX_RESEND_BYTES_PER_SECOND) {
+				++m_nackStats.resendBudgetHit;
+				return false;
+			}
+			if (!sendVideoPacket(fragment)) {
+				return false;
+			}
+			m_resendWindowBytes += fragment.size();
+			++m_nackStats.fragmentsResent;
+			return true;
+		};
+
+		// Named by index: a unit of more than 64 fragments. Indices are checked, not trusted.
+		if (unit.missing_indices_size() > 0) {
+			for (std::uint32_t index : unit.missing_indices()) {
+				if (index < fragments.size() && !resend(index)) {
+					return;
+				}
+			}
 			continue;
 		}
 
 		const std::uint64_t missing = unit.missing_fragments();
-		for (std::size_t i = 0; i < sent->second.fragments.size(); ++i) {
+		for (std::size_t i = 0; i < fragments.size(); ++i) {
 			if (missing != 0 && (i >= 64 || !(missing & (std::uint64_t{ 1 } << i)))) {
 				continue;
 			}
-
-			const std::vector< Mumble::Protocol::byte > &fragment = sent->second.fragments[i];
-			if (m_resendWindowBytes + fragment.size() > MAX_RESEND_BYTES_PER_SECOND) {
+			if (!resend(i)) {
 				return;
 			}
-			if (!sendVideoPacket(fragment)) {
-				return;
-			}
-			m_resendWindowBytes += fragment.size();
 		}
 	}
 }
@@ -548,6 +572,7 @@ void ServerHandler::requestVideoRetransmission(unsigned int senderSession, unsig
 	// 0: the whole unit - nothing of it arrived, so which fragments it had is unknown here.
 	unit->set_missing_fragments(0);
 
+	++m_nackStats.wholeFramesRequested;
 	sendVideoNack(nack);
 }
 
@@ -572,7 +597,27 @@ void ServerHandler::requestVideoUnitsRetransmission(unsigned int senderSession, 
 		unit->set_missing_fragments(0);
 	}
 
+	m_nackStats.wholeFramesRequested += static_cast< std::uint64_t >(nack.units_size());
 	sendVideoNack(nack);
+}
+
+void ServerHandler::maybeLogNackStats(std::uint64_t nowUsec) {
+	std::uint64_t last = m_nackStats.lastLogUsec.load();
+	// Called from both threads; whichever claims the slot logs it.
+	if (!m_nackStats.enabled || nowUsec - last < 2000000
+		|| !m_nackStats.lastLogUsec.compare_exchange_strong(last, nowUsec)) {
+		return;
+	}
+
+	qInfo("VideoNackStats requestsSent=%llu unitsRequested=%llu wholeFramesRequested=%llu requestsAnswered=%llu "
+		  "fragmentsResent=%llu unitsNoLongerHeld=%llu resendBudgetHit=%llu",
+		  static_cast< unsigned long long >(m_nackStats.requestsSent.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.unitsRequested.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.wholeFramesRequested.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.requestsAnswered.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.fragmentsResent.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.unitsNoLongerHeld.exchange(0)),
+		  static_cast< unsigned long long >(m_nackStats.resendBudgetHit.exchange(0)));
 }
 
 void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
@@ -580,12 +625,15 @@ void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
 	// bounded amount, leaving room for its subscriptions and keyframe requests.
 	constexpr unsigned int MAX_NACK_MESSAGES_PER_SECOND = 30;
 
+	maybeLogNackStats(nowUsec);
+
 	std::vector< Mumble::Protocol::VideoNackRequest > requests;
 	m_videoReassembler.collectNacks(nowUsec, requests);
 
 	if (requests.empty()) {
 		return;
 	}
+	m_nackStats.unitsRequested += requests.size();
 
 	if (nowUsec - m_nackWindowStartUsec >= 1000 * 1000) {
 		m_nackWindowStartUsec  = nowUsec;
@@ -604,6 +652,9 @@ void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
 			unit->set_frame_number(request.frameNumber);
 			unit->set_unit_id(request.unitID);
 			unit->set_missing_fragments(request.missingFragments);
+			for (std::uint32_t index : request.missingIndices) {
+				unit->add_missing_indices(index);
+			}
 		}
 	}
 
@@ -612,6 +663,7 @@ void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
 			return;
 		}
 		++m_nackMessagesInWindow;
+		++m_nackStats.requestsSent;
 		sendVideoNack(entry.second);
 	}
 }
@@ -675,7 +727,8 @@ void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, 
 		emit videoUnitReceived(
 			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,
 			unit.header.x, unit.header.y,
-			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())));
+			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())),
+			unit.header.captureTimestampUsec);
 	}
 }
 

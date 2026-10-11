@@ -118,6 +118,8 @@ private slots:
 	void roundtripSingleFragment();
 	void roundtripMultiFragment();
 	void roundtripAtMaxFragmentCount();
+	void nackNamesMissingFragmentsWithinTheMask();
+	void nackNamesMissingFragmentsBeyondTheMask();
 	void fragmentCountsAtBoundaries();
 	void outOfOrderDeliveryReassembles();
 	void duplicateFragmentsAreIgnored();
@@ -344,6 +346,63 @@ void TestVideoFragmentation::roundtripAtMaxFragmentCount() {
 	QCOMPARE(result, VideoReassemblyResult::Complete);
 	QCOMPARE(unit.header, header);
 	QCOMPARE(unit.payload, input);
+}
+
+void TestVideoFragmentation::nackNamesMissingFragmentsWithinTheMask() {
+	VideoFragmenter fragmenter;
+	VideoReassembler reassembler;
+
+	// 64 fragments: the most a 64-bit mask can name.
+	const VideoUnitHeader header = makeMaxHeader();
+	QVERIFY(fragmenter.fragment(header, makePayload(VideoFragmenter::maxUnitSize() / 4)));
+	QVERIFY(fragmenter.packets().size() <= 64);
+
+	VideoUnit unit;
+	for (std::size_t i = 0; i < fragmenter.packets().size(); ++i) {
+		if (i != 3 && i != 40) {
+			reassembler.processPacket(fragmenter.packets()[i], header.senderSession, 0, unit);
+		}
+	}
+
+	std::vector< VideoNackRequest > nacks;
+	reassembler.collectNacks(VIDEO_NACK_DELAY_USEC, nacks);
+
+	QCOMPARE(nacks.size(), static_cast< std::size_t >(1));
+	QCOMPARE(nacks[0].missingFragments, (std::uint64_t{ 1 } << 3) | (std::uint64_t{ 1 } << 40));
+}
+
+void TestVideoFragmentation::nackNamesMissingFragmentsBeyondTheMask() {
+	VideoFragmenter fragmenter;
+	VideoReassembler reassembler;
+
+	// A unit of more than 64 fragments - a VP9 keyframe - missing fragments on both sides of 64.
+	const VideoUnitHeader header = makeMaxHeader();
+	QVERIFY(fragmenter.fragment(header, makePayload(VideoFragmenter::maxUnitSize())));
+	QVERIFY(fragmenter.packets().size() > 200);
+
+	VideoUnit unit;
+	for (std::size_t i = 0; i < fragmenter.packets().size(); ++i) {
+		if (i != 5 && i != 100 && i != 200) {
+			reassembler.processPacket(fragmenter.packets()[i], header.senderSession, 0, unit);
+		}
+	}
+
+	std::vector< VideoNackRequest > nacks;
+	reassembler.collectNacks(VIDEO_NACK_DELAY_USEC, nacks);
+
+	// Named by index, so that only those three are re-sent; the mask is empty, which a sender that does not
+	// know the index list answers by re-sending the whole unit.
+	QCOMPARE(nacks.size(), static_cast< std::size_t >(1));
+	QCOMPARE(nacks[0].missingFragments, std::uint64_t{ 0 });
+	QCOMPARE(nacks[0].missingIndices, (std::vector< std::uint32_t >{ 5, 100, 200 }));
+
+	// Re-sending exactly those finishes the unit.
+	VideoReassemblyResult result = VideoReassemblyResult::Invalid;
+	for (std::uint32_t index : nacks[0].missingIndices) {
+		result =
+			reassembler.processPacket(fragmenter.packets()[index], header.senderSession, VIDEO_NACK_DELAY_USEC, unit);
+	}
+	QCOMPARE(result, VideoReassemblyResult::Complete);
 }
 
 void TestVideoFragmentation::fragmentCountsAtBoundaries() {

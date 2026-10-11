@@ -6,7 +6,7 @@
 #ifndef MUMBLE_MUMBLE_VIDEOGRID_H_
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
-#include "VP8Codec.h"
+#include "VpxCodec.h"
 #ifdef USE_H264
 #	include "H264Codec.h"
 #endif
@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -35,6 +36,7 @@ class QLabel;
 class QMouseEvent;
 class QResizeEvent;
 class QSlider;
+class QThread;
 class QTimer;
 class QToolButton;
 
@@ -79,6 +81,13 @@ class VideoGrid : public QWidget {
 	Q_OBJECT
 
 public:
+	/// Someone watching one of your own streams, as their client reported it - see setOwnViewers().
+	struct Viewer {
+		QString name;
+		/// The volume they hear your screen share at, in percent; -1 when there is none (a camera).
+		int volumePercent = -1;
+	};
+
 	/// Widest and tallest a surface may become. A tile claiming to belong at a huge offset must not be
 	/// able to make the client allocate a correspondingly huge image.
 	static constexpr int MAX_SURFACE_WIDTH  = 3840;
@@ -112,6 +121,7 @@ public:
 	static constexpr int DEFAULT_STALL_REFRESH_TIMEOUT_MSEC = 4000;
 
 	explicit VideoGrid(QWidget *parent = nullptr);
+	~VideoGrid() override;
 
 	/// Shrinks the stale-stream watchdog's timeout (see checkForStaleStreams()) and restarts its poll
 	/// timer to match - exposed purely so a test can exercise the real timer-driven path with
@@ -185,7 +195,8 @@ public slots:
 	 * @param encodedTile A complete JPEG, as produced by TiledImageEncoder.
 	 */
 	void onVideoUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 frameNumber, bool isKeyframe,
-							 unsigned int x, unsigned int y, const QByteArray &encodedTile);
+							 unsigned int x, unsigned int y, const QByteArray &encodedTile,
+							 quint64 captureTimestampUsec = 0);
 
 	/// Shows your own camera in its own permanently reserved cell.
 	void setSelfCameraFrame(const QImage &frame);
@@ -199,6 +210,13 @@ public slots:
 
 	/// Stops showing your own screen share.
 	void clearSelfScreenFrame();
+
+	/// Who is watching your own camera or screen share. Shown as a count on that tile's label, and as a
+	/// list from the eye button on its control bar.
+	void setOwnViewers(bool screen, const std::vector< Viewer > &viewers);
+
+	/// The volume, in percent, this client plays a sender's screen-share audio at.
+	int shareVolumePercent(unsigned int senderSession) const;
 
 	/**
 	 * Records the codec and source kind a sender's stream carries, from its VideoState announcement.
@@ -224,6 +242,20 @@ public slots:
 
 	/// setWatching() for every advertised stream at once. Used by remote control (`mumble rpc watchall`).
 	void setWatchingAll(bool watching);
+
+	/**
+	 * Decodes VP8, VP9 and H.264 frames on a thread of its own instead of the GUI thread.
+	 *
+	 * Decoding a 1080p frame and converting it to RGB takes several milliseconds, thirty times a second per
+	 * stream watched, and on the GUI thread that competed with painting and input: the window stuttered
+	 * while watching a share. The frame ordering, gap and retransmission logic stays on the GUI thread and
+	 * hands frames over in order; the decode thread decodes them in that order and sends the pictures back.
+	 * When it falls behind, every frame is still decoded (the next is predicted from it) but only the newest
+	 * waiting one is converted and painted.
+	 *
+	 * Off by default, so that tests see a delivered frame painted synchronously. Set before any stream starts.
+	 */
+	void setThreadedDecoding(bool threaded);
 
 	/// Whether this stream is a screen or window share (rather than a camera, or unknown).
 	bool isScreenStream(unsigned int senderSession, unsigned int streamID) const;
@@ -384,12 +416,44 @@ protected:
 
 		/// Created only for streams that need it, and destroyed with the stream: a VP8 decoder carries
 		/// reference frames, so reusing one across streams would decode new frames against stale state.
-		std::unique_ptr< VP8Decoder > vp8;
+		/// Shared rather than owned outright because with threaded decoding a frame being decoded on the
+		/// decode thread keeps its decoder alive after the stream has dropped it.
+		std::shared_ptr< VpxDecoder > vp8;
+
+		/// Bumped whenever the stream's decoding starts over (a new stream id or codec, or stopping watching),
+		/// so that a frame decoded on the decode thread for what came before is not painted.
+		std::uint64_t decodeEpoch = 0;
+
+		/// Playout (threaded decoding only - see presentFrame()): each frame is shown at its capture time
+		/// plus the stream's smallest recent transit delay plus PLAYOUT_DELAY_MSEC, rather than the moment it
+		/// is decoded, so that frames that arrive bunched together - typically right after a lost one is
+		/// re-sent - are shown at the pace they were captured instead of as a pause followed by a jump.
+		struct Playout {
+			/// Capture time (sender's clock, microseconds) by frame number, recorded on arrival.
+			std::map< quint64, quint64 > captureUsec;
+			/// Smallest (arrival - capture), in milliseconds, in the current and the previous ten-second
+			/// window: the transit delay with no queueing in it. Windowed so a drifting sender clock is
+			/// followed instead of pinning the minimum for good.
+			qint64 windowStartMsec = 0;
+			qint64 windowMin       = std::numeric_limits< qint64 >::max();
+			qint64 previousMin     = std::numeric_limits< qint64 >::max();
+			struct Pending {
+				QImage image;
+				unsigned int x = 0;
+				unsigned int y = 0;
+				qint64 dueMsec = 0;
+			};
+			/// Decoded frames waiting for their time, by frame number.
+			std::map< quint64, Pending > queue;
+		} playout;
+		/// Frames handed to the decode thread and not yet decoded. A frame that is not the last one waiting
+		/// is decoded without being converted to an image: it would be replaced before anyone saw it.
+		std::shared_ptr< std::atomic< int > > decodesInFlight = std::make_shared< std::atomic< int > >(0);
 
 #ifdef USE_H264
 		/// H.264 goes through the same in-order, hold-and-retransmit path as VP8 (the vp8* members below),
 		/// once its parts have been joined into whole frames here.
-		std::unique_ptr< H264Decoder > h264;
+		std::shared_ptr< H264Decoder > h264;
 		H264FrameAssembler h264Parts;
 		/// Parts the most recent complete frame had, for asking after a frame of which nothing arrived.
 		unsigned int h264RecentPartCount = 1;
@@ -435,6 +499,10 @@ protected:
 	/// the least) on top of the round trip; still a fraction of what waiting for a keyframe costs.
 	static constexpr qint64 VP8_HOLD_MSEC     = 700;
 	static constexpr std::size_t MAX_VP8_HELD = 30;
+	/// How old a gap is before frames still missing from it are asked for whole. Longer than a fragment
+	/// request and its answer take (VIDEO_NACK_DELAY_USEC plus a round trip), so a frame that is only partly
+	/// arrived is completed by the reassembler's own request instead of being re-sent in full.
+	static constexpr qint64 VP8_WHOLE_FRAME_REQUEST_MSEC = 100;
 
 	/// The VP8 half of onVideoUnitReceived(): continuity, holding across a gap, and decoding in order.
 	void onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 frameNumber, bool isKeyframe, unsigned int x,
@@ -444,6 +512,33 @@ protected:
 					   const QByteArray &payload);
 	/// Decodes held frames that are now next in line.
 	void drainHeldVp8(std::uint64_t key, Surface &surface);
+	/// Restarts the hold deadline after the picture has moved on, if another gap is still open.
+	void noteVp8Progress(Surface &surface);
+	/// Creates the stream's decoder for its codec if needed. False when it cannot decode the codec.
+	static bool prepareDecoder(Surface &surface);
+	/// A frame back from the decode thread: shown (see presentFrame()), unless its stream has started over.
+	void onFrameDecoded(std::uint64_t key, std::uint64_t epoch, quint64 frameNumber, unsigned int x, unsigned int y,
+						bool decoded, const QImage &image);
+	/// Shows a decoded frame at its playout time: now if that has passed (or the frame has no capture time),
+	/// otherwise when m_playoutTimer gets to it.
+	void presentFrame(std::uint64_t key, Surface &surface, quint64 frameNumber, unsigned int x, unsigned int y,
+					  const QImage &image);
+	/// Shows every queued frame whose time has come, and re-arms m_playoutTimer for the next one.
+	void flushPlayout();
+	/// Drops a stream's playout state when its decoding starts over.
+	static void resetPlayout(Surface &surface);
+
+	/// How far behind the earliest a frame could be shown that it is shown: room for a lost fragment's
+	/// re-send (a request at VIDEO_NACK_DELAY_USEC plus a round trip) to arrive before its frame is due.
+	static constexpr qint64 PLAYOUT_DELAY_MSEC = 200;
+	/// Frames waiting in the playout queue, at most, before the oldest is shown regardless.
+	static constexpr std::size_t MAX_PLAYOUT_QUEUE = 30;
+	QTimer *m_playoutTimer                         = nullptr;
+	/// Fails a decode: after KEYFRAME_REQUEST_AFTER_FAILURES in a row, asks for a keyframe.
+	void noteDecodeFailure(Surface &surface);
+
+	QThread *m_decodeThread = nullptr;
+	QObject *m_decodeWorker = nullptr;
 	/// Asks for a frame that never arrived again, the way its codec needs (retransmitNeeded() or
 	/// unitsRetransmitNeeded()).
 	void requestRetransmit(Surface &surface, quint64 frameNumber);
@@ -583,6 +678,8 @@ protected:
 		QWidget *bar                  = nullptr;
 		QToolButton *fullscreenButton = nullptr;
 		QToolButton *watchButton      = nullptr;
+		/// On your own tiles: how many are watching, and who, on click.
+		QToolButton *viewersButton = nullptr;
 		QSlider *volumeSlider         = nullptr;
 		/// Speaker icon left of the slider: shows the level at a glance, and mutes/unmutes on click.
 		QToolButton *muteButton = nullptr;
@@ -616,6 +713,14 @@ protected:
 	std::unique_ptr< TileControlBar > m_ownCameraControls;
 	std::unique_ptr< TileControlBar > m_ownScreenControls;
 	std::map< std::uint64_t, std::unique_ptr< TileControlBar > > m_remoteControls;
+
+	/// See setOwnViewers().
+	std::vector< Viewer > m_ownCameraViewers;
+	std::vector< Viewer > m_ownScreenViewers;
+	/// Brings an own tile's eye button in line with its viewer list.
+	void refreshViewersButton(TileControlBar *controls, const std::vector< Viewer > &viewers);
+	/// "You (screen)", plus how many are watching when anyone is.
+	QString ownTileLabel(bool screen) const;
 
 	/// Whether the cursor is currently over this widget at all, and where - see updateHoveredBar(). A
 	/// plain QWidget*, not a smart pointer to a locally-defined type: FullscreenVideoWindow is declared in
@@ -792,6 +897,8 @@ protected:
 	/// the monitor on its next coalesced repaint. The cheap per-tile sibling of updateFullscreenWindow(),
 	/// which repaints everything and is reserved for structural changes.
 	void notifyFullscreenContentChanged(const QRect &changed);
+	/// Sets a sender's screen-share volume from outside its tile's slider - the fullscreen bar's.
+	void setShareVolumePercent(unsigned int senderSession, int percent);
 
 	/// The slot index (see Layout) the given surface currently occupies, or -1 if it holds no cell right
 	/// now (watched but blank). What lets a tile update repaint only its own cell.

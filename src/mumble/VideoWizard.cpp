@@ -97,8 +97,8 @@ void VideoWizard::buildPages() {
 	m_forScreen = new QRadioButton(tr("My screen, or a window"), m_qualityPage);
 	qualityLayout->addWidget(m_forScreen);
 	qualityLayout->addWidget(
-		new QLabel(tr("<i>Uses tiled images, which send only the parts of the picture that changed. A still screen "
-					  "costs nothing at all.</i>"),
+		new QLabel(tr("<i>Screen sharing has its own bitrate and frame rate, under Settings &rarr; Video &rarr; "
+					  "Screen sharing. A still screen costs almost nothing.</i>"),
 				   m_qualityPage));
 
 	auto *form   = new QFormLayout();
@@ -334,7 +334,8 @@ void VideoWizard::finishMeasurement() {
 
 void VideoWizard::applyTo(Settings &s) const {
 	s.qsVideoDevice = m_device->currentData().toString();
-	s.videoCodec    = m_forScreen->isChecked() ? 1 : 0;
+	// The camera is always VP8; screen shares have their own codec (VP9) and settings regardless of this.
+	s.videoCodec = 0;
 
 	const QSize resolution = m_resolution->currentData().toSize();
 	s.iVideoWidth          = resolution.width();
