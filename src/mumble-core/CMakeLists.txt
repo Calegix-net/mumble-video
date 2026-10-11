@@ -24,6 +24,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 	option(tests "Build the core tests." ON)
+	# Pre-1.5 servers and clients speak a UDP format of their own, encoded with PacketDataStream. The
+	# desktop always keeps it; a host that only ever talks to current servers can leave it out.
+	option(MUMBLE_CORE_LEGACY_UDP "Support the legacy (pre-Protobuf) UDP format." ON)
 
 	find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 	find_package(Protobuf CONFIG)
@@ -48,6 +51,7 @@ else()
 	set(MUMBLE_CORE_VERSION_MINOR ${CMAKE_PROJECT_VERSION_MINOR})
 	set(MUMBLE_CORE_VERSION_PATCH ${CMAKE_PROJECT_VERSION_PATCH})
 	set(MUMBLE_CORE_VERSION ${CMAKE_PROJECT_VERSION})
+	set(MUMBLE_CORE_LEGACY_UDP ON)
 endif()
 
 add_library(mumble-core STATIC)
@@ -67,6 +71,9 @@ target_sources(mumble-core
 		"ByteSwap.h"
 		"CoreLog.cpp"
 		"CoreLog.h"
+		"MumbleProtocol.cpp"
+		"MumbleProtocol.h"
+		"PacketDataStream.h"
 		"Timer.cpp"
 		"Timer.h"
 		"VersionNumber.h"
@@ -91,6 +98,10 @@ target_compile_definitions(mumble-core
 		"MUMBLE_VERSION_MINOR=${MUMBLE_CORE_VERSION_MINOR}"
 		"MUMBLE_VERSION_PATCH=${MUMBLE_CORE_VERSION_PATCH}"
 )
+
+if(MUMBLE_CORE_LEGACY_UDP)
+	target_compile_definitions(mumble-core PRIVATE "MUMBLE_CORE_LEGACY_UDP")
+endif()
 
 target_include_directories(mumble-core
 	PUBLIC

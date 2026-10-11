@@ -7,6 +7,7 @@
 
 #include "ByteSwap.h"
 #include "CoreLog.h"
+#include "MumbleProtocol.h"
 #include "Timer.h"
 #include "VersionNumber.h"
 #include "VolumeAdjustment.h"
@@ -147,6 +148,102 @@ CORE_TEST(logHandlerReceivesFormattedMessages) {
 	CHECK(g_lastLevel == Mumble::Core::LogLevel::Warning);
 	CHECK_EQ(g_lastMessage, std::string("answer 42"));
 }
+
+CORE_TEST(audioRoundTripsFromClientToServer) {
+	using namespace Mumble::Protocol;
+
+	const std::vector< byte > opus = { 0x01, 0x02, 0x03, 0x04, 0x05 };
+
+	AudioData sent;
+	sent.targetOrContext        = 3;
+	sent.frameNumber            = 1234;
+	sent.payload                = opus;
+	sent.isLastFrame            = true;
+	sent.containsPositionalData = true;
+	sent.position               = { 1.0f, 2.0f, 3.0f };
+
+	UDPAudioEncoder< Role::Client > encoder(Version::fromComponents(1, 5, 0));
+	const std::span< const byte > packet = encoder.encodeAudioPacket(sent);
+	CHECK(!packet.empty());
+	CHECK_EQ(packet[0], static_cast< byte >(UDPMessageType::Audio));
+
+	UDPDecoder< Role::Server > decoder(Version::fromComponents(1, 5, 0));
+	CHECK(decoder.decode(packet));
+	CHECK(decoder.getMessageType() == UDPMessageType::Audio);
+	const AudioData received = decoder.getAudioData();
+	CHECK_EQ(received.targetOrContext, 3u);
+	CHECK_EQ(received.frameNumber, 1234u);
+	CHECK(received.isLastFrame);
+	CHECK(received.containsPositionalData);
+	CHECK(received.position == sent.position);
+	CHECK(std::vector< byte >(received.payload.begin(), received.payload.end()) == opus);
+}
+
+CORE_TEST(pingRoundTripsFromServerToClient) {
+	using namespace Mumble::Protocol;
+
+	PingData sent;
+	sent.timestamp                     = 0x1122334455667788ull;
+	sent.containsAdditionalInformation = true;
+	sent.serverVersion                 = Version::fromComponents(1, 9, 1);
+	sent.userCount                     = 7;
+	sent.maxUserCount                  = 100;
+	sent.maxBandwidthPerUser           = 558000;
+
+	UDPPingEncoder< Role::Server > encoder(Version::fromComponents(1, 5, 0));
+	const std::span< const byte > packet = encoder.encodePingPacket(sent);
+	CHECK(!packet.empty());
+
+	UDPDecoder< Role::Client > decoder(Version::fromComponents(1, 5, 0));
+	CHECK(decoder.decode(packet));
+	CHECK(decoder.getMessageType() == UDPMessageType::Ping);
+	CHECK(decoder.getPingData() == sent);
+}
+
+#ifdef MUMBLE_CORE_LEGACY_UDP
+// The legacy extended ping is a fixed big-endian layout, which is what the core's own byte swapping now
+// produces in place of qToBigEndian.
+CORE_TEST(legacyExtendedPingLayout) {
+	using namespace Mumble::Protocol;
+
+	PingData sent;
+	sent.timestamp                     = 42;
+	sent.containsAdditionalInformation = true;
+	sent.serverVersion                 = Version::fromComponents(1, 4, 287);
+	sent.userCount                     = 0x01020304;
+	sent.maxUserCount                  = 0x0A0B0C0D;
+	sent.maxBandwidthPerUser           = 72000;
+
+	UDPPingEncoder< Role::Server > encoder(Version::fromComponents(1, 4, 0));
+	const std::span< const byte > packet = encoder.encodePingPacket(sent);
+	CHECK_EQ(packet.size(), 24u);
+	const std::vector< byte > version(packet.begin(), packet.begin() + 4);
+	CHECK(version == (std::vector< byte >{ 0x00, 0x01, 0x04, 0xFF }));
+	const std::vector< byte > users(packet.begin() + 12, packet.begin() + 16);
+	CHECK(users == (std::vector< byte >{ 0x01, 0x02, 0x03, 0x04 }));
+
+	UDPDecoder< Role::Client > decoder(Version::fromComponents(1, 4, 0));
+	CHECK(decoder.decode(packet));
+	const PingData received = decoder.getPingData();
+	CHECK_EQ(received.userCount, sent.userCount);
+	CHECK_EQ(received.maxUserCount, sent.maxUserCount);
+	CHECK_EQ(received.maxBandwidthPerUser, sent.maxBandwidthPerUser);
+	CHECK_EQ(received.timestamp, sent.timestamp);
+}
+#else
+CORE_TEST(legacyUdpIsRefusedWhenLeftOut) {
+	using namespace Mumble::Protocol;
+
+	PingData ping;
+	ping.timestamp = 42;
+	UDPPingEncoder< Role::Client > encoder(Version::fromComponents(1, 4, 0));
+	CHECK(encoder.encodePingPacket(ping).empty());
+
+	const std::vector< byte > legacyPing = { 0x20, 0x2A };
+	UDPDecoder< Role::Server > decoder(Version::fromComponents(1, 4, 0));
+	CHECK(!decoder.decode(legacyPing));
+}
+#endif
 
 int main() {
 	return CoreTest::runAll();

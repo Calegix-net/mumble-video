@@ -6,9 +6,26 @@
 #ifndef MUMBLE_BYTESWAP_H_
 #define MUMBLE_BYTESWAP_H_
 
+#include <bit>
 #include <cstdint>
 
 namespace Mumble {
+constexpr std::uint32_t byteSwap32(std::uint32_t x) {
+	return ((x & 0x000000FFu) << 24) | ((x & 0x0000FF00u) << 8) | ((x & 0x00FF0000u) >> 8) | ((x & 0xFF000000u) >> 24);
+}
+
+constexpr std::uint32_t toBigEndian32(std::uint32_t x) {
+	if constexpr (std::endian::native == std::endian::little) {
+		return byteSwap32(x);
+	} else {
+		return x;
+	}
+}
+
+constexpr std::uint32_t fromBigEndian32(std::uint32_t x) {
+	return toBigEndian32(x);
+}
+
 constexpr std::uint64_t byteSwap64(std::uint64_t x) {
 	return ((x & 0x00000000000000FFull) << 56) | ((x & 0x000000000000FF00ull) << 40)
 		   | ((x & 0x0000000000FF0000ull) << 24) | ((x & 0x00000000FF000000ull) << 8)

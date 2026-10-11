@@ -13,6 +13,10 @@ add_executable(TestMumbleCore
 
 target_link_libraries(TestMumbleCore PRIVATE mumble-core)
 
+if(MUMBLE_CORE_LEGACY_UDP)
+	target_compile_definitions(TestMumbleCore PRIVATE "MUMBLE_CORE_LEGACY_UDP")
+endif()
+
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	set_target_properties(TestMumbleCore PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
 endif()

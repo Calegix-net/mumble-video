@@ -7,7 +7,7 @@
 #define MUMBLE_MUMBLEPROTOCOL_H_
 
 #include "MumbleUDP.pb.h"
-#include "Version.h"
+#include "VersionNumber.h"
 #include "VolumeAdjustment.h"
 
 #include <array>
