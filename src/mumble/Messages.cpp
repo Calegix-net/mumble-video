@@ -192,8 +192,13 @@ void MainWindow::msgServerSync(const MumbleProto::ServerSync &msg) {
 
 	Global::get().sh->setServerSynchronized(true);
 
-	// Shares kept alive across an automatic reconnect - see serverDisconnected().
-	reannounceSharesAfterReconnect();
+	// Whether this server has video, and so whether shares kept alive across a reconnect are announced
+	// again, is settled by its ServerConfig, which comes after this message - see msgServerConfig(). A
+	// server too old to send one never will, and has no video either.
+	if (!m_serverConfigSeen && Global::get().sh->m_version < Version::fromComponents(1, 2, 2)) {
+		m_serverConfigSeen = true;
+		setServerSpeaksVideo(false);
+	}
 
 	emit serverSynchronized();
 }
@@ -222,6 +227,20 @@ void MainWindow::msgServerConfig(const MumbleProto::ServerConfig &msg) {
 		Global::get().uiMaxUsers = msg.max_users();
 	if (msg.has_recording_allowed()) {
 		Global::get().mw->enableRecording(msg.recording_allowed());
+	}
+
+	if (msg.has_max_video_bandwidth()) {
+		m_serverMaxVideoBandwidth = msg.max_video_bandwidth();
+	}
+
+	// Features are read from the first ServerConfig of a connection only: later ones are partial updates,
+	// and their missing features field means "unchanged" (see Feature in Mumble.proto). A server that lists
+	// nothing may still be one of this fork's releases from before the field was sent, which all speak
+	// video.
+	if (!m_serverConfigSeen && Global::get().sh) {
+		m_serverConfigSeen = true;
+		setServerSpeaksVideo(
+			MumbleProto::speaksVideo(msg.features(), Global::get().sh->m_version, Global::get().sh->qsRelease));
 	}
 }
 
