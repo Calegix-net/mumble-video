@@ -909,6 +909,8 @@ else()
 				"PipeWireScreenVideoSource.h"
 				"PortalScreenCast.cpp"
 				"PortalScreenCast.h"
+				"LinuxSharePickerDialog.cpp"
+				"LinuxSharePickerDialog.h"
 		)
 
 		# Kept out of the unity build. PipeWire's headers rely on SPA macros that another translation
