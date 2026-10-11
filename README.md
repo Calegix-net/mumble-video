@@ -9,12 +9,14 @@ because video kept being requested upstream and never fit their scope.
 
 ## What it adds
 
-- **Camera sharing** - a toolbar button next to mute/deafen, a first-run video wizard that measures
-  what bitrates actually cost on your camera, and a video panel that appears when somebody shares.
-- **Screen sharing** - a picker with live previews: a whole screen or a single window, with or
-  without audio. On Windows, displays go through DXGI Desktop Duplication and windows through
-  Windows.Graphics.Capture. On Linux, capture goes through the XDG desktop portal and PipeWire, so the
-  compositor's own consent dialog decides what is shared (the only way capture works on Wayland).
+- **Camera sharing** - a toolbar button beside mute, deafen and record, a first-run video wizard (when
+  a camera is found) that measures what bitrates actually cost on your camera, and a video panel that
+  appears when somebody shares. Watching is opt-in: click a tile to start.
+- **Screen sharing** - a whole screen or a single window, with or without audio. On Windows the
+  picker shows live thumbnails; displays go through DXGI Desktop Duplication and windows through
+  Windows.Graphics.Capture. On Linux, Mumble Video asks screen or window and which audio, then the XDG
+  desktop portal's own dialog (with its own previews) decides what is shared, and frames arrive over
+  PipeWire. That is the only way capture works on Wayland.
 - **Share audio** - everything the computer is playing except Mumble itself, or just one
   application: WASAPI process loopback on Windows, per-application PulseAudio/PipeWire capture on
   Linux. Only people watching a share hear it. Each viewer has a 0-200% volume and mute control on
@@ -22,12 +24,17 @@ because video kept being requested upstream and never fit their scope.
 - **Who is watching** - your own tile shows how many people are watching your share, and lists them
   with the volume each one hears it at.
 - **Codecs** - VP8 for cameras. For screens, hardware H.264 when the graphics card has an encoder
-  (NVENC, AMF, Media Foundation, VA-API), otherwise VP9 in screen-content mode at 1-3 Mbit/s.
-  Encoding and decoding run on their own threads.
-- **A dedicated video transport** - video runs on its own UDP channel with its own encryption state,
-  its own sequence space and its own MTU, so video loss cannot degrade voice.
-- **Loss recovery** - a viewer asks the sender for exactly the fragments it missed (`VideoNack`) and
-  holds later frames until they arrive, instead of waiting for a keyframe. Share audio has a jitter
+  (NVENC, AMF or Media Foundation on Windows; VA-API or NVENC on Linux), otherwise VP9 in
+  screen-content mode. Defaults are 6 Mbit/s for H.264 and 3 Mbit/s for VP9; Configure > Video can
+  change both or force VP9. A still screen stops sending after a second. Encoding and decoding
+  run on their own threads.
+- **A separate video transport** - video shares voice's UDP socket, marked by a channel byte, but has
+  its own encryption state, its own sequence space and its own 1200-byte datagrams, so a lost or
+  replayed video packet never touches voice's crypt state. Heavy video can still fill the socket
+  buffer that voice uses too; see the UDP buffer advice below.
+- **Loss recovery** - a viewer asks the sender to resend the fragments or frames it missed
+  (`VideoNack`) and holds later frames briefly while they arrive, falling back to a keyframe request
+  only if they don't. Share audio has a jitter
   buffer, Opus FEC and loss concealment. Shares and watching survive an automatic reconnect.
 - **Permissioned routing** - two new ACL privileges, `ShareVideo` and `ReceiveVideo`, enforced by
   the server on every packet delivered, not just at subscribe time. Video is subscribe-on-demand
@@ -37,13 +44,16 @@ because video kept being requested upstream and never fit their scope.
 
 ## The one caveat that matters
 
-This is a **clean-break fork**: the UDP framing carries an extra media-channel byte, so this client
-cannot talk to a stock Mumble server and stock clients cannot talk to this server. Run both halves.
+Every UDP datagram carries an extra media-channel byte, so over UDP this client and a stock Mumble
+server do not understand each other, and neither do a stock client and this server. Mixing them is
+untested and unsupported, and video needs both halves. Run this client with this server.
 
-The video transport contains new cryptographic code (sequence-derived nonces, sliding replay window,
-keys derived from the TLS session). The construction is conventional and tested, but it has had
-**no independent security review**. Neither has the code that parses other people's video: the
-FFmpeg H.264 decoder, VP8/VP9 decoding and fragment reassembly. Treat it accordingly.
+The video transport contains new cryptographic code: the video key and nonce bases are derived with
+SHA-256 from the voice channel's session key, nonces come from the sequence number, and a sliding
+window rejects replays. The construction is conventional and tested, but it has had **no independent
+security review**. Neither has the code that parses other people's media: the FFmpeg H.264 decoder,
+VP8/VP9 and tile (JPEG) decoding, share-audio Opus decoding, and fragment reassembly. Treat it
+accordingly.
 
 ## Downloads
 
@@ -65,8 +75,6 @@ sudo sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608
 
 - No congestion control yet: video is sent at the configured bitrate regardless of what the path can
   carry. The protocol reserves the feedback fields; the sender-side ramp is not written.
-- A receiver under heavy combined send and receive load can fail to drain its UDP socket; a lost
-  camera frame then freezes that stream until the next keyframe, up to a couple of seconds.
 - Portal/PipeWire screen capture behaves differently from one compositor to another; reports welcome.
 
 ## Building
@@ -104,12 +112,14 @@ script. See [docs/dev/mock-video-sources.md](docs/dev/mock-video-sources.md).
 |---|---|
 | `src/VideoTransport.*` | per-stream crypt state, nonce derivation, replay window |
 | `src/VideoFragmentation.*` | fragment/reassemble units across 1200-byte datagrams |
-| `src/murmur/VideoRouter.*` | subscription routing, permission enforcement, NACK forwarding |
+| `src/murmur/VideoRouter.*` | subscription routing and permission enforcement |
+| `src/murmur/Server.cpp` | relays video units and resend requests (`relayVideoNack`) |
 | `src/mumble/VideoGrid.*` | the panel: per-sender surfaces, decoding, layout |
-| `src/mumble/VideoStreamDispatcher.*` | routes incoming units to video decoders or share audio |
+| `src/mumble/VideoStreamDispatcher.*` | tracks announced streams, hands share-audio units to playback |
 | `src/mumble/VideoBroadcaster.*` | capture-to-encoder pipeline |
-| `src/mumble/VP8Codec.*`, `VpxCodec.*`, `H264Codec.*` | libvpx (VP8/VP9) and FFmpeg H.264 encode/decode |
-| `src/mumble/ScreenAudioBroadcaster.*`, `PulseLoopbackSource.*` | share audio capture and Opus encoding |
+| `src/mumble/VpxCodec.*`, `H264Codec.*` | libvpx (VP8/VP9) and FFmpeg H.264 encode/decode |
+| `src/mumble/ScreenAudioBroadcaster.*` | share audio Opus encoding and sending |
+| `src/mumble/PulseLoopbackSource.*`, `Wasapi*LoopbackSource.*` | share audio capture on Linux and Windows |
 | `src/mumble/AudioOutputScreenShare.*` | share audio playback: jitter buffer, FEC/PLC, volume |
 | `src/mumble/ScreenSharePickerDialog.*`, `LinuxSharePickerDialog.*` | the share pickers |
 | `src/mumble/VideoWizard.*` | first-run setup with measured bitrates |
