@@ -1180,7 +1180,11 @@ void MainWindow::toggleScreenShare(bool share) {
 		m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
 
 		auto mock = std::make_unique< SyntheticVideoSource >(mockWidth, mockHeight);
-		mock->setScreenLike(true);
+		// MUMBLE_MOCK_SCREEN=motion: every pixel changes every frame, as in a film or a game - the case the
+		// codec choice is about. Anything else: a mostly still desktop.
+		const bool motion = qEnvironmentVariable("MUMBLE_MOCK_SCREEN") == QLatin1String("motion");
+		mock->setScreenLike(!motion);
+		mock->setChangeRatio(100);
 		mock->setInterval(mockSettings.iVideoFramerate > 0 ? std::max(1, 1000 / mockSettings.iVideoFramerate) : 66);
 
 		const QString description = mock->describe();

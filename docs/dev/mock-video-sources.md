@@ -11,6 +11,7 @@ the variables unset behave exactly as before.
 | `MUMBLE_MOCK_CAMERA=1` | *Share Camera* streams a 640x360 synthetic test pattern (`SyntheticVideoSource`) instead of a V4L2 device. |
 | `MUMBLE_MOCK_CAMERA_FALLBACK=1` | Same, but only when no real camera is found. |
 | `MUMBLE_MOCK_SCREEN=1` | *Share Screen* streams a synthetic 1920x1080 desktop instead of asking the portal. The *Share Screen* control is shown even when no portal is on the session bus. |
+| `MUMBLE_MOCK_SCREEN=motion` | As above, but every pixel changes every frame (the moving test pattern), as in a film or a game: the content screen-share codec choice is about. |
 | `MUMBLE_MOCK_SCREEN_SIZE=WxH` | Size of the mock desktop, 64x64 up to 7680x4320. |
 
 The mock desktop is drawn by `SyntheticVideoSource::setScreenLike(true)`: a static wallpaper and
