@@ -436,6 +436,19 @@ QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
 			return surface.vp8->decode(
 				std::vector< Mumble::Protocol::byte >(bytes, bytes + static_cast< std::size_t >(payload.size())));
 		}
+#ifdef USE_H264
+		case MumbleProto::VideoState_Codec_H264: {
+			if (!surface.h264) {
+				surface.h264 = std::make_unique< H264Decoder >();
+			}
+
+			if (!surface.h264->isValid()) {
+				return QImage();
+			}
+
+			return surface.h264->decode(payload);
+		}
+#endif
 		default:
 			// CODEC_UNKNOWN, or a codec this build has no decoder for. Dropped rather than guessed at,
 			// as the protocol requires.
@@ -712,6 +725,14 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		return;
 	}
 
+#ifdef USE_H264
+	if (surface.codec == MumbleProto::VideoState_Codec_H264) {
+		// x and y are this part's index and the frame's part count (see Mumble.proto).
+		onH264PartReceived(existing->first, surface, frameNumber, isKeyframe, x, y, encodedTile);
+		return;
+	}
+#endif
+
 	if (surface.codec == MumbleProto::VideoState_Codec_TiledImage) {
 		// A JPEG tile is a pure function of its own bytes - nothing else about the surface it belongs to
 		// matters to decoding it, which is exactly what makes it safe to decode off this thread. Screen
@@ -850,7 +871,7 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 	for (quint64 missing = firstMissing; missing < frameNumber && missing <= surface.lastFrameNumber + MAX_VP8_HELD;
 		 ++missing) {
 		if (surface.vp8Held.find(missing) == surface.vp8Held.end()) {
-			emit retransmitNeeded(senderSession, streamID, missing);
+			requestRetransmit(surface, missing);
 		}
 	}
 	surface.vp8RequestedThrough = std::max(surface.vp8RequestedThrough, frameNumber - 1);
@@ -925,6 +946,47 @@ void VideoGrid::drainHeldVp8(std::uint64_t key, Surface &surface) {
 
 	surface.vp8GapSinceMsec = 0;
 }
+
+void VideoGrid::requestRetransmit(Surface &surface, quint64 frameNumber) {
+#ifdef USE_H264
+	if (surface.codec == MumbleProto::VideoState_Codec_H264) {
+		QList< unsigned int > units;
+
+		for (const unsigned int part : surface.h264Parts.missingParts(frameNumber)) {
+			units.append(part);
+		}
+
+		if (units.isEmpty()) {
+			// Nothing of it arrived, so how many parts it had is unknown. Asking for a few more than the
+			// last frame had costs a sender nothing for units it never sent: it only re-sends what it has.
+			const unsigned int guess = std::min(surface.h264RecentPartCount + 2, H264Encoder::MAX_UNITS_PER_FRAME);
+			for (unsigned int i = 0; i < guess; ++i) {
+				units.append(i);
+			}
+		}
+
+		emit unitsRetransmitNeeded(surface.senderSession, surface.streamID, frameNumber, units);
+		return;
+	}
+#endif
+
+	emit retransmitNeeded(surface.senderSession, surface.streamID, frameNumber);
+}
+
+#ifdef USE_H264
+void VideoGrid::onH264PartReceived(std::uint64_t key, Surface &surface, quint64 frameNumber, bool isKeyframe,
+								   unsigned int index, unsigned int count, const QByteArray &part) {
+	H264FrameAssembler::Complete frame;
+
+	if (!surface.h264Parts.add(frameNumber, isKeyframe, index, count, part, frame)) {
+		return;
+	}
+
+	surface.h264RecentPartCount = count;
+
+	onVp8UnitReceived(key, surface, frame.frameNumber, frame.isKeyframe, 0, 0, frame.accessUnit);
+}
+#endif
 
 void VideoGrid::applyReadyTiles(unsigned int senderSession, unsigned int streamID) {
 	// Workers may finish in any order. Paint in arrival order, or an old JPEG can overwrite a newer

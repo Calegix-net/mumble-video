@@ -655,6 +655,14 @@ void MainWindow::setupVideoGrid() {
 				}
 			});
 
+	connect(m_videoGrid, &VideoGrid::unitsRetransmitNeeded, this,
+			[](unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
+			   const QList< unsigned int > &unitIDs) {
+				if (Global::get().sh && Global::get().sh->isRunning()) {
+					Global::get().sh->requestVideoUnitsRetransmission(senderSession, streamID, frameNumber, unitIDs);
+				}
+			});
+
 	connect(m_videoGrid, &VideoGrid::volumeChanged, this, [this](unsigned int senderSession, float multiplier) {
 		setScreenShareVolumeForSender(senderSession, multiplier);
 	});
@@ -765,6 +773,37 @@ void MainWindow::setupVideoBroadcast() {
 			});
 }
 
+/// The protocol codec a broadcaster's codec number (see VideoBroadcaster::setCodec()) is announced as.
+static MumbleProto::VideoState_Codec announcedCodec(int codec) {
+	switch (codec) {
+		case 1:
+			return MumbleProto::VideoState_Codec_TiledImage;
+		case VideoBroadcaster::CODEC_H264:
+			return MumbleProto::VideoState_Codec_H264;
+		default:
+			return MumbleProto::VideoState_Codec_VP8;
+	}
+}
+
+/// The codec a new screen share uses: H.264 when the settings allow it and a hardware encoder opens on
+/// this machine, TiledImage otherwise - never VP8, whose software encoder would sit on the GUI thread.
+static int screenShareCodec(const Settings &settings) {
+#ifdef USE_H264
+	if (settings.screenShareCodec != 1 && H264Encoder::isAvailable()) {
+		return VideoBroadcaster::CODEC_H264;
+	}
+#else
+	Q_UNUSED(settings);
+#endif
+	return 1;
+}
+
+/// The bitrate a screen share in the given codec is configured with. TiledImage ignores it.
+static unsigned int screenShareBitrate(const Settings &settings, int codec) {
+	return static_cast< unsigned int >(codec == VideoBroadcaster::CODEC_H264 ? settings.iScreenShareBitrate
+																			 : settings.iVideoBitrate);
+}
+
 void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
 									 unsigned int streamID, QSize size) {
 	if (!Global::get().sh || !Global::get().sh->isRunning())
@@ -772,8 +811,7 @@ void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKi
 	MumbleProto::VideoState state;
 	state.set_stream_id(streamID);
 	state.set_active(true);
-	state.set_codec(broadcaster->codec() == 1 ? MumbleProto::VideoState_Codec_TiledImage
-											  : MumbleProto::VideoState_Codec_VP8);
+	state.set_codec(announcedCodec(broadcaster->codec()));
 	state.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
 	state.set_source_name(u8(broadcaster->describe()));
 	state.set_width(static_cast< unsigned int >(size.width()));
@@ -926,7 +964,7 @@ void MainWindow::setupScreenShare() {
 		MumbleProto::VideoState state;
 		state.set_stream_id(m_screenVideoBroadcaster->streamID());
 		state.set_active(true);
-		state.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
 		state.set_source_name(u8(m_screenVideoBroadcaster->describe()));
 		state.set_width(static_cast< unsigned int >(frame.width()));
@@ -1133,9 +1171,10 @@ void MainWindow::toggleScreenShare(bool share) {
 			}
 		}
 
-		// TiledImage, as every real screen share is - that is the codec whose behaviour on screen
-		// content this exists to exercise.
-		m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(mockSettings.iVideoBitrate),
+		// The same codec choice as a real share (see screenShareCodec()), so a headless rig exercises
+		// whichever one a real share on this machine would use.
+		const int screenCodec = screenShareCodec(mockSettings);
+		m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(mockSettings, screenCodec),
 											static_cast< unsigned int >(mockSettings.iVideoFramerate),
 											mockSettings.iVideoTileQuality, mockSettings.iVideoTileSize);
 		m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
@@ -1165,7 +1204,7 @@ void MainWindow::toggleScreenShare(bool share) {
 		MumbleProto::VideoState state;
 		state.set_stream_id(m_screenVideoBroadcaster->streamID());
 		state.set_active(true);
-		state.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
 		state.set_source_name(u8(description));
 		state.set_width(static_cast< unsigned int >(mockWidth));
@@ -1184,7 +1223,8 @@ void MainWindow::toggleScreenShare(bool share) {
 	// and misleading, since the portal's answer is the one that decides what is captured.
 	const Settings &pwSettings = Global::get().s;
 
-	m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(pwSettings.iVideoBitrate),
+	const int screenCodec = screenShareCodec(pwSettings);
+	m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(pwSettings, screenCodec),
 										static_cast< unsigned int >(pwSettings.iVideoFramerate),
 										pwSettings.iVideoTileQuality, pwSettings.iVideoTileSize);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
@@ -1243,10 +1283,10 @@ void MainWindow::toggleScreenShare(bool share) {
 	const ScreenShareTargetKind targetKind = picker.targetKind();
 	const Settings &settings               = Global::get().s;
 
-	// Always TiledImage, never VP8: screen content is mostly static and often text-heavy, exactly what
-	// the tiled codec is built for, matching the guidance VideoWizard already gives for its own "screen"
-	// quality profile - just as true of a captured window as a captured display.
-	m_screenVideoBroadcaster->configure(1, static_cast< unsigned int >(settings.iVideoBitrate),
+	// H.264 on the graphics card when there is one (see screenShareCodec()), else TiledImage. Never VP8:
+	// its software encoder would run on this thread, and a still desktop is what TiledImage is built for.
+	const int screenCodec = screenShareCodec(settings);
+	m_screenVideoBroadcaster->configure(screenCodec, screenShareBitrate(settings, screenCodec),
 										static_cast< unsigned int >(settings.iVideoFramerate),
 										settings.iVideoTileQuality, settings.iVideoTileSize);
 	m_screenVideoBroadcaster->setNextStreamID(allocateStreamID());
@@ -1349,7 +1389,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	MumbleProto::VideoState videoState;
 	videoState.set_stream_id(m_screenVideoBroadcaster->streamID());
 	videoState.set_active(true);
-	videoState.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+	videoState.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 	videoState.set_source_kind(sourceKind);
 	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
 
@@ -5103,8 +5143,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		MumbleProto::VideoState camera;
 		camera.set_stream_id(m_videoBroadcaster->streamID());
 		camera.set_active(true);
-		camera.set_codec(m_videoBroadcaster->codec() == 1 ? MumbleProto::VideoState_Codec_TiledImage
-														  : MumbleProto::VideoState_Codec_VP8);
+		camera.set_codec(announcedCodec(m_videoBroadcaster->codec()));
 		camera.set_width(static_cast< unsigned int >(settings.iVideoWidth));
 		camera.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 		camera.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
@@ -5135,7 +5174,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		MumbleProto::VideoState screen;
 		screen.set_stream_id(m_screenVideoBroadcaster->streamID());
 		screen.set_active(true);
-		screen.set_codec(MumbleProto::VideoState_Codec_TiledImage);
+		screen.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		screen.set_source_kind(sourceKind);
 		screen.set_source_name(u8(m_screenVideoBroadcaster->describe()));
 		const QSize size = m_screenVideoBroadcaster->frameSize();

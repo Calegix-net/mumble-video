@@ -8,6 +8,7 @@
 #include "VideoSource.h"
 
 #include <QPointer>
+#include <algorithm>
 #include <utility>
 
 VideoBroadcaster::VideoBroadcaster(QObject *parent) : QObject(parent) {
@@ -101,6 +102,9 @@ bool VideoBroadcaster::start(std::unique_ptr< VideoSource > source) {
 	// The first frame of a stream has to be complete: a new receiver has nothing to build on.
 	m_encoder.reset();
 	m_vp8.reset();
+#ifdef USE_H264
+	m_h264.reset();
+#endif
 	m_forceKeyframe = true;
 
 	emit activeChanged(true);
@@ -126,6 +130,8 @@ void VideoBroadcaster::stop() {
 void VideoBroadcaster::requestKeyframe() {
 	m_encoder.reset();
 	m_vp8.reset();
+	// Not m_h264.reset(): that closes and reopens the hardware encoder, a hundred milliseconds or more on
+	// some drivers, for what m_forceKeyframe already asks of the open one.
 	m_forceKeyframe = true;
 	// A new viewer also needs a picture when capture is healthy but unchanged. Do not
 	// perpetually replay a cached frame from a source that has stopped reporting activity.
@@ -151,6 +157,12 @@ void VideoBroadcaster::onCaptureIdle(std::uint64_t captureTimestampUsec) {
 }
 
 void VideoBroadcaster::setCodec(int codec) {
+#ifdef USE_H264
+	if (codec == CODEC_H264) {
+		m_codec = CODEC_H264;
+		return;
+	}
+#endif
 	m_codec = codec == 1 ? 1 : 0;
 }
 
@@ -160,6 +172,15 @@ void VideoBroadcaster::configure(int codec, unsigned int bitrateKbps, unsigned i
 
 	m_vp8.setBitrate(bitrateKbps);
 	m_vp8.setFramerate(framerate);
+
+#ifdef USE_H264
+	m_h264.setBitrate(bitrateKbps);
+	m_h264.setFramerate(framerate);
+	// Four seconds of frames. Viewers ask for a keyframe themselves after a loss or on joining, so this
+	// only bounds the worst case; and a keyframe squeezed into a few frames' budget is a visible dip in
+	// quality on a moving picture, which every two seconds reads as pulsing.
+	m_h264.setKeyframeInterval(std::max(1u, framerate) * 4);
+#endif
 
 	m_encoder.setQuality(tileQuality);
 	m_encoder.setTileSize(tileSize);
@@ -191,6 +212,7 @@ void VideoBroadcaster::encodeFrame(const QImage &sourceFrame, std::uint64_t capt
 		m_streamID            = m_allocateStreamID ? m_allocateStreamID() : m_streamID + 1;
 		m_encoder.reset();
 		m_vp8.reset();
+		// The H.264 encoder reopens itself at the new size on the next frame.
 		m_forceKeyframe = true;
 		// Set the cache first: a direct listener may immediately ask for a keyframe.
 		m_lastFrame = frame;
@@ -209,9 +231,15 @@ void VideoBroadcaster::encodeFrame(const QImage &sourceFrame, std::uint64_t capt
 		encodeTimer.start();
 	}
 
-	const std::vector< EncodedVideoUnit > units =
-		m_codec == 0 ? m_vp8.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe)
-					 : m_encoder.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe);
+	std::vector< EncodedVideoUnit > units;
+#ifdef USE_H264
+	if (m_codec == CODEC_H264) {
+		units = m_h264.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe);
+	} else
+#endif
+		units = m_codec == 0
+					? m_vp8.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe)
+					: m_encoder.encode(frame, m_streamID, m_frameNumber, captureTimestampUsec, m_forceKeyframe);
 
 	if (m_stats.enabled) {
 		std::uint64_t bytes = 0;

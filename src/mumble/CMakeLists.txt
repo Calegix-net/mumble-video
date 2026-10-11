@@ -80,6 +80,13 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
 
+# H.264 for screen shares that move (films, games): hardware encoders through a minimal FFmpeg build
+# (docker/build-ffmpeg.sh), and FFmpeg's software decoder. Without it a screen share is TiledImage only.
+option(h264 "Build H.264 screen sharing (needs libavcodec, libavutil and libswscale)." ON)
+if(h264)
+	pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+endif()
+
 find_pkg(Qt6
 	COMPONENTS
 		Concurrent
@@ -607,6 +614,12 @@ target_link_libraries(mumble_client_object_lib
 		Qt6::Svg
 		Qt6::Widgets
 )
+
+if(h264)
+	target_sources(mumble_client_object_lib PRIVATE "H264Codec.cpp" "H264Codec.h")
+	target_compile_definitions(mumble_client_object_lib PUBLIC "USE_H264")
+	target_link_libraries(mumble_client_object_lib PUBLIC PkgConfig::LIBAV)
+endif()
 
 if(static)
 	if(TARGET Qt6::QSQLiteDriverPlugin)

@@ -19,7 +19,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         mingw64-zlib mingw64-winpthreads \
         mingw64-flac mingw64-libvorbis mingw64-libogg \
         cmake make git pkgconf protobuf-compiler msitools mingw32-nsis \
-        yasm nasm diffutils file findutils which perl \
+        yasm nasm diffutils file findutils which perl gcc \
     && dnf clean all
 
 # libvpx, cross-built for MinGW. Its own configure script handles this properly, which is simpler and
@@ -35,6 +35,11 @@ RUN git clone --depth 1 --branch ${VPX_VERSION} https://chromium.googlesource.co
     && make -j"$(nproc)" \
     && make install \
     && rm -rf /tmp/libvpx
+
+# A minimal FFmpeg for H.264 screen sharing (build-ffmpeg.sh), installed into the sysroot so pkg-config
+# finds it and bundle-windows.sh picks up its DLLs. gcc above is FFmpeg's host compiler for its build tools.
+COPY build-ffmpeg.sh /usr/local/bin/
+RUN build-ffmpeg.sh windows /usr/x86_64-w64-mingw32/sys-root/mingw
 
 # MinGW ships its Windows headers in lowercase. Poco includes several of them with the capitalisation
 # Microsoft's SDK uses, which resolves fine on a case-insensitive Windows filesystem and not at all here.

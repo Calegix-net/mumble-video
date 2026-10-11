@@ -27,6 +27,13 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         speech-dispatcher-devel avahi-compat-libdns_sd-devel \
         mariadb-connector-c-devel libpq-devel sqlite-devel \
         libvpx-devel \
+        nasm libva-devel libdrm-devel \
     && dnf clean all
+
+# A minimal FFmpeg for H.264 screen sharing (build-ffmpeg.sh). Fedora's own leaves the H.264 decoder out.
+COPY build-ffmpeg.sh /usr/local/bin/
+RUN build-ffmpeg.sh linux /usr/local \
+    && echo /usr/local/lib > /etc/ld.so.conf.d/ffmpeg.conf && ldconfig
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
 WORKDIR /build

@@ -70,6 +70,9 @@ protected:
 	QSpinBox *m_tileQuality = nullptr;
 	QComboBox *m_tileSize   = nullptr;
 
+	QComboBox *m_screenCodec  = nullptr;
+	QSpinBox *m_screenBitrate = nullptr;
+
 	QPushButton *m_previewButton = nullptr;
 	VideoPreview *m_preview      = nullptr;
 	QLabel *m_stats              = nullptr;
