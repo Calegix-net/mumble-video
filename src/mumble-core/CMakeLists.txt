@@ -1,0 +1,116 @@
+# Copyright The Mumble Developers. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file at the root of the
+# Mumble source tree or at <https://www.mumble.info/LICENSE>.
+
+# The protocol core: wire formats, crypto and media framing, with no Qt and no sockets. The desktop
+# client and server get it through `shared`. It also builds on its own (point CMake at this
+# directory), which is how a non-Qt host such as the Android app consumes it, and how CI proves that
+# nothing in here has picked up a Qt dependency.
+
+cmake_minimum_required(VERSION 3.23...4.2)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+	set(MUMBLE_CORE_VERSION "0.0.0" CACHE STRING "Version reported by the core when built on its own")
+
+	project(mumble-core
+		VERSION ${MUMBLE_CORE_VERSION}
+		LANGUAGES C CXX
+	)
+
+	set(CMAKE_CXX_STANDARD 20)
+	set(CMAKE_CXX_STANDARD_REQUIRED ON)
+	set(CMAKE_CXX_EXTENSIONS OFF)
+	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+	option(tests "Build the core tests." ON)
+
+	find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+	find_package(Protobuf CONFIG)
+	if(NOT Protobuf_FOUND)
+		find_package(Protobuf MODULE REQUIRED)
+	endif()
+
+	if(tests)
+		enable_testing()
+	endif()
+
+	set(MUMBLE_CORE_3RDPARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty")
+	set(MUMBLE_CORE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+	set(MUMBLE_CORE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+	set(MUMBLE_CORE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+	set(MUMBLE_CORE_VERSION ${PROJECT_VERSION})
+else()
+	# In the main tree src/CMakeLists.txt has already found OpenSSL and Protobuf and set the compiler
+	# flags, and the version is Mumble's own.
+	set(MUMBLE_CORE_3RDPARTY_DIR "${3RDPARTY_DIR}")
+	set(MUMBLE_CORE_VERSION_MAJOR ${CMAKE_PROJECT_VERSION_MAJOR})
+	set(MUMBLE_CORE_VERSION_MINOR ${CMAKE_PROJECT_VERSION_MINOR})
+	set(MUMBLE_CORE_VERSION_PATCH ${CMAKE_PROJECT_VERSION_PATCH})
+	set(MUMBLE_CORE_VERSION ${CMAKE_PROJECT_VERSION})
+endif()
+
+add_library(mumble-core STATIC)
+
+protobuf_generate(LANGUAGE cpp TARGET mumble-core PROTOS "${CMAKE_CURRENT_SOURCE_DIR}/Mumble.proto"
+	OUT_VAR BUILT_PROTO_FILES)
+protobuf_generate(LANGUAGE cpp TARGET mumble-core PROTOS "${CMAKE_CURRENT_SOURCE_DIR}/MumbleUDP.proto"
+	OUT_VAR BUILT_UDP_PROTO_FILES)
+
+# Disable warnings for the generated source files
+foreach(CURRENT_FILE IN LISTS BUILT_PROTO_FILES BUILT_UDP_PROTO_FILES)
+	set_source_files_properties("${CURRENT_FILE}" PROPERTIES COMPILE_FLAGS "-w")
+endforeach()
+
+target_sources(mumble-core
+	PRIVATE
+		"ByteSwap.h"
+		"CoreLog.cpp"
+		"CoreLog.h"
+		"Timer.cpp"
+		"Timer.h"
+		"VersionNumber.h"
+		"VolumeAdjustment.cpp"
+		"VolumeAdjustment.h"
+
+		"crypto/CryptographicRandom.cpp"
+		"crypto/CryptographicRandom.h"
+		"crypto/CryptState.cpp"
+		"crypto/CryptState.h"
+		"crypto/CryptStateOCB2.cpp"
+		"crypto/CryptStateOCB2.h"
+
+		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.cpp"
+		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.h"
+)
+
+target_compile_definitions(mumble-core
+	PUBLIC
+		"MUMBLE_VERSION=${MUMBLE_CORE_VERSION}"
+		"MUMBLE_VERSION_MAJOR=${MUMBLE_CORE_VERSION_MAJOR}"
+		"MUMBLE_VERSION_MINOR=${MUMBLE_CORE_VERSION_MINOR}"
+		"MUMBLE_VERSION_PATCH=${MUMBLE_CORE_VERSION_PATCH}"
+)
+
+target_include_directories(mumble-core
+	PUBLIC
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_BINARY_DIR}
+	PRIVATE
+		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random"
+)
+
+target_link_libraries(mumble-core
+	PUBLIC
+		protobuf::libprotobuf
+		OpenSSL::Crypto
+)
+
+if(WIN32)
+	# htonl, for the 32-bit OCB2 path.
+	target_link_libraries(mumble-core PUBLIC ws2_32)
+endif()
+
+if(tests)
+	add_subdirectory(tests)
+endif()

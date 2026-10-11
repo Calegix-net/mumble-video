@@ -35,6 +35,7 @@
 #include "Channel.h"
 #include "ChannelListenerManager.h"
 #include "ClientUser.h"
+#include "CoreLogBridge.h"
 #include "CrashReporter.h"
 #include "EnvUtils.h"
 #include "License.h"
@@ -442,6 +443,7 @@ int main(int argc, char **argv) {
 	a.installNativeEventFilter(&a);
 #endif
 
+	installCoreLogHandler();
 	MumbleSSL::initialize();
 	CLIOptions options = parseCLI(argc, argv);
 

@@ -10,11 +10,14 @@
  * https://www.cs.ucdavis.edu/~rogaway/ocb/ocb-faq.htm
  */
 
-#include <QtCore/QtGlobal>
-
 #ifndef __LP64__
-#	ifdef Q_OS_WIN
-#		include "win.h"
+#	ifdef _WIN32
+#		ifndef WIN32_LEAN_AND_MEAN
+#			define WIN32_LEAN_AND_MEAN
+#		endif
+#		ifndef NOMINMAX
+#			define NOMINMAX
+#		endif
 #		include <winsock2.h>
 #	else
 #		include <arpa/inet.h>
@@ -25,6 +28,7 @@
 #include "CryptStateOCB2.h"
 #include "CryptographicRandom.h"
 
+#include <cstdint>
 #include <cstring>
 #include <openssl/rand.h>
 
@@ -229,14 +233,14 @@ bool CryptStateOCB2::decrypt(const unsigned char *source, unsigned char *dst, un
 
 #	define BLOCKSIZE 2
 #	define SHIFTBITS 63
-typedef quint64 subblock;
+typedef std::uint64_t subblock;
 
 #	define SWAPPED(x) SWAP64(x)
 
 #else
 #	define BLOCKSIZE 4
 #	define SHIFTBITS 31
-typedef quint32 subblock;
+typedef std::uint32_t subblock;
 #	define SWAPPED(x) htonl(x)
 #endif
 
