@@ -18,6 +18,7 @@
 #include <QtCore/QRect>
 #include <QtCore/QString>
 #include <QtGui/QImage>
+#include <QtGui/QRegion>
 #include <QtWidgets/QWidget>
 
 #include <atomic>
@@ -489,6 +490,28 @@ protected:
 	/// relayoutControls()'s widget placement so a tile's picture and its own control bar can never
 	/// disagree about where the tile actually is.
 	static QRect cellRect(const Layout &layout, int slot);
+
+	/// Where a picture of the given size lands inside a cell: centred, letterboxed, never distorted. Shared
+	/// by paintEvent() and markTileDirty() so a dirty tile is mapped to exactly the pixels it is painted into.
+	static QRect pictureRect(const QRect &cell, const QSize &imageSize);
+
+	/// Repaints of the grid are coalesced to at most one per GRID_REPAINT_INTERVAL_MSEC. Qt's own update()
+	/// coalescing only collapses requests made within one turn of the event loop, and each incoming tile is
+	/// its own turn, so without this a screen share repainted the grid at the display's refresh rate.
+	static constexpr int GRID_REPAINT_INTERVAL_MSEC = 33;
+
+	/// Queues the given widget rect for the next coalesced repaint.
+	void scheduleGridRepaint(const QRect &dirty);
+
+	/// Queues just the patch of the cell that a tile at (x, y) of the given picture covers.
+	void markTileDirty(const QRect &cell, const QSize &imageSize, const QRect &tileRect);
+
+	void flushGridRepaint();
+
+	QTimer *m_gridRepaintTimer = nullptr;
+
+	/// Accumulated since the last coalesced repaint, in widget pixels.
+	QRegion m_gridDirty;
 
 	// std::map, not QHash or std::unordered_map. QHash requires its values to be copyable, and a Surface
 	// owns its decoder through a unique_ptr, which makes it move-only. std::map over std::unordered_map
