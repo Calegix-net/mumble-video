@@ -47,6 +47,12 @@ typedef struct SpeexResamplerState_ SpeexResamplerState;
  *
  * addOpusPacket() decodes and is called on the main thread; prepareSampleBuffer() runs on the real-time
  * mixer thread and only copies already-decoded samples, so the mixer never waits on a decoder.
+ *
+ * Owned by AudioOutput, which creates, feeds and removes these itself (AudioOutput::addScreenShareUnit and
+ * friends). Nothing else keeps a pointer to one: AudioOutput deletes them whenever it likes - an audio
+ * restart, the sender leaving - and the next packet simply creates a new one. AudioOutput calls
+ * addOpusPacket() with its qrwlOutputs held, so the locks are always taken qrwlOutputs first, then m_mutex,
+ * the same order as on the mixer thread, which reads qrwlOutputs and then calls prepareSampleBuffer().
  */
 class AudioOutputScreenShare : public AudioOutputBuffer {
 private:
@@ -54,9 +60,13 @@ private:
 	Q_DISABLE_COPY(AudioOutputScreenShare)
 
 public:
+	/// @param streamID The share's audio stream id. One sender can have more than one, and AudioOutput tells
+	/// them apart by it.
 	/// @param mixerFreq The mixer's sample rate. Must be known (non-zero): resampling is decided here once.
-	explicit AudioOutputScreenShare(unsigned int mixerFreq);
+	AudioOutputScreenShare(unsigned int streamID, unsigned int mixerFreq);
 	~AudioOutputScreenShare() override;
+
+	unsigned int streamID() const { return m_streamID; }
 
 	/// Decodes one Opus packet, concealing any packets missing before it, and queues the result.
 	/// @param sequence The transport frame number: consecutive for consecutive packets of this stream.
@@ -64,7 +74,7 @@ public:
 
 	/// Always reports itself alive: unlike a sound file, there is no natural end this class can detect on
 	/// its own. The stream's actual end arrives out-of-band, as a VideoState announcing active=false, and
-	/// is handled by removing this buffer from AudioOutput directly rather than through this return value.
+	/// is handled through AudioOutput::removeScreenShare() rather than through this return value.
 	bool prepareSampleBuffer(unsigned int frameCount) override;
 
 	/// Set from the UI thread - a per-tile volume slider in the video grid - and applied on the audio mixing
@@ -105,6 +115,8 @@ protected:
 	/// Scales the first sampleCount samples of pfBuffer by the current volume, soft-limiting above
 	/// LIMITER_THRESHOLD so a boost cannot hard-clip.
 	void applyVolume(std::size_t sampleCount);
+
+	const unsigned int m_streamID;
 
 	OpusDecoder *m_opusState         = nullptr;
 	SpeexResamplerState *m_resampler = nullptr;

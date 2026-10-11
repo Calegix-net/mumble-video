@@ -1468,18 +1468,9 @@ void MainWindow::toggleScreenShare(bool share) {
 
 void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsigned int streamID, quint64 sequence,
 											   const QByteArray &opusPacket) {
-	if (!Global::get().ao) {
-		return;
-	}
-
-	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
-
-	// After an audio restart the old buffers are gone: drop them, and the next lines make a new one.
-	dropStaleScreenShareAudioBuffers();
-
-	auto it = m_screenShareAudioBuffers.find(key);
-
-	if (it == m_screenShareAudioBuffers.end()) {
+	// No output while audio restarts (Settings, the Audio Wizard): the packet is dropped, and the first one
+	// after the restart starts a new buffer in the new output.
+	if (auto ao = Global::get().ao) {
 		ClientUser *sender = ClientUser::get(senderSession);
 
 		if (!sender) {
@@ -1488,49 +1479,22 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 			return;
 		}
 
+		const auto volume = m_screenShareVolumes.find(senderSession);
+		const float multiplier =
+			volume != m_screenShareVolumes.end() ? volume->second : AudioOutputScreenShare::DEFAULT_VOLUME;
+
 		// Diagnostic only: this path has never been confirmed to actually produce audible sound on a real
 		// machine - see WasapiProcessLoopbackSource's own diagnostic logging on the sending end. Reaching
 		// this line at all means an Opus unit made it all the way from the sender's capture device, through
 		// the network, to this client - if screen-share audio is reported silent again with this line
-		// present in the log, the problem is downstream of here: getMixerFreq(), addExternalBuffer(), the
+		// present in the log, the problem is downstream of here: getMixerFreq(), addScreenShareUnit(), the
 		// mixer's local-mute gate, or the buffer's own decode/resample path, not capture or transport.
-		const unsigned int mixerFreq = Global::get().ao->getMixerFreq();
-
-		if (mixerFreq == 0) {
-			// The output device has not started yet. A buffer created now could not know whether to
-			// resample, and would play at the wrong pitch for as long as it lived; dropping the few packets
-			// that arrive before the mixer is up costs a fraction of a second at most.
-			return;
+		// Logged again whenever the buffer has to be created again, after an audio restart for instance.
+		if (ao->addScreenShareUnit(sender, streamID, sequence, opusPacket, multiplier)) {
+			qWarning("MainWindow: first screen-share audio unit received (session %u, stream %u, mixer %u Hz)",
+					 senderSession, streamID, ao->getMixerFreq());
 		}
-
-		auto *buffer                 = new AudioOutputScreenShare(mixerFreq);
-		const AudioOutputToken token = Global::get().ao->addExternalBuffer(sender, buffer);
-
-		if (!token) {
-			qWarning("MainWindow: could not attach a screen-share audio buffer for session %u", senderSession);
-
-			delete buffer;
-
-			return;
-		}
-
-		qWarning("MainWindow: first screen-share audio unit received (session %u, stream %u, mixer %u Hz)",
-				 senderSession, streamID, mixerFreq);
-
-		const auto volume = m_screenShareVolumes.find(senderSession);
-		if (volume != m_screenShareVolumes.end()) {
-			buffer->setVolume(volume->second);
-		}
-
-		ScreenShareAudioEntry entry;
-		entry.token  = token;
-		entry.buffer = buffer;
-		entry.output = Global::get().ao;
-
-		it = m_screenShareAudioBuffers.emplace(key, entry).first;
 	}
-
-	it->second.buffer->addOpusPacket(sequence, opusPacket);
 }
 
 void MainWindow::startScreenShareAudio(int sourceKind) {
@@ -1614,35 +1578,16 @@ void MainWindow::forgetScreenAudioSubscription(unsigned int senderSession, std::
 	}
 }
 
-void MainWindow::dropStaleScreenShareAudioBuffers() {
-	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
-		// Compared through lock(), not by address: a new AudioOutput can be allocated where the old one was.
-		const bool current = Global::get().ao && it->second.output.lock() == Global::get().ao;
-		it                 = current ? std::next(it) : m_screenShareAudioBuffers.erase(it);
-	}
-}
-
 void MainWindow::removeScreenShareAudioBuffer(unsigned int senderSession, unsigned int streamID) {
-	const std::uint64_t key = screenShareAudioKey(senderSession, streamID);
+	// A sender who is no longer known has already had every buffer removed with them (AudioOutput::removeUser).
+	const ClientUser *sender = ClientUser::get(senderSession);
 
-	dropStaleScreenShareAudioBuffers();
-
-	const auto it = m_screenShareAudioBuffers.find(key);
-
-	if (it == m_screenShareAudioBuffers.end()) {
-		return;
+	if (auto ao = Global::get().ao; ao && sender) {
+		ao->removeScreenShare(sender, streamID);
 	}
-
-	if (Global::get().ao) {
-		Global::get().ao->invalidateToken(it->second.token);
-	}
-
-	m_screenShareAudioBuffers.erase(it);
 }
 
 void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSession) {
-	const std::uint64_t hi = static_cast< std::uint64_t >(senderSession) << 32;
-
 	forgetScreenAudioSubscription(senderSession, std::nullopt);
 	m_screenShareVolumes.erase(senderSession);
 
@@ -1650,18 +1595,10 @@ void MainWindow::removeScreenShareAudioBuffersForSender(unsigned int senderSessi
 		it = ((it->first >> 32) == senderSession) ? m_lastKeyframeRequestMsec.erase(it) : std::next(it);
 	}
 
-	dropStaleScreenShareAudioBuffers();
+	const ClientUser *sender = ClientUser::get(senderSession);
 
-	for (auto it = m_screenShareAudioBuffers.begin(); it != m_screenShareAudioBuffers.end();) {
-		if ((it->first >> 32) == (hi >> 32)) {
-			if (Global::get().ao) {
-				Global::get().ao->invalidateToken(it->second.token);
-			}
-
-			it = m_screenShareAudioBuffers.erase(it);
-		} else {
-			++it;
-		}
+	if (auto ao = Global::get().ao; ao && sender) {
+		ao->removeScreenShares(sender);
 	}
 }
 
@@ -1708,15 +1645,13 @@ void MainWindow::setScreenShareVolumeForSender(unsigned int senderSession, float
 	m_screenShareVolumes[senderSession] = multiplier;
 
 	// A sender only ever holds one screen-share audio stream at a time - screen sharing is one share at
-	// a time per the picker's own design - so matching on the sender half of the key alone, rather than
+	// a time per the picker's own design - so applying it to every stream of the sender, rather than
 	// needing the exact stream id VideoGrid's slider does not itself know, is correct here, not just
 	// convenient.
-	dropStaleScreenShareAudioBuffers();
+	const ClientUser *sender = ClientUser::get(senderSession);
 
-	for (auto &entry : m_screenShareAudioBuffers) {
-		if ((entry.first >> 32) == senderSession && entry.second.buffer) {
-			entry.second.buffer->setVolume(multiplier);
-		}
+	if (auto ao = Global::get().ao; ao && sender) {
+		ao->setScreenShareVolume(sender, multiplier);
 	}
 }
 
@@ -5072,11 +5007,7 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	m_sharesSurvivingReconnect = (m_videoBroadcaster && m_videoBroadcaster->isActive())
 								 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive());
 
-	// Not individually invalidated through AudioOutput here: the connection that carried these streams
-	// is already gone, and Global::get().ao's own teardown on disconnect is what actually frees them,
-	// the same as it does for every other buffer in its map. This just stops this class from holding
-	// onto pointers that are about to become dangling.
-	m_screenShareAudioBuffers.clear();
+	// The screen-share audio buffers themselves belong to AudioOutput and go with their senders' users.
 	m_screenShareVolumes.clear();
 
 	// clear ChannelListener
