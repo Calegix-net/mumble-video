@@ -118,6 +118,9 @@ MetaParams::MetaParams() {
 	iVideoMessageLimit  = 20;
 	iVideoMessageBurst  = 60;
 
+	iVideoBandwidth         = 20000000;
+	iVideoStreamsPerChannel = 0;
+
 	broadcastListenerVolumeAdjustments = false;
 
 	qsCiphers = MumbleSSL::defaultOpenSSLCipherString();
@@ -385,6 +388,11 @@ void MetaParams::read(QString fname) {
 	iPluginMessageBurst = typeCheckedFromSettings< unsigned int >("pluginmessageburst", 15);
 	iVideoMessageLimit  = typeCheckedFromSettings< unsigned int >("videomessagelimit", 20);
 	iVideoMessageBurst  = typeCheckedFromSettings< unsigned int >("videomessageburst", 60);
+
+	// 20 Mbit/s: the highest bitrate this fork's own client can be set to share at, so the default limit
+	// changes nothing for it while still telling every client a number.
+	iVideoBandwidth         = typeCheckedFromSettings< unsigned int >("videobandwidth", 20000000);
+	iVideoStreamsPerChannel = typeCheckedFromSettings< unsigned int >("videostreamsperchannel", 0);
 
 	broadcastListenerVolumeAdjustments = typeCheckedFromSettings("broadcastlistenervolumeadjustments", false);
 

@@ -768,8 +768,10 @@ void MainWindow::setupVideoBroadcast() {
 
 	// Keeps the menu item honest if capture stops on its own, for instance because the camera was
 	// unplugged.
-	connect(m_videoBroadcaster, &VideoBroadcaster::activeChanged, this,
-			[this](bool active) { m_shareCameraAction->setChecked(active); });
+	connect(m_videoBroadcaster, &VideoBroadcaster::activeChanged, this, [this](bool active) {
+		m_shareCameraAction->setChecked(active);
+		refreshShareActions();
+	});
 
 	connect(m_videoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Camera sharing stopped: %1").arg(reason));
@@ -842,13 +844,13 @@ static unsigned int screenShareBitrate(const Settings &settings, int codec) {
 }
 
 void MainWindow::configureScreenBroadcaster(const Settings &settings) {
-	const int codec = screenShareCodec(settings);
-	m_screenVideoBroadcaster->configure(codec, screenShareBitrate(settings, codec),
-										static_cast< unsigned int >(settings.iScreenShareFramerate),
+	const int codec            = screenShareCodec(settings);
+	const unsigned int bitrate = clampToServerVideoBandwidth(screenShareBitrate(settings, codec));
+	m_screenVideoBroadcaster->configure(codec, bitrate, static_cast< unsigned int >(settings.iScreenShareFramerate),
 										settings.iVideoTileQuality, settings.iVideoTileSize);
 	qInfo("Screen share: %s at %d kbit/s, %d fps",
-		  codec == VideoBroadcaster::CODEC_H264 ? "hardware H.264" : "VP9 (software)",
-		  static_cast< int >(screenShareBitrate(settings, codec)), settings.iScreenShareFramerate);
+		  codec == VideoBroadcaster::CODEC_H264 ? "hardware H.264" : "VP9 (software)", static_cast< int >(bitrate),
+		  settings.iScreenShareFramerate);
 }
 
 void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKind, unsigned int previousID,
@@ -994,7 +996,11 @@ void MainWindow::setupScreenShare() {
 		m_shareScreenAction->setChecked(active);
 		if (!active)
 			m_screenAwaitingFrame = false;
+		refreshShareActions();
 	});
+
+	// Disabled until a server says it has video - see setServerSpeaksVideo().
+	refreshShareActions();
 
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::failed, this, [this](const QString &reason) {
 		Global::get().l->log(Log::Warning, tr("Screen sharing stopped: %1").arg(reason));
@@ -1117,6 +1123,15 @@ void MainWindow::toggleCameraShare(bool share) {
 		return;
 	}
 
+	// The action is disabled on a server without video, but a remote request (remoteShareCamera()) can
+	// still get here.
+	if (!m_serverSpeaksVideo) {
+		Global::get().l->log(Log::Warning, tr("This server does not support video."));
+		m_shareCameraAction->setChecked(false);
+
+		return;
+	}
+
 	// Honour the configured camera, falling back to the platform default if it has been unplugged since.
 	const Settings &settings = Global::get().s;
 
@@ -1147,9 +1162,9 @@ void MainWindow::toggleCameraShare(bool share) {
 
 	// Always VP8: Settings::videoCodec may still say tiled from an earlier version, which cost a camera
 	// several times the bandwidth.
-	m_videoBroadcaster->configure(VideoBroadcaster::CODEC_VP8, static_cast< unsigned int >(settings.iVideoBitrate),
-								  static_cast< unsigned int >(settings.iVideoFramerate), settings.iVideoTileQuality,
-								  settings.iVideoTileSize);
+	m_videoBroadcaster->configure(
+		VideoBroadcaster::CODEC_VP8, clampToServerVideoBandwidth(static_cast< unsigned int >(settings.iVideoBitrate)),
+		static_cast< unsigned int >(settings.iVideoFramerate), settings.iVideoTileQuality, settings.iVideoTileSize);
 
 	std::unique_ptr< VideoSource > source;
 	if (useMockCamera) {
@@ -1226,6 +1241,14 @@ void MainWindow::toggleScreenShare(bool share) {
 			audioEnd.set_active(false);
 			Global::get().sh->sendMessage(audioEnd);
 		}
+
+		return;
+	}
+
+	// See toggleCameraShare().
+	if (!m_serverSpeaksVideo) {
+		Global::get().l->log(Log::Warning, tr("This server does not support video."));
+		m_shareScreenAction->setChecked(false);
 
 		return;
 	}
@@ -4994,6 +5017,11 @@ void MainWindow::serverConnected() {
 
 	m_reconnectSoundBlocker.reset();
 
+	// No video until this server's first ServerConfig says otherwise - see setServerSpeaksVideo().
+	m_serverSpeaksVideo       = false;
+	m_serverConfigSeen        = false;
+	m_serverMaxVideoBandwidth = 0;
+
 	Global::get().uiSession    = 0;
 	Global::get().pPermissions = ChanACL::None;
 
@@ -5080,6 +5108,11 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	// they do not have to pick their screen again. Otherwise they are stopped at the end.
 	m_sharesSurvivingReconnect = (m_videoBroadcaster && m_videoBroadcaster->isActive())
 								 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive());
+
+	// Whatever comes next has to say again whether it has video. Running shares can still be stopped.
+	m_serverSpeaksVideo = false;
+	m_serverConfigSeen  = false;
+	refreshShareActions();
 
 	// The screen-share audio buffers themselves belong to AudioOutput and go with their senders' users.
 	m_screenShareVolumes.clear();
@@ -5341,6 +5374,47 @@ void MainWindow::stopAllSharesLocally() {
 	if (m_screenAudioBroadcaster) {
 		m_screenAudioBroadcaster->stop();
 	}
+}
+
+void MainWindow::setServerSpeaksVideo(bool speaks) {
+	m_serverSpeaksVideo = speaks;
+
+	if (Global::get().sh) {
+		Global::get().sh->setMediaFraming(speaks ? ServerHandler::MediaFraming::ChannelByte
+												 : ServerHandler::MediaFraming::Plain);
+		// The ping msgServerSync() sent went nowhere while the framing was undecided. This one is what
+		// brings UDP up.
+		Global::get().sh->sendPing();
+	}
+
+	if (speaks) {
+		// Shares kept alive across an automatic reconnect - see serverDisconnected().
+		reannounceSharesAfterReconnect();
+	} else if (m_sharesSurvivingReconnect) {
+		// Reconnected, but to a server that has no video: there is nothing to announce them to.
+		Global::get().l->log(Log::Warning, tr("This server does not support video, so your shares were stopped."));
+		stopAllSharesLocally();
+	}
+
+	refreshShareActions();
+}
+
+void MainWindow::refreshShareActions() {
+	if (m_shareCameraAction) {
+		m_shareCameraAction->setEnabled(m_serverSpeaksVideo || m_shareCameraAction->isChecked());
+	}
+
+	if (m_shareScreenAction) {
+		m_shareScreenAction->setEnabled(m_serverSpeaksVideo || m_shareScreenAction->isChecked());
+	}
+}
+
+unsigned int MainWindow::clampToServerVideoBandwidth(unsigned int kbps) const {
+	if (m_serverMaxVideoBandwidth == 0) {
+		return kbps;
+	}
+
+	return std::min(kbps, std::max(1u, m_serverMaxVideoBandwidth / 1000));
 }
 
 void MainWindow::reannounceSharesAfterReconnect() {
