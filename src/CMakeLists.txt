@@ -36,6 +36,7 @@ find_pkg(Protobuf REQUIRED)
 add_compile_options(${MUMBLE_COMPILER_FLAGS})
 
 # The Qt-free protocol core, including the generated Protobuf code.
+set(MUMBLE_CORE_IN_MUMBLE_TREE ON)
 add_subdirectory(mumble-core)
 
 add_library(shared STATIC)

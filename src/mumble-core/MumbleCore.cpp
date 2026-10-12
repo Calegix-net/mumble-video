@@ -6,6 +6,7 @@
 #include "mumble-core/MumbleCore.h"
 
 #include "ControlFramer.h"
+#include "CoreLog.h"
 #include "CryptoSession.h"
 #include "MediaDemux.h"
 #include "MumbleProtocol.h"
@@ -26,6 +27,16 @@ MUMBLE_ALL_TCP_MESSAGES
 
 const char *version() {
 	return MUMTEXT(MUMBLE_VERSION);
+}
+
+static_assert(static_cast< int >(LogLevel::Info) == static_cast< int >(Mumble::Core::LogLevel::Info)
+				  && static_cast< int >(LogLevel::Warning) == static_cast< int >(Mumble::Core::LogLevel::Warning)
+				  && static_cast< int >(LogLevel::Fatal) == static_cast< int >(Mumble::Core::LogLevel::Fatal),
+			  "LogLevel does not match the core's");
+
+void setLogHandler(LogHandler handler) {
+	// Same signature but for the enum, whose values are checked above.
+	Mumble::Core::setLogHandler(reinterpret_cast< Mumble::Core::LogHandler >(handler));
 }
 
 Bytes frameControlMessage(std::uint16_t type, ByteView payload) {
@@ -197,7 +208,8 @@ bool MediaSession::isKeyed() const {
 void MediaSession::receiveDatagram(ByteView datagram, std::uint64_t nowUsec, MediaEvents &events) {
 	Impl &d = *m_impl;
 
-	if (!d.crypto.isValid()) {
+	// Shorter than OCB2's own header, so nothing at all; MediaDemux has a stricter floor of its own.
+	if (datagram.size() < 4 || !d.crypto.isValid()) {
 		return;
 	}
 
@@ -230,7 +242,7 @@ void MediaSession::receiveDatagram(ByteView datagram, std::uint64_t nowUsec, Med
 	CryptStateOCB2 &audio           = d.crypto.audio();
 	const std::span< byte > buffer  = d.udpDecoder.getBuffer();
 	const std::size_t encryptedSize = media.payload.size();
-	if (buffer.size() < encryptedSize - 4) {
+	if (encryptedSize < 4 || buffer.size() < encryptedSize - 4) {
 		return;
 	}
 

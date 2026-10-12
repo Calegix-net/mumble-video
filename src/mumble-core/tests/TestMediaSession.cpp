@@ -6,6 +6,7 @@
 #include "CoreTest.h"
 
 #include "ControlFramer.h"
+#include "CoreLog.h"
 #include "MediaDemux.h"
 #include "Mumble.pb.h"
 #include "MumbleProtocol.h"
@@ -404,4 +405,47 @@ CORE_TEST(mediaSessionSpeaksPlainFraming) {
 	session.receiveDatagram(datagram, 1000, events);
 	CHECK_EQ(events.pongs.size(), 1u);
 	CHECK_EQ(events.pongs[0], 42u);
+}
+
+CORE_TEST(mediaSessionIgnoresRunts) {
+	CryptStateOCB2 serverAudio;
+	serverAudio.genKey();
+
+	MumbleCore::MediaSession session;
+	MumbleCore::MediaEvents events;
+	MumbleProto::CryptSetup setup;
+	setup.set_key(serverAudio.getRawKey());
+	setup.set_client_nonce(serverAudio.getDecryptIV());
+	setup.set_server_nonce(serverAudio.getEncryptIV());
+	const std::string setupBytes = setup.SerializeAsString();
+	CHECK(session.handleCryptSetup(
+		std::span< const std::uint8_t >(reinterpret_cast< const std::uint8_t * >(setupBytes.data()), setupBytes.size()),
+		events));
+
+	for (const MumbleCore::UdpFraming framing :
+		 { MumbleCore::UdpFraming::ChannelByte, MumbleCore::UdpFraming::Plain }) {
+		session.setUdpFraming(framing);
+		for (std::size_t size = 0; size < 6; size++) {
+			const Bytes runt(size, 0);
+			session.receiveDatagram(runt, 1000, events);
+		}
+	}
+	CHECK(events.audio.empty());
+	CHECK(events.pongs.empty());
+}
+
+namespace {
+int g_publicLogCalls = 0;
+void countPublicLog(MumbleCore::LogLevel level, const char *) {
+	if (level == MumbleCore::LogLevel::Warning) {
+		g_publicLogCalls++;
+	}
+}
+} // namespace
+
+CORE_TEST(publicLogHandlerGetsCoreMessages) {
+	MumbleCore::setLogHandler(countPublicLog);
+	Mumble::Core::logWarning("from the core");
+	MumbleCore::setLogHandler(nullptr);
+	CHECK_EQ(g_publicLogCalls, 1);
 }
