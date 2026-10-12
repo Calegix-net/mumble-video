@@ -30,7 +30,9 @@ option optimize_for = SPEED;
 // packet. The server frames for a client exactly when that client's Authenticate listed FEATURE_VIDEO,
 // in both directions, and decides it before sending CryptSetup, so no datagram is ever exchanged under
 // the wrong framing. A stock client therefore keeps its voice on UDP; it is simply never told about
-// video.
+// video. The client frames for the server exactly when the server's first ServerConfig listed
+// FEATURE_VIDEO. That arrives after CryptSetup, so until it does the client sends nothing on UDP and
+// tunnels its voice over TCP, which needs no framing; against a stock server it then uses plain UDP.
 //
 // One exception to never inferring from the version, for this fork's own releases v1.7.0 to v1.9.1.
 // They speak video - framed UDP, VideoState, VideoSubscribe - but predate the advertisement: they send
@@ -719,17 +721,21 @@ message ServerConfig {
 	// Whether using Mumble's recording feature is allowed on the server
 	optional bool recording_allowed = 7;
 	// Optional protocol features this server implements and permits. A feature that is not listed here
-	// is disabled; there is deliberately no separate "enabled" boolean per feature. Absent for every
-	// pre-1.6 server, which is why the client must construct all video and file UI disabled and enable
+	// is disabled; there is deliberately no separate "enabled" boolean per feature. Absent from every
+	// stock Mumble server and from this fork's releases before it was sent (see Feature for how those
+	// are recognised), which is why the client must construct all video and file UI disabled and enable
 	// it only on receipt of this message.
 	repeated Feature features = 8;
 
-	// The following are only meaningful if FEATURE_VIDEO is advertised.
+	// The following are only meaningful if FEATURE_VIDEO is advertised. 0 means no limit.
 
-	// Maximum bandwidth in bits per second a single video stream may use. The sender clamps to this;
-	// the server enforces it independently.
+	// Maximum bandwidth in bits per second a single video stream may use. The sender clamps its encoder
+	// to this, and the server clamps VideoState.target_bandwidth to it. The server does not meter the
+	// datagrams themselves.
 	optional uint32 max_video_bandwidth = 9;
-	// Maximum number of users that may stream video simultaneously in one channel.
+	// Maximum number of users that may share video at once in one channel, counting a user once however
+	// many streams they hold. Enforced when a user starts sharing: a user already sharing may add
+	// streams, and moving into a channel is not refused because of it.
 	optional uint32 max_video_streams_per_channel = 10;
 
 	// The following are only meaningful if FEATURE_FILE_TRANSFER is advertised.

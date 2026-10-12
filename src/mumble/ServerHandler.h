@@ -248,6 +248,18 @@ public:
 
 	void setProtocolVersion(Version::full_t version);
 
+	/// How this connection's UDP datagrams are framed - see Feature in Mumble.proto. Undecided from the
+	/// moment of connecting until the server's first ServerConfig says whether it speaks video. Meanwhile
+	/// nothing is sent on UDP and voice goes through the TCP tunnel, which needs no framing.
+	enum class MediaFraming { Undecided, Plain, ChannelByte };
+	void setMediaFraming(MediaFraming framing);
+	MediaFraming mediaFraming() const;
+
+protected:
+	/// Set from the GUI thread, read by this handler's own thread and the audio thread.
+	std::atomic< MediaFraming > m_mediaFraming{ MediaFraming::Undecided };
+
+public:
 	void sendProtoMessage(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType type);
 	void sendMessage(const unsigned char *data, int len, bool force = false);
 

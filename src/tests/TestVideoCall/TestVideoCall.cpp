@@ -32,6 +32,7 @@
 #include <QtNetwork/QUdpSocket>
 #include <QtTest>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -315,6 +316,8 @@ private slots:
 	void aStockClientKeepsItsVoiceOnUdp();
 	void aStockClientIsNeverToldAboutVideo();
 	void aReleaseFromBeforeTheAdvertisementStillSpeaksVideo();
+	void theServerAdvertisesVideoAndItsLimits();
+	void theVideoLimitsAreEnforced();
 
 private:
 	QTemporaryDir m_dir;
@@ -372,6 +375,10 @@ bool TestVideoCall::startServer() {
 	out << "timeout=120\n";
 	// Every test connects from loopback; this is intentional churn, not a password attack.
 	out << "autobanAttempts=0\n";
+	// Video limits low enough to be hit by a test, and different from the defaults so the advertisement
+	// is seen to come from the configuration.
+	out << "videobandwidth=5000000\n";
+	out << "videostreamsperchannel=2\n";
 	// Nothing here should reach the network or a real registry.
 	out << "registername=\n";
 	out << "registerurl=\n";
@@ -869,6 +876,80 @@ void TestVideoCall::aReleaseFromBeforeTheAdvertisementStillSpeaksVideo() {
 		legacy.sendVoice(frame);
 	}
 	QVERIFY2(alice.drainVoice(legacy.session, 1500) >= 8, "a pre-advertisement release's framed voice was refused");
+}
+
+// Without this a client has to guess whether the server has video at all. Every client gets it; one that
+// does not know the fields ignores them.
+void TestVideoCall::theServerAdvertisesVideoAndItsLimits() {
+	TestClient alice;
+	alice.advertiseVideo = false;
+	alice.framed         = false;
+	QVERIFY(alice.connectAndAuthenticate("alice-config", m_port));
+
+	QByteArray body;
+	QVERIFY2(alice.waitFor(TCPMessageType::ServerConfig, body), "no ServerConfig arrived");
+
+	MumbleProto::ServerConfig config;
+	QVERIFY(config.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+
+	QVERIFY2(std::find(config.features().begin(), config.features().end(), MumbleProto::FEATURE_VIDEO)
+				 != config.features().end(),
+			 "FEATURE_VIDEO was not advertised");
+	QCOMPARE(config.max_video_bandwidth(), 5000000u);
+	QCOMPARE(config.max_video_streams_per_channel(), 2u);
+}
+
+void TestVideoCall::theVideoLimitsAreEnforced() {
+	TestClient alice;
+	TestClient bob;
+	TestClient carol;
+	TestClient viewer;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-limits", m_port));
+	QVERIFY(bob.connectAndAuthenticate("bob-limits", m_port));
+	QVERIFY(carol.connectAndAuthenticate("carol-limits", m_port));
+	QVERIFY(viewer.connectAndAuthenticate("viewer-limits", m_port));
+
+	const auto announce = [](TestClient &client, std::uint32_t streamID, std::uint32_t bandwidth) {
+		MumbleProto::VideoState announcement;
+		announcement.set_stream_id(streamID);
+		announcement.set_active(true);
+		announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+		announcement.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+		announcement.set_target_bandwidth(bandwidth);
+		client.sendTcp(announcement, TCPMessageType::VideoState);
+	};
+
+	const auto nextAnnouncement = [&viewer](MumbleProto::VideoState &state, int milliseconds) {
+		QByteArray body;
+		return viewer.waitFor(TCPMessageType::VideoState, body, milliseconds)
+			   && state.ParseFromArray(body.constData(), static_cast< int >(body.size()));
+	};
+
+	MumbleProto::VideoState relayed;
+
+	// Asking for more than max_video_bandwidth is relayed as max_video_bandwidth.
+	announce(alice, 20, 50000000);
+	QVERIFY2(nextAnnouncement(relayed, 5000), "the first share was not relayed");
+	QCOMPARE(relayed.session(), alice.session);
+	QCOMPARE(relayed.target_bandwidth(), 5000000u);
+
+	announce(bob, 21, 1000000);
+	QVERIFY2(nextAnnouncement(relayed, 5000), "the second share was not relayed");
+	QCOMPARE(relayed.session(), bob.session);
+	QCOMPARE(relayed.target_bandwidth(), 1000000u);
+
+	// A third person sharing in the channel is one too many, and is told why.
+	announce(carol, 22, 1000000);
+	QByteArray denial;
+	QVERIFY2(carol.waitFor(TCPMessageType::PermissionDenied, denial), "the third share was not refused");
+	QVERIFY2(!nextAnnouncement(relayed, 700), "the refused share was relayed anyway");
+
+	// Someone already sharing may add a stream: the limit counts people, not streams.
+	announce(alice, 23, 1000000);
+	QVERIFY2(nextAnnouncement(relayed, 5000), "a sharer's second stream was refused");
+	QCOMPARE(relayed.session(), alice.session);
+	QCOMPARE(relayed.stream_id(), 23u);
 }
 
 QTEST_MAIN(TestVideoCall)

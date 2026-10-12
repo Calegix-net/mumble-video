@@ -609,6 +609,11 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 	mpsc.set_image_message_length(static_cast< unsigned int >(iMaxImageMessageLength));
 	mpsc.set_max_users(static_cast< unsigned int >(iMaxUsers));
 	mpsc.set_recording_allowed(allowRecording);
+	// Advertised to everyone, whether or not they speak video themselves: a client that does not know the
+	// fields ignores them, and it is the advertisement that tells a client this server has video at all.
+	mpsc.add_features(MumbleProto::FEATURE_VIDEO);
+	mpsc.set_max_video_bandwidth(iVideoBandwidth);
+	mpsc.set_max_video_streams_per_channel(iVideoStreamsPerChannel);
 	sendMessage(uSource, mpsc);
 
 	MumbleProto::SuggestConfig mpsug;
@@ -2631,6 +2636,35 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), false);
 
 		return;
+	}
+
+	if (msg.active() && !alreadyAnnounced && iVideoStreamsPerChannel > 0 && uSource->cChannel) {
+		// The limit is on people sharing, not streams: a screen with its audio, or a camera beside it, is
+		// still one person. So someone already sharing may always add a stream; anyone else needs a free
+		// place in the channel.
+		std::set< unsigned int > sharing;
+		for (const auto &announcement : m_videoAnnouncements) {
+			ServerUser *sender = qhUsers.value(announcement.first.first);
+			if (sender && sender->cChannel == uSource->cChannel) {
+				sharing.insert(sender->uiSession);
+			}
+		}
+
+		if (sharing.find(uSource->uiSession) == sharing.end() && sharing.size() >= iVideoStreamsPerChannel) {
+			MumbleProto::PermissionDenied mppd;
+			mppd.set_type(MumbleProto::PermissionDenied_DenyType_Text);
+			mppd.set_reason(u8(QString("%1 people are already sharing video in this channel, which is as many as "
+									   "this server allows")
+								   .arg(iVideoStreamsPerChannel)));
+			sendMessage(uSource, mppd);
+
+			return;
+		}
+	}
+
+	// Clamped as ServerConfig.max_video_bandwidth promises, and relayed as clamped.
+	if (iVideoBandwidth > 0 && msg.has_target_bandwidth() && msg.target_bandwidth() > iVideoBandwidth) {
+		msg.set_target_bandwidth(iVideoBandwidth);
 	}
 
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {

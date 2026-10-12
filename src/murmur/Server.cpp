@@ -411,6 +411,8 @@ void Server::readParams() {
 	iPluginMessageBurst                = Meta::mp->iPluginMessageBurst;
 	iVideoMessageLimit                 = Meta::mp->iVideoMessageLimit;
 	iVideoMessageBurst                 = Meta::mp->iVideoMessageBurst;
+	iVideoBandwidth                    = Meta::mp->iVideoBandwidth;
+	iVideoStreamsPerChannel            = Meta::mp->iVideoStreamsPerChannel;
 	broadcastListenerVolumeAdjustments = Meta::mp->broadcastListenerVolumeAdjustments;
 	m_suggestVersion                   = Meta::mp->m_suggestVersion;
 	m_suggestPositional                = Meta::mp->suggestPositional;
@@ -540,6 +542,8 @@ void Server::readParams() {
 	if (iVideoMessageBurst < 1) { // Prevent disabling video control entirely
 		iVideoMessageBurst = 1;
 	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videobandwidth", iVideoBandwidth);
+	m_dbWrapper.getConfigurationTo(iServerNum, "videostreamsperchannel", iVideoStreamsPerChannel);
 	m_dbWrapper.getConfigurationTo(iServerNum, "broadcastlistenervolumeadjustments",
 								   broadcastListenerVolumeAdjustments);
 }
@@ -557,6 +561,22 @@ void Server::setLiveConf(const QString &key, const QString &value) {
 			iMaxBandwidth = length;
 			MumbleProto::ServerConfig mpsc;
 			mpsc.set_max_bandwidth(static_cast< unsigned int >(length));
+			sendAll(mpsc);
+		}
+	} else if (key == "videobandwidth" || key == "videostreamsperchannel") {
+		// 0 is a real value here, "no limit", so only an empty value falls back to the default.
+		const bool bandwidth  = key == "videobandwidth";
+		unsigned int &setting = bandwidth ? iVideoBandwidth : iVideoStreamsPerChannel;
+		const unsigned int value =
+			v.isNull() ? (bandwidth ? Meta::mp->iVideoBandwidth : Meta::mp->iVideoStreamsPerChannel) : v.toUInt();
+		if (value != setting) {
+			setting = value;
+			MumbleProto::ServerConfig mpsc;
+			if (bandwidth) {
+				mpsc.set_max_video_bandwidth(value);
+			} else {
+				mpsc.set_max_video_streams_per_channel(value);
+			}
 			sendAll(mpsc);
 		}
 	} else if (key == "users") {
