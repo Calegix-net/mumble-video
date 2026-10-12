@@ -40,6 +40,15 @@ using ByteView = std::span< const std::uint8_t >;
 /// version_v2 (as numbers) and what upstream peers gate features on. Not the fork's release number.
 const char *version();
 
+/// How bad a log message is. Fatal is followed by abort(), whatever the handler does.
+enum class LogLevel { Info, Warning, Fatal };
+
+using LogHandler = void (*)(LogLevel level, const char *message);
+
+/// Where the core's log messages go (Android: logcat). nullptr, the default, writes them to stderr. Safe
+/// to call from any thread; the handler may be called from any thread that calls into the core.
+void setLogHandler(LogHandler handler);
+
 /// Control message types, as on the wire (Mumble.proto names them). Append-only, never renumbered.
 namespace ControlType {
 	constexpr std::uint16_t Version                = 0;

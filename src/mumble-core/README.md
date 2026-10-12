@@ -17,7 +17,7 @@ It needs OpenSSL (libcrypto) and Protobuf, and nothing else. The options are:
 - `MUMBLE_CORE_LEGACY_UDP` (default `ON`) keeps the pre-1.5 UDP format. Leave it off for a client that only
   ever talks to current servers. In the main tree it is always on.
 - `MUMBLE_CORE_VERSION` is the version string the core reports.
-- `tests` builds `TestMumbleCore`.
+- `MUMBLE_CORE_TESTS` builds `TestMumbleCore` (on by default only when the core is the top-level project).
 
 CI builds it exactly this way, in a configure that never looks for Qt. That is the check that nothing in
 here has started to need Qt.
@@ -44,7 +44,9 @@ src/mumble-core/android/build-core.sh arm64-v8a ~/mumble-core-deps/arm64-v8a bui
   - `MUMBLE_CORE_PROTOBUF_LITE=ON` and `MUMBLE_CORE_LEGACY_UDP=OFF`.
 
   From Gradle (`externalNativeBuild`), the JNI library's CMakeLists can `add_subdirectory()` this
-  directory with the same variables set and link `mumble-core`.
+  directory and link `mumble-core`. Set `MUMBLE_CORE_PROTOBUF_LITE` and `MUMBLE_CORE_LEGACY_UDP`
+  before that call. `MUMBLE_CORE_PROTOC_ARGS` (`PROTOC_EXE <path>`) picks the protoc, and
+  `MUMBLE_CORE_3RDPARTY_DIR` says where `3rdparty/` is if it isn't two levels up.
 
 The tests run on a device or emulator too. Push `TestMumbleCore` and `test-vectors/`, and point
 `MUMBLE_CORE_TEST_VECTORS` at the vectors.
@@ -61,8 +63,7 @@ flow. In short, the host owns the TLS connection and the UDP socket:
 - `MediaSession` is one connection's UDP side. Datagrams go in. Audio packets (still Opus-encoded), whole
   video units, pongs, and datagrams and control messages to send come out.
 
-Logging goes through `CoreLog.h`. Point `Mumble::Core::setLogHandler()` at the host's log; until then it
-writes to stderr.
+Logging goes to stderr until `MumbleCore::setLogHandler()` points it at the host's log.
 
 ## Test vectors
 

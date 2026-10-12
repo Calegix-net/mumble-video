@@ -10,7 +10,19 @@
 
 cmake_minimum_required(VERSION 3.23...4.2)
 
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if(MUMBLE_CORE_IN_MUMBLE_TREE)
+	# In the main tree src/CMakeLists.txt has already found OpenSSL and Protobuf and set the compiler
+	# flags, the version is Mumble's own, and the desktop always keeps the legacy format.
+	set(MUMBLE_CORE_3RDPARTY_DIR "${3RDPARTY_DIR}")
+	set(MUMBLE_CORE_VERSION_MAJOR ${CMAKE_PROJECT_VERSION_MAJOR})
+	set(MUMBLE_CORE_VERSION_MINOR ${CMAKE_PROJECT_VERSION_MINOR})
+	set(MUMBLE_CORE_VERSION_PATCH ${CMAKE_PROJECT_VERSION_PATCH})
+	set(MUMBLE_CORE_VERSION ${CMAKE_PROJECT_VERSION})
+	set(MUMBLE_CORE_LEGACY_UDP ON)
+	set(MUMBLE_CORE_TESTS ${tests})
+else()
+	# On its own, or added with add_subdirectory() by some other project (the Android app). Either way
+	# the options below are the host's to set, before add_subdirectory() in the second case.
 	set(MUMBLE_CORE_VERSION "0.0.0" CACHE STRING "Version reported by the core when built on its own")
 
 	project(mumble-core
@@ -18,12 +30,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 		LANGUAGES C CXX
 	)
 
-	set(CMAKE_CXX_STANDARD 20)
+	if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD LESS 20)
+		set(CMAKE_CXX_STANDARD 20)
+	endif()
 	set(CMAKE_CXX_STANDARD_REQUIRED ON)
 	set(CMAKE_CXX_EXTENSIONS OFF)
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-	option(tests "Build the core tests." ON)
+	option(MUMBLE_CORE_TESTS "Build the core tests." ${PROJECT_IS_TOP_LEVEL})
 	# Pre-1.5 servers and clients speak a UDP format of their own, encoded with PacketDataStream. The
 	# desktop always keeps it; a host that only ever talks to current servers can leave it out.
 	option(MUMBLE_CORE_LEGACY_UDP "Support the legacy (pre-Protobuf) UDP format." ON)
@@ -31,37 +45,35 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	# the core uses reflection.
 	option(MUMBLE_CORE_PROTOBUF_LITE "Generate and link against the Protobuf lite runtime." OFF)
 
-	find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-	find_package(Protobuf CONFIG)
-	if(NOT Protobuf_FOUND)
-		find_package(Protobuf MODULE REQUIRED)
+	if(NOT TARGET OpenSSL::Crypto)
+		find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+	endif()
+	if(NOT TARGET protobuf::libprotobuf AND NOT TARGET protobuf::libprotobuf-lite)
+		find_package(Protobuf CONFIG)
+		if(NOT Protobuf_FOUND)
+			find_package(Protobuf MODULE REQUIRED)
+		endif()
 	endif()
 
 	# Cross-compiling (for Android), the target's Protobuf has no protoc that runs here, so the host's is
-	# used. Its version has to match the target library's exactly.
-	if(CMAKE_CROSSCOMPILING AND NOT TARGET protobuf::protoc)
+	# used. Its version has to match the target library's exactly. A host can pass its own in
+	# MUMBLE_CORE_PROTOC_ARGS (PROTOC_EXE <path>).
+	if(CMAKE_CROSSCOMPILING AND NOT TARGET protobuf::protoc AND NOT MUMBLE_CORE_PROTOC_ARGS)
 		find_program(MUMBLE_CORE_PROTOC protoc REQUIRED)
 		set(MUMBLE_CORE_PROTOC_ARGS PROTOC_EXE "${MUMBLE_CORE_PROTOC}")
 	endif()
 
-	if(tests)
+	if(MUMBLE_CORE_TESTS)
 		enable_testing()
 	endif()
 
-	set(MUMBLE_CORE_3RDPARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty")
+	if(NOT MUMBLE_CORE_3RDPARTY_DIR)
+		set(MUMBLE_CORE_3RDPARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty")
+	endif()
 	set(MUMBLE_CORE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 	set(MUMBLE_CORE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 	set(MUMBLE_CORE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 	set(MUMBLE_CORE_VERSION ${PROJECT_VERSION})
-else()
-	# In the main tree src/CMakeLists.txt has already found OpenSSL and Protobuf and set the compiler
-	# flags, and the version is Mumble's own.
-	set(MUMBLE_CORE_3RDPARTY_DIR "${3RDPARTY_DIR}")
-	set(MUMBLE_CORE_VERSION_MAJOR ${CMAKE_PROJECT_VERSION_MAJOR})
-	set(MUMBLE_CORE_VERSION_MINOR ${CMAKE_PROJECT_VERSION_MINOR})
-	set(MUMBLE_CORE_VERSION_PATCH ${CMAKE_PROJECT_VERSION_PATCH})
-	set(MUMBLE_CORE_VERSION ${CMAKE_PROJECT_VERSION})
-	set(MUMBLE_CORE_LEGACY_UDP ON)
 endif()
 
 add_library(mumble-core STATIC)
@@ -162,6 +174,6 @@ if(WIN32)
 	target_link_libraries(mumble-core PUBLIC ws2_32)
 endif()
 
-if(tests)
+if(MUMBLE_CORE_TESTS)
 	add_subdirectory(tests)
 endif()
