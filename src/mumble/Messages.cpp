@@ -1444,8 +1444,9 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	// A message about one's own stream is a relayed keyframe request from a subscriber. Honouring it is
 	// what turns "subscriber joins" into "subscriber sees a picture now" rather than "at the encoder's
-	// next scheduled keyframe, up to several seconds away". The server rate-limits these per sender, so
-	// obeying unconditionally cannot be amplified into re-encoding every frame.
+	// next scheduled keyframe, up to several seconds away". The server rate-limits these per stream and
+	// relays them only from subscribers, so obeying unconditionally cannot be amplified into re-encoding
+	// every frame.
 	if (msg.request_keyframe() && msg.has_session() && msg.session() == Global::get().uiSession) {
 		qWarning("Video: a viewer asked for a keyframe on stream %u", msg.stream_id());
 

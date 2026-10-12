@@ -60,6 +60,7 @@ bool VideoRouter::announceStream(std::uint32_t sender, std::uint32_t streamID, b
 
 		m_streams.erase(it);
 		m_lastRelayedMsec.erase(key);
+		m_lastKeyframeRequestMsec.erase(key);
 
 		return true;
 	}
@@ -194,6 +195,7 @@ std::vector< VideoRouter::DroppedSubscription > VideoRouter::revalidate() {
 			}
 
 			m_lastRelayedMsec.erase(key);
+			m_lastKeyframeRequestMsec.erase(key);
 			streamIt = m_streams.erase(streamIt);
 
 			continue;
@@ -267,6 +269,7 @@ void VideoRouter::removeUser(std::uint32_t session) {
 		}
 
 		m_lastRelayedMsec.erase(key);
+		m_lastKeyframeRequestMsec.erase(key);
 		it = m_streams.erase(it);
 	}
 }
@@ -279,6 +282,33 @@ void VideoRouter::noteRelayed(std::uint32_t sender, std::uint32_t streamID, std:
 	}
 
 	m_lastRelayedMsec[key] = nowMsec;
+}
+
+bool VideoRouter::admitKeyframeRequest(std::uint32_t requester, std::uint32_t sender, std::uint32_t streamID,
+									   std::int64_t nowMsec) {
+	const StreamKey key{ sender, streamID };
+
+	const auto streamIt = m_streams.find(key);
+
+	if (streamIt == m_streams.end() || streamIt->second.find(requester) == streamIt->second.end()) {
+		return false;
+	}
+
+	// Re-checked for the same reason subscribersOf() re-checks: a subscription that is no longer permitted
+	// receives nothing, so it has nothing to ask a keyframe for either.
+	if (!m_maySend(sender) || !m_mayReceive(requester, sender)) {
+		return false;
+	}
+
+	const auto lastIt = m_lastKeyframeRequestMsec.find(key);
+
+	if (lastIt != m_lastKeyframeRequestMsec.end() && nowMsec - lastIt->second < KEYFRAME_REQUEST_INTERVAL_MSEC) {
+		return false;
+	}
+
+	m_lastKeyframeRequestMsec[key] = nowMsec;
+
+	return true;
 }
 
 std::vector< VideoRouter::StreamKey > VideoRouter::staleStreams(std::int64_t nowMsec, std::int64_t timeoutMsec) const {

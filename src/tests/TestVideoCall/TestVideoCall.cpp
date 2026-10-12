@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <set>
 #include <vector>
 
 using namespace Mumble::Protocol;
@@ -310,6 +311,8 @@ private slots:
 	void anUnsubscribedClientReceivesNothing();
 	void aClientJoiningLaterLearnsOfExistingStreams();
 	void aKeyframeRequestReachesTheSenderOnceASecond();
+	void eachOfASendersStreamsGetsItsOwnKeyframe();
+	void anUnsubscribeNeverAsksForAKeyframe();
 	void aDeniedSubscriptionGetsAnExplicitReply();
 	void recoveryRequestsDoNotKeepASilentStreamAlive();
 	void aRapidlyToggledShareStillReachesViewers();
@@ -657,6 +660,85 @@ void TestVideoCall::aKeyframeRequestReachesTheSenderOnceASecond() {
 	QThread::msleep(1200);
 	bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
 	QVERIFY2(alice.waitFor(TCPMessageType::VideoSubscribe, second), "the rate limit never re-opened");
+}
+
+// The limit is per stream. A screen and its audio are two streams of one sender, and asking for one must
+// not use up the other's request - as it did when the server kept one slot per sender.
+void TestVideoCall::eachOfASendersStreamsGetsItsOwnKeyframe() {
+	TestClient alice;
+	TestClient bob;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-kf2", m_port));
+	QVERIFY(bob.connectAndAuthenticate("bob-kf2", m_port));
+
+	for (const std::uint32_t streamID : { 30u, 31u }) {
+		MumbleProto::VideoState announcement;
+		announcement.set_stream_id(streamID);
+		announcement.set_active(true);
+		announcement.set_codec(streamID == 30u ? MumbleProto::VideoState_Codec_VP9
+											   : MumbleProto::VideoState_Codec_OpusAudio);
+		announcement.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
+		alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+		QByteArray ignored;
+		QVERIFY(bob.waitFor(TCPMessageType::VideoState, ignored));
+	}
+
+	for (const std::uint32_t streamID : { 30u, 31u }) {
+		MumbleProto::VideoSubscribe subscribe;
+		subscribe.set_session(alice.session);
+		subscribe.set_stream_id(streamID);
+		subscribe.set_subscribe(true);
+		subscribe.set_request_keyframe(true);
+		bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+	}
+
+	std::set< std::uint32_t > asked;
+	QByteArray body;
+	while (asked.size() < 2 && alice.waitFor(TCPMessageType::VideoSubscribe, body, 2000)) {
+		MumbleProto::VideoSubscribe relayed;
+		QVERIFY(relayed.ParseFromArray(body.constData(), static_cast< int >(body.size())));
+		QVERIFY(relayed.request_keyframe());
+		asked.insert(relayed.stream_id());
+	}
+
+	QVERIFY2(asked.count(30u) == 1, "the picture's keyframe request did not reach the sender");
+	QVERIFY2(asked.count(31u) == 1, "the audio's keyframe request was swallowed by the picture's");
+}
+
+// Someone who has just stopped watching has no use for a keyframe, and asking costs the sender's uplink.
+void TestVideoCall::anUnsubscribeNeverAsksForAKeyframe() {
+	TestClient alice;
+	TestClient bob;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-kf3", m_port));
+	QVERIFY(bob.connectAndAuthenticate("bob-kf3", m_port));
+
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(32);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+	QByteArray body;
+	QVERIFY(bob.waitFor(TCPMessageType::VideoState, body));
+
+	MumbleProto::VideoSubscribe subscribe;
+	subscribe.set_session(alice.session);
+	subscribe.set_stream_id(32);
+	subscribe.set_subscribe(true);
+	bob.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+	QVERIFY(bob.waitFor(TCPMessageType::VideoSubscribe, body));
+
+	MumbleProto::VideoSubscribe unsubscribe;
+	unsubscribe.set_session(alice.session);
+	unsubscribe.set_stream_id(32);
+	unsubscribe.set_subscribe(false);
+	unsubscribe.set_request_keyframe(true);
+	bob.sendTcp(unsubscribe, TCPMessageType::VideoSubscribe);
+
+	QVERIFY2(!alice.waitFor(TCPMessageType::VideoSubscribe, body, 1500),
+			 "a keyframe request riding on an unsubscribe reached the sender");
 }
 
 void TestVideoCall::anUnsubscribedClientReceivesNothing() {
