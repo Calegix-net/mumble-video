@@ -204,6 +204,10 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 	{
 		QWriteLocker wl(&qrwlVoiceThread);
 		uSource->uiSession = qqIds.dequeue();
+		// Read here, from the Authenticate that completes authentication and never from a later one (see
+		// Feature in Mumble.proto), and before the UDP thread can find this user: it decides how the
+		// user's datagrams are framed.
+		uSource->m_videoCapable = MumbleProto::speaksVideo(msg.features(), uSource->m_version, uSource->qsRelease);
 		qhUsers.insert(uSource->uiSession, uSource);
 		qhHostUsers[uSource->haAddress].insert(uSource);
 	}
@@ -2588,6 +2592,13 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	MSG_SETUP(ServerUser::Authenticated);
 
+	// A client that did not advertise video has no business announcing a stream, and could not send one:
+	// its UDP is unframed, so there is no video channel to send on. Ignored, as an unknown message would
+	// be, rather than answered with a denial it would not understand.
+	if (!uSource->m_videoCapable) {
+		return;
+	}
+
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
@@ -2670,6 +2681,10 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 	// heavy but entirely conforming watcher starved and its watch/keyframe requests were dropped - tiles
 	// that never painted. The video bucket is sized for that traffic; see Meta::iVideoMessageLimit.
 	MSG_SETUP(ServerUser::Authenticated);
+	// Ignored from a client that did not advertise video, for the same reason as in msgVideoState.
+	if (!uSource->m_videoCapable) {
+		return;
+	}
 	if (uSource->m_videoControlBucket.ratelimit(1)) {
 		return;
 	}

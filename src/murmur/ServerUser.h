@@ -27,6 +27,7 @@
 #	include <sys/socket.h>
 #endif
 
+#include <atomic>
 #include <vector>
 
 // Unfortunately, this needs to be "large enough" to hold
@@ -130,6 +131,12 @@ public:
 	/// If the flag is 1, the user is using
 	/// UDP.
 	QAtomicInt aiUdpFlag;
+
+	/// Whether this user speaks video, as negotiated in Authenticate (see Feature in Mumble.proto). Decides
+	/// both whether it is told about video at all and how its UDP datagrams are framed: with a channel
+	/// byte in front if set, plain as for any stock Mumble client if not. Set once, before the user can
+	/// send or receive anything on UDP; read by the UDP thread, hence atomic.
+	std::atomic< bool > m_videoCapable{ false };
 
 	QList< int > qlCodecs;
 	bool bOpus;

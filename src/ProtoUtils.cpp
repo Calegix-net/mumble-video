@@ -37,4 +37,27 @@ void setSuggestedVersion(MumbleProto::SuggestConfig &msg, const ::Version::full_
 	msg.set_version_v1(::Version::toLegacyVersion(version));
 }
 
+bool hasFeature(const google::protobuf::RepeatedField< int > &features, Feature feature) {
+	for (const int advertised : features) {
+		if (advertised == feature) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool isLegacyVideoPeer(::Version::full_t version, const QString &release) {
+	return version == ::Version::fromComponents(1, 7, 0) && release == QLatin1String("1.7.0");
+}
+
+bool speaksVideo(const google::protobuf::RepeatedField< int > &features, ::Version::full_t version,
+				 const QString &release) {
+	if (!features.empty()) {
+		return hasFeature(features, FEATURE_VIDEO);
+	}
+
+	return isLegacyVideoPeer(version, release);
+}
+
 } // namespace MumbleProto

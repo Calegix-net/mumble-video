@@ -51,6 +51,15 @@ struct TestClient {
 	QByteArray rx;
 	quint16 port = 0;
 
+	/// What this client says it is. The defaults are a client of this fork; advertiseVideo = false and
+	/// framed = false stand in for a stock Mumble client.
+	Version::full_t version = CLIENT_PROTOCOL;
+	std::string release     = "TestVideoCall";
+	bool advertiseVideo     = true;
+	/// Whether this client's UDP carries a channel byte, which it must exactly when the server treats it
+	/// as speaking video.
+	bool framed = true;
+
 	void sendTcp(const google::protobuf::Message &message, TCPMessageType type) {
 		std::string body;
 		message.SerializeToString(&body);
@@ -128,16 +137,19 @@ struct TestClient {
 			return false;
 		}
 
-		MumbleProto::Version version;
-		version.set_version_v2(CLIENT_PROTOCOL);
-		version.set_release("TestVideoCall");
-		version.set_os("linux");
-		version.set_os_version("1");
-		sendTcp(version, TCPMessageType::Version);
+		MumbleProto::Version versionMessage;
+		versionMessage.set_version_v2(version);
+		versionMessage.set_release(release);
+		versionMessage.set_os("linux");
+		versionMessage.set_os_version("1");
+		sendTcp(versionMessage, TCPMessageType::Version);
 
 		MumbleProto::Authenticate authenticate;
 		authenticate.set_username(username);
 		authenticate.set_opus(true);
+		if (advertiseVideo) {
+			authenticate.add_features(MumbleProto::FEATURE_VIDEO);
+		}
 		sendTcp(authenticate, TCPMessageType::Authenticate);
 
 		QByteArray body;
@@ -153,14 +165,86 @@ struct TestClient {
 		PingData ping;
 		ping.timestamp = 1;
 
-		const std::span< const byte > encoded = encoder.encodePingPacket(ping);
+		sendOnAudioChannel(encoder.encodePingPacket(ping));
+	}
 
-		std::vector< byte > datagram(encoded.size() + 5);
-		datagram[0] = MEDIA_CHANNEL_AUDIO;
-		audio.encrypt(encoded.data(), datagram.data() + 1, static_cast< unsigned int >(encoded.size()));
+	/// Encrypts one plaintext with the audio crypt state and sends it, framed or not as this client is.
+	void sendOnAudioChannel(std::span< const byte > plaintext) {
+		const std::size_t channelBytes = framed ? 1 : 0;
+
+		std::vector< byte > datagram(plaintext.size() + 4 + channelBytes);
+		if (framed) {
+			datagram[0] = MEDIA_CHANNEL_AUDIO;
+		}
+		audio.encrypt(plaintext.data(), datagram.data() + channelBytes, static_cast< unsigned int >(plaintext.size()));
 
 		udp.writeDatagram(reinterpret_cast< const char * >(datagram.data()), static_cast< qint64 >(datagram.size()),
 						  QHostAddress::LocalHost, port);
+	}
+
+	/// Sends one Opus voice packet to the server over UDP. Its content is never decoded on the way.
+	void sendVoice(std::uint64_t frameNumber) {
+		static const std::vector< byte > opus(40, 0x42);
+
+		UDPAudioEncoder< Role::Client > encoder(CLIENT_PROTOCOL);
+
+		AudioData voice;
+		voice.payload     = { opus.data(), opus.size() };
+		voice.frameNumber = frameNumber;
+		voice.usedCodec   = AudioCodec::Opus;
+
+		sendOnAudioChannel(encoder.encodeAudioPacket(voice));
+	}
+
+	/// Collects UDP for a while, returning how many voice packets from @p senderSession decrypted and
+	/// decoded under this client's own framing.
+	int drainVoice(std::uint32_t senderSession, int milliseconds) {
+		UDPDecoder< Role::Client > decoder(CLIENT_PROTOCOL);
+
+		QElapsedTimer timer;
+		timer.start();
+
+		int received = 0;
+
+		while (timer.elapsed() < milliseconds) {
+			if (!udp.waitForReadyRead(150)) {
+				continue;
+			}
+
+			while (udp.hasPendingDatagrams()) {
+				std::vector< byte > buffer(MAX_MEDIA_DATAGRAM_SIZE);
+
+				const qint64 read =
+					udp.readDatagram(reinterpret_cast< char * >(buffer.data()), static_cast< qint64 >(buffer.size()));
+
+				const std::size_t channelBytes = framed ? 1 : 0;
+
+				if (read < static_cast< qint64 >(4 + channelBytes)) {
+					continue;
+				}
+
+				if (framed && buffer[0] != MEDIA_CHANNEL_AUDIO) {
+					continue;
+				}
+
+				const auto ciphertextSize =
+					static_cast< unsigned int >(static_cast< std::size_t >(read) - channelBytes);
+
+				std::vector< byte > plaintext(ciphertextSize);
+
+				if (!audio.decrypt(buffer.data() + channelBytes, plaintext.data(), ciphertextSize)) {
+					continue;
+				}
+
+				if (decoder.decode(std::span< const byte >(plaintext.data(), ciphertextSize - 4))
+					&& decoder.getMessageType() == UDPMessageType::Audio
+					&& decoder.getAudioData().senderSession == senderSession) {
+					received++;
+				}
+			}
+		}
+
+		return received;
 	}
 
 	/// Collects video datagrams for a while, returning how many decrypted successfully.
@@ -228,6 +312,9 @@ private slots:
 	void aDeniedSubscriptionGetsAnExplicitReply();
 	void recoveryRequestsDoNotKeepASilentStreamAlive();
 	void aRapidlyToggledShareStillReachesViewers();
+	void aStockClientKeepsItsVoiceOnUdp();
+	void aStockClientIsNeverToldAboutVideo();
+	void aReleaseFromBeforeTheAdvertisementStillSpeaksVideo();
 
 private:
 	QTemporaryDir m_dir;
@@ -673,6 +760,115 @@ void TestVideoCall::aRapidlyToggledShareStillReachesViewers() {
 	}
 
 	QVERIFY2(sawFinalStart, "the final toggled-on share never reached the viewer - a genuine start was rate-limited away");
+}
+
+// A stock Mumble client puts no channel byte in front of its datagrams and expects none back. Before the
+// server framed per client, it read the first byte of a stock client's ciphertext - a rolling IV byte - as
+// the channel byte, so the client's UDP never verified and it fell back to tunnelling its voice over TCP.
+void TestVideoCall::aStockClientKeepsItsVoiceOnUdp() {
+	TestClient erin;
+	TestClient dave;
+	dave.advertiseVideo = false;
+	dave.framed         = false;
+
+	QVERIFY(erin.connectAndAuthenticate("erin-voice", m_port));
+	QVERIFY(dave.connectAndAuthenticate("dave-voice", m_port));
+
+	// The server sends voice over UDP only to someone it has had voice from over UDP.
+	erin.sendVoice(1);
+	dave.sendVoice(1);
+	QThread::msleep(300);
+	erin.drainVoice(dave.session, 200);
+	dave.drainVoice(erin.session, 200);
+
+	// More than one IV byte's worth, so a server still reading the first byte as a channel byte would
+	// have to get lucky every time.
+	for (std::uint64_t frame = 2; frame < 22; ++frame) {
+		dave.sendVoice(frame);
+	}
+	QVERIFY2(erin.drainVoice(dave.session, 1500) >= 15, "a stock client's voice did not reach a video client over UDP");
+
+	for (std::uint64_t frame = 2; frame < 22; ++frame) {
+		erin.sendVoice(frame);
+	}
+	QVERIFY2(dave.drainVoice(erin.session, 1500) >= 15,
+			 "a video client's voice did not reach a stock client as plain UDP");
+}
+
+void TestVideoCall::aStockClientIsNeverToldAboutVideo() {
+	TestClient alice;
+	TestClient george;
+	TestClient frank;
+	frank.advertiseVideo = false;
+	frank.framed         = false;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-stock", m_port));
+	QVERIFY(george.connectAndAuthenticate("george-stock", m_port));
+	QVERIFY(frank.connectAndAuthenticate("frank-stock", m_port));
+
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(11);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	announcement.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+	QByteArray body;
+	QVERIFY2(george.waitFor(TCPMessageType::VideoState, body), "a video client was not told about the stream");
+	QVERIFY2(!frank.waitFor(TCPMessageType::VideoState, body, 1000), "a stock client was sent a VideoState");
+
+	// Nor replayed to one that joins after the stream started.
+	TestClient hank;
+	hank.advertiseVideo = false;
+	hank.framed         = false;
+	QVERIFY(hank.connectAndAuthenticate("hank-stock", m_port));
+	QVERIFY2(!hank.waitFor(TCPMessageType::VideoState, body, 1000), "a stock client was replayed a VideoState");
+
+	// And a subscription from one is ignored rather than answered.
+	MumbleProto::VideoSubscribe subscribe;
+	subscribe.set_session(alice.session);
+	subscribe.set_stream_id(11);
+	subscribe.set_subscribe(true);
+	subscribe.set_request_keyframe(true);
+	frank.sendTcp(subscribe, TCPMessageType::VideoSubscribe);
+
+	QVERIFY2(!frank.waitFor(TCPMessageType::VideoSubscribe, body, 700), "a stock client's subscription was answered");
+	QVERIFY2(!alice.waitFor(TCPMessageType::VideoSubscribe, body, 300),
+			 "a stock client's keyframe request reached the sender");
+}
+
+// v1.7.0 to v1.9.1 of this fork speak video but advertise nothing. They are recognised by reporting exactly
+// version 1.7.0 and release "1.7.0", and must keep working against a newer server.
+void TestVideoCall::aReleaseFromBeforeTheAdvertisementStillSpeaksVideo() {
+	TestClient alice;
+	TestClient legacy;
+	legacy.version        = Version::fromComponents(1, 7, 0);
+	legacy.release        = "1.7.0";
+	legacy.advertiseVideo = false;
+	legacy.framed         = true;
+
+	QVERIFY(alice.connectAndAuthenticate("alice-legacy", m_port));
+	QVERIFY(legacy.connectAndAuthenticate("legacy-1.9.1", m_port));
+
+	MumbleProto::VideoState announcement;
+	announcement.set_stream_id(12);
+	announcement.set_active(true);
+	announcement.set_codec(MumbleProto::VideoState_Codec_VP8);
+	announcement.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
+	alice.sendTcp(announcement, TCPMessageType::VideoState);
+
+	QByteArray body;
+	QVERIFY2(legacy.waitFor(TCPMessageType::VideoState, body), "a pre-advertisement release was not told about video");
+
+	alice.sendVoice(1);
+	legacy.sendVoice(1);
+	QThread::msleep(300);
+	alice.drainVoice(legacy.session, 200);
+
+	for (std::uint64_t frame = 2; frame < 12; ++frame) {
+		legacy.sendVoice(frame);
+	}
+	QVERIFY2(alice.drainVoice(legacy.session, 1500) >= 8, "a pre-advertisement release's framed voice was refused");
 }
 
 QTEST_MAIN(TestVideoCall)
