@@ -116,6 +116,7 @@ struct MediaSession::Impl {
 	CryptoSession crypto;
 	MediaDemux demux{ MediaDemux::Framing::ChannelByte };
 	VideoReceiver videoReceiver;
+	VideoFragmenter videoFragmenter;
 	// Separate decoders for the two arrival paths, as on the desktop: a host may well read UDP and TCP on
 	// different threads, even if it then serialises its calls here.
 	UDPDecoder< Role::Client > udpDecoder{ PROTOBUF_INTRODUCTION_VERSION };
@@ -282,6 +283,42 @@ std::optional< Bytes > MediaSession::makeAudio(ByteView opusFrame, std::uint64_t
 	audio.isLastFrame     = isLastFrame;
 
 	return m_impl->encryptAudioChannel(m_impl->audioEncoder.encodeAudioPacket(audio));
+}
+
+std::vector< Bytes > MediaSession::makeVideo(const VideoUnit &unit) {
+	Impl &d = *m_impl;
+
+	// A server that frames plainly does not speak video at all.
+	if (!d.crypto.video().isValid() || d.demux.framing() != MediaDemux::Framing::ChannelByte) {
+		return {};
+	}
+
+	VideoUnitHeader header;
+	header.streamID             = unit.streamID;
+	header.frameNumber          = unit.frameNumber;
+	header.unitID               = unit.unitID;
+	header.isKeyframe           = unit.isKeyframe;
+	header.isFrameEnd           = unit.isFrameEnd;
+	header.captureTimestampUsec = unit.captureTimestampUsec;
+	header.x                    = unit.x;
+	header.y                    = unit.y;
+	header.width                = unit.width;
+	header.height               = unit.height;
+
+	if (!d.videoFragmenter.fragment(header, unit.payload)) {
+		return {};
+	}
+
+	std::vector< Bytes > datagrams;
+	for (const std::vector< byte > &packet : d.videoFragmenter.packets()) {
+		Bytes datagram;
+		if (!d.crypto.video().encrypt(packet, datagram)) {
+			return {};
+		}
+		datagrams.push_back(std::move(datagram));
+	}
+
+	return datagrams;
 }
 
 void MediaSession::removeSender(std::uint32_t senderSession) {

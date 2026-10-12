@@ -96,6 +96,54 @@ def video_datagram(key, nonce_base, sequence, plain):
     return bytes([0x01]) + seq + tag[:3] + ciphertext
 
 
+def varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def proto_field(number, value):
+    """One proto3 scalar or bytes field, or nothing for the default value, as protobuf omits it."""
+    if isinstance(value, bytes):
+        return varint(number << 3 | 2) + varint(len(value)) + value if value else b""
+    value = int(value)
+    return varint(number << 3) + varint(value) if value else b""
+
+
+# VideoFragmenter::maxPayloadPerFragment(): the payload bytes one fragment carries.
+MAX_VIDEO_FRAGMENT_PAYLOAD = 1098
+
+
+def video_unit_packets(unit, payload):
+    """VideoFragmenter::fragment: MumbleUDP.Video messages behind the Video message-type byte (2)."""
+    count = max(1, -(-len(payload) // MAX_VIDEO_FRAGMENT_PAYLOAD))
+    packets = []
+    for i in range(count):
+        chunk = payload[i * MAX_VIDEO_FRAGMENT_PAYLOAD:(i + 1) * MAX_VIDEO_FRAGMENT_PAYLOAD]
+        message = b"".join([
+            proto_field(1, 0),  # sender_session: the server stamps it
+            proto_field(2, unit["streamID"]),
+            proto_field(3, unit["frameNumber"]),
+            proto_field(4, unit["unitID"]),
+            proto_field(5, i),
+            proto_field(6, count),
+            proto_field(7, chunk),
+            proto_field(8, unit["isKeyframe"]),
+            proto_field(9, unit["isFrameEnd"]),
+            proto_field(10, unit["captureTimestampUsec"]),
+        ])
+        if i == 0:
+            message += b"".join(proto_field(n, unit[k]) for n, k in [(16, "x"), (17, "y"), (18, "width"), (19, "height")])
+        packets.append(b"\x02" + message)
+    return packets
+
+
 def derive(session_key, label, size):
     return hashlib.sha256(session_key + label.encode()).digest()[:size]
 
@@ -205,6 +253,36 @@ def main():
           "3 tag bytes, ciphertext. The nonce is encryptNonceBase followed by the big-endian sequence. "
           "key and encryptNonceBase are derived from sessionKey as in video-key-derivation.json.",
           video_cases)
+
+    write_video_units(audio_key)
+
+
+def write_video_units(session_key):
+    keys = video_keys(session_key)
+    cases = []
+    sequence = 1
+    for name, unit, payload in [
+        ("one fragment", {"streamID": 1, "frameNumber": 7, "unitID": 0, "isKeyframe": False, "isFrameEnd": True,
+                          "captureTimestampUsec": 123456789, "x": 0, "y": 0, "width": 0, "height": 0},
+         pattern(300, 0x11)),
+        ("keyframe in two fragments", {"streamID": 2, "frameNumber": 1, "unitID": 3, "isKeyframe": True,
+                                       "isFrameEnd": True, "captureTimestampUsec": 1700000000000000,
+                                       "x": 128, "y": 256, "width": 1280, "height": 720},
+         pattern(1500, 0x22)),
+    ]:
+        datagrams = []
+        for packet in video_unit_packets(unit, payload):
+            datagrams.append(video_datagram(keys["videoKey"], keys["nonceBaseClientToServer"], sequence, packet))
+            sequence += 1
+        case = {"name": name, "payload": payload, "datagrams": datagrams}
+        case.update(unit)
+        cases.append(case)
+    write("video-unit.json",
+          "Whole video units as a client sends them (MediaSession::makeVideo, the desktop's sendVideoUnit): "
+          "VideoFragmenter's MumbleUDP.Video messages, encrypted client to server on the video key derived from "
+          "sessionKey. The cases are sent one after the other on a fresh session, so the first datagram has "
+          "sequence 1 and the sequence carries on across cases.",
+          {"sessionKey": session_key, "units": cases})
 
 
 if __name__ == "__main__":

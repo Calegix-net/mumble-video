@@ -8,8 +8,10 @@
 
 #include "CoreTest.h"
 
+#include "Mumble.pb.h"
 #include "VideoTransport.h"
 #include "crypto/CryptStateOCB2.h"
+#include "mumble-core/MumbleCore.h"
 
 #include <nlohmann/json.hpp>
 
@@ -160,4 +162,48 @@ CORE_TEST(videoDatagramKnownAnswers) {
 		CHECK(receiver.decrypt(expected, decrypted) == Mumble::Protocol::VideoCryptState::Result::Ok);
 		CHECK(decrypted == plain);
 	}
+}
+
+CORE_TEST(videoUnitKnownAnswers) {
+	const nlohmann::json vectors = loadVectors("video-unit.json");
+	CHECK(vectors.contains("units"));
+
+	MumbleProto::CryptSetup setup;
+	setup.set_key(asString(hexField(vectors, "sessionKey")));
+	setup.set_client_nonce(std::string(AES_BLOCK_SIZE, '\x01'));
+	setup.set_server_nonce(std::string(AES_BLOCK_SIZE, '\x02'));
+	const std::string setupBytes = setup.SerializeAsString();
+
+	MumbleCore::MediaSession session;
+	MumbleCore::MediaEvents events;
+	CHECK(session.handleCryptSetup(
+		std::span< const std::uint8_t >(reinterpret_cast< const std::uint8_t * >(setupBytes.data()), setupBytes.size()),
+		events));
+
+	for (const nlohmann::json &c : vectors["units"]) {
+		MumbleCore::VideoUnit unit;
+		unit.streamID             = c["streamID"].get< std::uint32_t >();
+		unit.frameNumber          = c["frameNumber"].get< std::uint64_t >();
+		unit.unitID               = c["unitID"].get< std::uint32_t >();
+		unit.isKeyframe           = c["isKeyframe"].get< bool >();
+		unit.isFrameEnd           = c["isFrameEnd"].get< bool >();
+		unit.captureTimestampUsec = c["captureTimestampUsec"].get< std::uint64_t >();
+		unit.x                    = c["x"].get< std::uint32_t >();
+		unit.y                    = c["y"].get< std::uint32_t >();
+		unit.width                = c["width"].get< std::uint32_t >();
+		unit.height               = c["height"].get< std::uint32_t >();
+		unit.payload              = hexField(c, "payload");
+
+		const std::vector< MumbleCore::Bytes > datagrams = session.makeVideo(unit);
+		CHECK_EQ(datagrams.size(), c["datagrams"].size());
+		for (std::size_t i = 0; i < datagrams.size(); i++) {
+			CHECK(datagrams[i] == fromHex(c["datagrams"][i].get< std::string >()));
+		}
+	}
+
+	// No video at all on a plainly framed connection.
+	session.setUdpFraming(MumbleCore::UdpFraming::Plain);
+	MumbleCore::VideoUnit unit;
+	unit.payload = { 1, 2, 3 };
+	CHECK(session.makeVideo(unit).empty());
 }
