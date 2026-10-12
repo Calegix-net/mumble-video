@@ -157,11 +157,6 @@ public:
 	/// Not meant to be called outside a test.
 	int hoveredBarAppliedCountForTesting() const { return m_hoveredBarAppliedCount; }
 
-	/// Whether the focused tile is currently presented as a window rather than filling the monitor - see
-	/// m_focusWindowed. Exposed so a test can tell the two presentations apart, which is otherwise
-	/// invisible from outside: hasFocusedTile() is true for both. Not meant to be called outside a test.
-	bool focusWindowedForTesting() const { return m_focusWindowed; }
-
 	/// Number of other participants' tiles currently drawable - one per stream, not one per person, since
 	/// a sender may hold more than one stream (a camera and a screen, say). A stream not being watched
 	/// occupies its cell the moment it is announced, showing a preview placeholder there - it does not
@@ -195,10 +190,16 @@ public:
 	/// instance, know to hide unrelated chrome while a tile fills it.
 	bool hasFocusedTile() const { return m_focus != FocusTarget::None; }
 
-	/// Switches the focused tile between filling the monitor and being an ordinary movable window. Public
-	/// because the detached window's own mode button calls it, so that switching presentation does not
-	/// mean going back to the grid to press a different tile button.
-	void setFocusWindowed(bool windowed);
+	/// Moves a stream out of the grid and into its own picture-in-picture window, or back. Several can be
+	/// out at once, each a top-level window with its own taskbar entry. The tile leaves the grid while it
+	/// is out - the feed moves, rather than being drawn in two places - and the grid lays out around what
+	/// is left.
+	void popOutSurface(unsigned int senderSession, unsigned int streamID);
+	void popInSurface(unsigned int senderSession, unsigned int streamID);
+	bool isPoppedOut(unsigned int senderSession, unsigned int streamID) const;
+
+	/// How many streams are currently in their own window. Exposed for tests.
+	std::size_t poppedOutCountForTesting() const { return m_pipWindows.size(); }
 
 	/// Builds the item to draw over detached video - in practice the Mumble overlay's own user group. The
 	/// returned item is handed to a QGraphicsScene, which takes ownership.
@@ -459,6 +460,11 @@ protected:
 		/// remove it, and there is no other signal that the stream is actually gone.
 		qint64 lastUnitMsec = 0;
 
+		/// Shown in its own picture-in-picture window instead of in the grid. A popped-out surface holds
+		/// no cell here - the point of popping out is that the feed moves somewhere else on the desktop,
+		/// not that it is drawn twice - so it is excluded from the layout by occupiesCell().
+		bool poppedOut = false;
+
 		/// Set once a stall refresh request has gone out for the current silence - see
 		/// checkForStaleStreams() - so the same stall does not re-trigger keyframeNeeded() on every poll
 		/// between the stall threshold and the much longer stale-drop one. Cleared alongside lastUnitMsec
@@ -675,6 +681,24 @@ protected:
 	std::size_t m_pendingTileDecodes                      = 0;
 	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 
+	/**
+	 * Whether a surface takes up a cell in the grid.
+	 *
+	 * The single answer for every walk over m_surfaces, because several of them - paintEvent(),
+	 * relayoutControls(), updateHoveredBarImpl(), slotForSurface(), surfaceAtSlot() and
+	 * mouseDoubleClickEvent() - go through the surfaces in the same order and index the result against the
+	 * same layout. A walk that disagreed with the others about which surfaces count would line slots up
+	 * against the wrong tiles, which is how a control bar ends up over somebody else's picture.
+	 *
+	 * Two reasons not to occupy one. Watched-but-blank is the brief race between asking to watch a stream
+	 * and its first frame decoding, and reserving a cell for it would lay the grid out around an empty
+	 * square; unwatched is not that case, since a preview placeholder is shown there immediately. And a
+	 * popped-out surface has moved to its own window.
+	 */
+	static bool occupiesCell(const Surface &surface) {
+		return !surface.poppedOut && !(surface.watching && surface.canvas.isNull());
+	}
+
 	/// Number of distinct senders currently holding at least one surface, regardless of how many streams
 	/// each holds. What MAX_SENDERS actually bounds: the cap exists to stop the grid drawing more people
 	/// than a cell size can make worthwhile, not to stop one person from sharing a camera and a screen.
@@ -719,12 +743,6 @@ protected:
 	/// Surface, so nothing has to reset it defensively - the enum tag is the source of truth for whether
 	/// it means anything right now.
 	std::uint64_t m_focusedSurfaceKey = 0;
-
-	/// Whether the focused tile is shown as an ordinary window - the pop-out - rather than filling the
-	/// monitor. One flag rather than a second window: the detached window reads whatever is focused
-	/// through its content provider, so the two presentations differ only in how it is shown. Reset by
-	/// clearFocusedTile(), so a later fullscreen press is never quietly windowed.
-	bool m_focusWindowed = false;
 
 	/// See setOverlaySupport(). Both null unless an owner supplied them.
 	OverlayItemFactory m_overlayFactory;
@@ -797,6 +815,21 @@ protected:
 	bool m_mouseInside = false;
 	QPoint m_lastMousePos;
 	QWidget *m_fullscreenWindow = nullptr;
+
+	/// The picture-in-picture windows, keyed by the surface each one shows. Raw pointers to parentless
+	/// top-level windows, so they are deleted explicitly - by popInSurface(), by whatever removes the
+	/// surface, and by this class's destructor.
+	std::map< std::uint64_t, QWidget * > m_pipWindows;
+
+	/// Closes a picture-in-picture window and clears the surface's flag, without the relayout()
+	/// popInSurface() does - for the paths that are already going to lay out, or are tearing everything
+	/// down anyway.
+	void destroyPipWindow(std::uint64_t key);
+
+	/// Hands a changed rectangle of a surface to its picture-in-picture window, if it has one. Same
+	/// per-tile rectangle the fullscreen window gets, for the same reason: repainting a whole window for
+	/// every 128-pixel tile is what made watching a share expensive in the first place.
+	void notifyPipContentChanged(std::uint64_t key, const QRect &changed);
 
 	/// The slot index (see Layout) updateHoveredBar() last actually showed a bar for, or -1 if none.
 	/// mouseMoveEvent() checks this before calling updateHoveredBar() at all: Qt delivers a move event for

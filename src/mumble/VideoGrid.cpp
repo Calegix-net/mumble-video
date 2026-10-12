@@ -97,10 +97,20 @@ public:
 	/// overlay does, which refreshes the same item once per game frame.
 	static constexpr int OVERLAY_REFRESH_MSEC = 100;
 
+	/// What asking this window to go away means. The focus-driven fullscreen window gives up the grid's
+	/// focus; a picture-in-picture window puts its own tile back in the grid.
+	using CloseHandler = std::function< void() >;
+
+	/// @param detached True for a picture-in-picture window: a real top-level window with its own taskbar
+	///   entry, which can therefore be minimised and restored on its own, and whose tile has left the
+	///   grid. Parentless for exactly that reason - a window owned by the grid is a transient of the main
+	///   window, which on every platform means no taskbar button of its own and minimising along with its
+	///   parent, which is the opposite of what a picture-in-picture window is for.
 	explicit FullscreenVideoWindow(VideoGrid *owner, ContentProvider provider, VolumeProvider volume,
-								   VolumeSetter setVolume)
-		: QWidget(owner, Qt::Window), m_owner(owner), m_provider(std::move(provider)), m_volume(std::move(volume)),
-		  m_setVolume(std::move(setVolume)) {
+								   VolumeSetter setVolume, bool detached = false, CloseHandler onClose = {})
+		: QWidget(detached ? nullptr : owner, Qt::Window), m_owner(owner), m_provider(std::move(provider)),
+		  m_volume(std::move(volume)), m_setVolume(std::move(setVolume)), m_detached(detached),
+		  m_onClose(std::move(onClose)) {
 		setWindowTitle(tr("Mumble"));
 
 		QPalette pal = palette();
@@ -116,6 +126,16 @@ public:
 		connect(m_repaintTimer, &QTimer::timeout, this, &FullscreenVideoWindow::flushRepaint);
 
 		buildControls();
+	}
+
+	/// Names the window after whoever it is showing, so its taskbar entry can be told apart from the
+	/// other picture-in-picture windows and from the main one.
+	void refreshWindowTitle() {
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		setWindowTitle(label.isEmpty() ? tr("Mumble") : tr("%1 - Mumble").arg(label));
 	}
 
 	/// The whole picture is different - a different tile was focused, or the stream restarted. Everything
@@ -363,6 +383,7 @@ protected:
 		QWidget::showEvent(event);
 		refreshVolume();
 		showControls();
+		refreshWindowTitle();
 
 		// Read on every show rather than once at construction: the preference is persisted, and this
 		// window outlives any one viewing of a tile.
@@ -374,9 +395,20 @@ protected:
 		QWidget::mouseMoveEvent(event);
 	}
 
+	/// Asked to go away: Esc, a double-click, the close button, or the title bar's own close.
+	void requestClose() {
+		if (m_onClose) {
+			m_onClose();
+
+			return;
+		}
+
+		m_owner->clearFocusedTile();
+	}
+
 	void keyPressEvent(QKeyEvent *event) override {
 		if (event->key() == Qt::Key_Escape) {
-			m_owner->clearFocusedTile();
+			requestClose();
 
 			return;
 		}
@@ -384,14 +416,14 @@ protected:
 		QWidget::keyPressEvent(event);
 	}
 
-	void mouseDoubleClickEvent(QMouseEvent *) override { m_owner->clearFocusedTile(); }
+	void mouseDoubleClickEvent(QMouseEvent *) override { requestClose(); }
 
 	/// Only reachable in the windowed presentation - fullscreen has no title bar to close from. Without
 	/// this the window would hide while m_focus still pointed at the tile, so the grid would go on
 	/// treating it as focused and the next relayout() would put the window straight back up.
 	void closeEvent(QCloseEvent *event) override {
 		event->ignore();
-		m_owner->clearFocusedTile();
+		requestClose();
 	}
 
 private:
@@ -450,14 +482,19 @@ private:
 					[owner = m_owner]() { emit owner->videoOverlayToggleRequested(); });
 		}
 
-		m_modeButton = new QToolButton(m_controls);
-		m_modeButton->setAutoRaise(true);
-		m_modeButton->setCursor(Qt::PointingHandCursor);
-		m_modeButton->setStyleSheet(buttonStyle);
-		m_modeButton->setFocusPolicy(Qt::NoFocus);
-		layout->addWidget(m_modeButton);
+		// Only a picture-in-picture window has two presentations to switch between; the focus-driven
+		// window is always fullscreen. Wanting a popped-out stream to fill the screen for a moment, and
+		// then go back to a corner, should not mean putting it back in the grid first.
+		if (m_detached) {
+			m_modeButton = new QToolButton(m_controls);
+			m_modeButton->setAutoRaise(true);
+			m_modeButton->setCursor(Qt::PointingHandCursor);
+			m_modeButton->setStyleSheet(buttonStyle);
+			m_modeButton->setFocusPolicy(Qt::NoFocus);
+			layout->addWidget(m_modeButton);
 
-		connect(m_modeButton, &QToolButton::clicked, this, [this]() { m_owner->setFocusWindowed(!m_windowed); });
+			connect(m_modeButton, &QToolButton::clicked, this, [this]() { setPresentation(!m_windowed); });
+		}
 
 		// Words, not just an icon: the theme's "restore" icon is small and grey and was easy to miss on top of
 		// video. The glyph is the one the tile's own fullscreen button uses.
@@ -468,7 +505,7 @@ private:
 		m_exitButton->setFocusPolicy(Qt::NoFocus);
 		layout->addWidget(m_exitButton);
 
-		connect(m_exitButton, &QToolButton::clicked, this, [this]() { m_owner->clearFocusedTile(); });
+		connect(m_exitButton, &QToolButton::clicked, this, [this]() { requestClose(); });
 
 		applyPresentationLabels();
 
@@ -524,16 +561,19 @@ private:
 	/// Keeps the two buttons describing what they actually do in the current presentation, rather than
 	/// setting their text once, because the same window serves both.
 	void applyPresentationLabels() {
-		if (!m_modeButton || !m_exitButton) {
+		if (!m_exitButton) {
 			return;
 		}
 
-		m_modeButton->setText(m_windowed ? tr("⛶  Fullscreen") : tr("❐  Pop out"));
-		m_modeButton->setToolTip(m_windowed ? tr("Fill the screen") : tr("Show in its own movable window"));
+		if (m_modeButton) {
+			m_modeButton->setText(m_windowed ? tr("⛶  Fullscreen") : tr("❐  Windowed"));
+			m_modeButton->setToolTip(m_windowed ? tr("Fill the screen") : tr("Back to a window"));
+		}
 
-		m_exitButton->setText(m_windowed ? tr("✕  Close") : tr("⛶  Exit fullscreen"));
-		m_exitButton->setToolTip(m_windowed ? tr("Close this window (Esc or double-click)")
-											: tr("Exit fullscreen (Esc or double-click)"));
+		// A picture-in-picture window closes; the focus-driven one gives the tile back to the grid.
+		m_exitButton->setText(m_detached ? tr("✕  Close") : tr("⛶  Exit fullscreen"));
+		m_exitButton->setToolTip(m_detached ? tr("Close this window (Esc or double-click)")
+										   : tr("Exit fullscreen (Esc or double-click)"));
 
 		if (m_overlayButton) {
 			const bool on = m_overlayScene != nullptr;
@@ -561,6 +601,12 @@ private:
 	/// Whether a windowed size has been picked yet. Set once, so a user who resizes or moves the pop-out
 	/// keeps that geometry across a pop-in and back out.
 	bool m_hasWindowedSize = false;
+
+	/// Whether this is a picture-in-picture window rather than the focus-driven fullscreen one.
+	bool m_detached = false;
+
+	/// What closing means. See CloseHandler.
+	CloseHandler m_onClose;
 
 	/// The overlay, or null while it is switched off. Never attached to a QGraphicsView - see paintEvent().
 	/// The scene owns the item; m_overlayItem is a borrowed pointer, for handing back to the refresher.
@@ -721,9 +767,7 @@ int VideoGrid::senderCount() const {
 	int count = 0;
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		// A surface not being watched occupies a slot the moment it is announced - it shows a preview
-		// placeholder immediately, it does not wait on a canvas that opting out means will never fill.
-		if (!it->second.watching || !it->second.canvas.isNull()) {
+		if (occupiesCell(it->second)) {
 			++count;
 		}
 	}
@@ -1171,6 +1215,12 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 		// checkForStaleStreams().
 		it->second.lastUnitMsec          = QDateTime::currentMSecsSinceEpoch();
 		it->second.stallRefreshRequested = false;
+	}
+
+	// Nothing more arrives for an unwatched stream, so a window of its own would sit showing the last
+	// frame it got. Back into the grid, where it becomes a preview placeholder like any other.
+	if (!watching) {
+		destroyPipWindow(it->first);
 	}
 
 	if (!watching && m_focus == FocusTarget::Surface && m_focusedSurfaceKey == it->first) {
@@ -1799,13 +1849,18 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 		return;
 	}
 
+	const QRect changedRect(static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height());
+
 	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
 		// Just the rectangle this tile covers, in canvas pixels: the fullscreen window maps that onto the
 		// monitor and repaints only that patch. Repainting the whole monitor for every 128-pixel tile of
 		// a screen share was, alongside the canvas copy described on FullscreenVideoWindow, what made
 		// watching one fullscreen so expensive.
-		notifyFullscreenContentChanged(QRect(static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height()));
+		notifyFullscreenContentChanged(changedRect);
 	}
+
+	// And the same patch to this surface's own picture-in-picture window, if it has one.
+	notifyPipContentChanged(key, changedRect);
 
 	// Likewise only the patch of this tile's cell the tile covers, not the whole cell or grid: paintEvent()
 	// is clipped to the region it is asked for, so everything else is neither rescaled nor handed to the
@@ -1952,6 +2007,10 @@ void VideoGrid::removeSender(unsigned int senderSession, unsigned int streamID) 
 		m_recentlyWatched[{ senderSession, it->second.sourceKind }] = QDeadlineTimer(RESUME_WATCH_GRACE_MSEC);
 	}
 
+	// Before the surface goes: a picture-in-picture window whose stream has ended has nothing left to
+	// show, and leaving it open would be the frozen-last-frame problem with an extra window around it.
+	destroyPipWindow(it->first);
+
 	m_surfaces.erase(it);
 	emit senderCountChanged(tileCount());
 	relayout();
@@ -1962,6 +2021,8 @@ void VideoGrid::removeSender(unsigned int senderSession) {
 
 	for (auto it = m_surfaces.begin(); it != m_surfaces.end();) {
 		if (it->second.senderSession == senderSession) {
+			destroyPipWindow(it->first);
+
 			it         = m_surfaces.erase(it);
 			removedAny = true;
 		} else {
@@ -2033,6 +2094,11 @@ void VideoGrid::clear() {
 	m_focus             = FocusTarget::None;
 	m_focusedSurfaceKey = 0;
 
+	// Every picture-in-picture window belongs to a surface that is about to be gone.
+	while (!m_pipWindows.empty()) {
+		destroyPipWindow(m_pipWindows.begin()->first);
+	}
+
 	m_ownCameraControls.reset();
 	m_ownScreenControls.reset();
 	m_remoteControls.clear();
@@ -2065,11 +2131,6 @@ void VideoGrid::clearFocusedTile() {
 	}
 
 	m_focus = FocusTarget::None;
-
-	// Back to the default, so a later press of a tile's fullscreen button is fullscreen rather than
-	// inheriting whatever the last pop-out left behind.
-	m_focusWindowed = false;
-
 	relayout();
 }
 
@@ -2176,22 +2237,10 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 
 	layout->addStretch();
 
-	controls->popOutButton = new QToolButton(controls->bar);
-	controls->popOutButton->setAutoRaise(true);
-	controls->popOutButton->setText(QStringLiteral("❐"));
-	controls->popOutButton->setToolTip(tr("Pop out into its own window"));
-	layout->addWidget(controls->popOutButton);
-
-	connect(controls->popOutButton, &QToolButton::clicked, this, [this, target]() {
-		if (m_focus == target && m_focusWindowed) {
-			clearFocusedTile();
-		} else {
-			m_focus         = target;
-			m_focusWindowed = true;
-			relayout();
-		}
-	});
-
+	// No picture-in-picture button on your own tiles. They are previews of what you are sending, held in
+	// reserved cells of their own (see the class comment), with no surface in m_surfaces to move out - so
+	// a button here would have to mean something different from the identical one on everybody else's
+	// tile, which is worse than not offering it.
 	controls->fullscreenButton = new QToolButton(controls->bar);
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
@@ -2199,11 +2248,10 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, target]() {
-		if (m_focus == target && !m_focusWindowed) {
+		if (m_focus == target) {
 			clearFocusedTile();
 		} else {
-			m_focus         = target;
-			m_focusWindowed = false;
+			m_focus = target;
 			relayout();
 		}
 	});
@@ -2304,17 +2352,14 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	controls->popOutButton = new QToolButton(controls->bar);
 	controls->popOutButton->setAutoRaise(true);
 	controls->popOutButton->setText(QStringLiteral("❐"));
-	controls->popOutButton->setToolTip(tr("Pop out into its own window"));
+	controls->popOutButton->setToolTip(tr("Show in its own window, outside the grid"));
 	layout->addWidget(controls->popOutButton);
 
-	connect(controls->popOutButton, &QToolButton::clicked, this, [this, key]() {
-		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key && m_focusWindowed) {
-			clearFocusedTile();
+	connect(controls->popOutButton, &QToolButton::clicked, this, [this, senderSession, streamID]() {
+		if (isPoppedOut(senderSession, streamID)) {
+			popInSurface(senderSession, streamID);
 		} else {
-			m_focus             = FocusTarget::Surface;
-			m_focusedSurfaceKey = key;
-			m_focusWindowed     = true;
-			relayout();
+			popOutSurface(senderSession, streamID);
 		}
 	});
 
@@ -2325,12 +2370,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, key]() {
-		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key && !m_focusWindowed) {
+		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
 			clearFocusedTile();
 		} else {
 			m_focus             = FocusTarget::Surface;
 			m_focusedSurfaceKey = key;
-			m_focusWindowed     = false;
 			relayout();
 		}
 	});
@@ -2412,10 +2456,7 @@ void VideoGrid::relayoutControls(const Layout &layout) {
 	for (auto &entry : m_surfaces) {
 		const Surface &surface = entry.second;
 
-		// Unwatched-but-blank is exactly the preview state, not a slot to skip - it is watched-but-blank
-		// (announced, watching just requested, first frame not decoded yet) that is the brief race worth
-		// skipping a bar for.
-		if (surface.watching && surface.canvas.isNull()) {
+		if (!occupiesCell(surface)) {
 			continue;
 		}
 
@@ -2531,7 +2572,7 @@ void VideoGrid::updateHoveredBarImpl() {
 	}
 
 	for (auto &entry : m_surfaces) {
-		if (entry.second.watching && entry.second.canvas.isNull()) {
+		if (!occupiesCell(entry.second)) {
 			continue;
 		}
 
@@ -2615,9 +2656,7 @@ void VideoGrid::updateFullscreenWindow() {
 	// changed rectangle instead.
 	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
 
-	// Handles the first show and a change of presentation while already visible, so popping a tile out
-	// of fullscreen (or back into it) needs nothing here beyond the flag.
-	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setPresentation(m_focusWindowed);
+	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setPresentation(false);
 }
 
 void VideoGrid::setOverlaySupport(OverlayItemFactory factory, OverlayItemRefresher refresher) {
@@ -2647,16 +2686,102 @@ void VideoGrid::setVideoOverlayEnabled(bool enabled) {
 	}
 }
 
-void VideoGrid::setFocusWindowed(bool windowed) {
-	if (m_focusWindowed == windowed) {
+bool VideoGrid::isPoppedOut(unsigned int senderSession, unsigned int streamID) const {
+	return m_pipWindows.count(surfaceKey(senderSession, streamID)) > 0;
+}
+
+void VideoGrid::popOutSurface(unsigned int senderSession, unsigned int streamID) {
+	const std::uint64_t key = surfaceKey(senderSession, streamID);
+	const auto surfaceIt    = m_surfaces.find(key);
+
+	if (surfaceIt == m_surfaces.end() || m_pipWindows.count(key) > 0) {
 		return;
 	}
 
-	m_focusWindowed = windowed;
-
-	if (m_focus != FocusTarget::None) {
-		relayout();
+	// A stream nobody is receiving has nothing to show in a window of its own, and popping it out would
+	// leave a black rectangle on the desktop with no way to tell why.
+	if (!surfaceIt->second.watching) {
+		setWatching(senderSession, streamID, true);
 	}
+
+	auto *window = new FullscreenVideoWindow(
+		this,
+		// Bound to this one surface rather than to whatever is focused, which is what lets several of
+		// these exist at once showing different streams.
+		[this, key](QImage &image, QString &label) {
+			const auto it = m_surfaces.find(key);
+
+			if (it != m_surfaces.end()) {
+				image = it->second.canvas;
+				label = labelForSurface(it->second);
+			}
+		},
+		[this, key]() {
+			FullscreenVideoWindow::VolumeState state;
+			const auto it = m_surfaces.find(key);
+
+			if (it == m_surfaces.end() || it->second.sourceKind == MumbleProto::VideoState_SourceKind_Camera) {
+				return state;
+			}
+
+			const auto level = m_shareVolumePercent.find(it->second.senderSession);
+			state.available  = true;
+			state.percent    = level != m_shareVolumePercent.end()
+								   ? level->second
+								   : static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+			return state;
+		},
+		[this, key](int percent) {
+			const auto it = m_surfaces.find(key);
+
+			if (it != m_surfaces.end()) {
+				setShareVolumePercent(it->second.senderSession, percent);
+			}
+		},
+		true, [this, senderSession, streamID]() { popInSurface(senderSession, streamID); });
+
+	m_pipWindows[key]          = window;
+	surfaceIt->second.poppedOut = true;
+
+	window->contentReplaced();
+	window->setPresentation(true);
+
+	// The tile has left the grid, so everything laid out around it moves up.
+	emit senderCountChanged(tileCount());
+	relayout();
+}
+
+void VideoGrid::destroyPipWindow(std::uint64_t key) {
+	const auto windowIt = m_pipWindows.find(key);
+
+	if (windowIt == m_pipWindows.end()) {
+		return;
+	}
+
+	// deleteLater() rather than delete: this is reached from the window's own close handler, by way of its
+	// closeEvent, so the window is still inside its own event delivery.
+	windowIt->second->hide();
+	windowIt->second->deleteLater();
+	m_pipWindows.erase(windowIt);
+
+	const auto surfaceIt = m_surfaces.find(key);
+
+	if (surfaceIt != m_surfaces.end()) {
+		surfaceIt->second.poppedOut = false;
+	}
+}
+
+void VideoGrid::popInSurface(unsigned int senderSession, unsigned int streamID) {
+	const std::uint64_t key = surfaceKey(senderSession, streamID);
+
+	if (!m_pipWindows.count(key)) {
+		return;
+	}
+
+	destroyPipWindow(key);
+
+	emit senderCountChanged(tileCount());
+	relayout();
 }
 
 void VideoGrid::setOwnViewers(bool screen, const std::vector< Viewer > &viewers) {
@@ -2730,6 +2855,16 @@ void VideoGrid::setShareVolumePercent(unsigned int senderSession, int percent) {
 	emit volumeChanged(senderSession, static_cast< float >(percent) / 100.0f);
 }
 
+void VideoGrid::notifyPipContentChanged(std::uint64_t key, const QRect &changed) {
+	const auto it = m_pipWindows.find(key);
+
+	if (it == m_pipWindows.end()) {
+		return;
+	}
+
+	static_cast< FullscreenVideoWindow * >(it->second)->contentChanged(changed);
+}
+
 void VideoGrid::notifyFullscreenContentChanged(const QRect &changed) {
 	if (!m_fullscreenWindow || m_focus == FocusTarget::None) {
 		return;
@@ -2743,7 +2878,7 @@ int VideoGrid::slotForSurface(std::uint64_t key) const {
 	int index = (m_selfCameraFrame.isNull() ? 0 : 1) + (m_selfScreenFrame.isNull() ? 0 : 1);
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (it->second.watching && it->second.canvas.isNull()) {
+		if (!occupiesCell(it->second)) {
 			continue;
 		}
 
@@ -2909,7 +3044,7 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
 		const Surface &surface = it->second;
 
-		if (surface.watching && surface.canvas.isNull()) {
+		if (!occupiesCell(surface)) {
 			continue;
 		}
 
@@ -2936,7 +3071,7 @@ const VideoGrid::Surface *VideoGrid::surfaceAtSlot(int slot) const {
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (it->second.watching && it->second.canvas.isNull()) {
+		if (!occupiesCell(it->second)) {
 			continue;
 		}
 
@@ -3063,7 +3198,7 @@ void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
-		if (it->second.watching && it->second.canvas.isNull()) {
+		if (!occupiesCell(it->second)) {
 			continue;
 		}
 

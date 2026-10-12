@@ -147,7 +147,8 @@ private slots:
 	void aRestartOfADifferentKindDoesNotResume();
 	void aRestartFromADepartedSenderDoesNotResume();
 	void fullscreenDoesNotCopyTheCanvasOnEveryTile();
-	void popOutAndFullscreenAreSeparatePresentations();
+	void aPoppedOutTileLeavesTheGrid();
+	void severalTilesCanBePoppedOutAtOnce();
 };
 
 namespace {
@@ -1667,16 +1668,12 @@ void TestVideoGrid::aRestartFromADepartedSenderDoesNotResume() {
 	QVERIFY2(!resumed, "a departed sender's later stream resumed watching");
 }
 
-// A tile can be watched either filling the monitor or in its own movable window, and the two are one
-// window in two presentations rather than two windows - so the thing worth pinning down is that the state
-// machine keeps them apart: each button selects its own presentation, pressing the same one again lets go
-// of the tile, and letting go returns to the fullscreen default so a later fullscreen press is never
-// quietly windowed.
-void TestVideoGrid::popOutAndFullscreenAreSeparatePresentations() {
+// The point of picture-in-picture is that the feed moves out of the grid, so the tile must stop holding a
+// cell while it is out - drawing it in both places is what made the first attempt at this annoying rather
+// than useful - and must come back when the window closes.
+void TestVideoGrid::aPoppedOutTileLeavesTheGrid() {
 	VideoGrid grid;
 	grid.resize(320, 180);
-	grid.show();
-	QVERIFY(QTest::qWaitForWindowExposed(&grid));
 
 	QImage tile(32, 32, QImage::Format_RGB32);
 	tile.fill(Qt::green);
@@ -1690,41 +1687,87 @@ void TestVideoGrid::popOutAndFullscreenAreSeparatePresentations() {
 	announce(grid, SENDER, STREAM);
 	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
 	waitForAsyncDecode();
+
+	QCOMPARE(grid.senderCount(), 1);
+	QVERIFY(!grid.isPoppedOut(SENDER, STREAM));
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(0));
+
+	grid.popOutSurface(SENDER, STREAM);
+
+	QVERIFY(grid.isPoppedOut(SENDER, STREAM));
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+
+	// Gone from the grid: it occupies no cell, so nothing is laid out around it.
+	QCOMPARE(grid.senderCount(), 0);
+
+	// But still a live surface - the stream did not end, it moved.
 	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
 
-	// Nothing focused, and so no presentation chosen.
-	QVERIFY(!grid.hasFocusedTile());
-	QVERIFY(!grid.focusWindowedForTesting());
+	grid.popInSurface(SENDER, STREAM);
 
-	// Fullscreen, as it always was: focused and not windowed.
-	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
-	QVERIFY(grid.hasFocusedTile());
-	QVERIFY(!grid.focusWindowedForTesting());
+	QVERIFY(!grid.isPoppedOut(SENDER, STREAM));
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(0));
+	QCOMPARE(grid.senderCount(), 1);
 
-	// The window's own mode button switches presentation in place - the tile stays focused throughout,
-	// which is what makes it a switch rather than a close and reopen.
-	grid.setFocusWindowed(true);
-	QVERIFY(grid.hasFocusedTile());
-	QVERIFY(grid.focusWindowedForTesting());
+	// And a stream that ends while out takes its window with it rather than leaving one showing a frozen
+	// last frame, which is the whole complaint the stale-stream handling exists for.
+	grid.popOutSurface(SENDER, STREAM);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+	grid.removeSender(SENDER, STREAM);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(0));
 
-	grid.setFocusWindowed(false);
-	QVERIFY(grid.hasFocusedTile());
-	QVERIFY(!grid.focusWindowedForTesting());
+	QTest::qWait(50);
+}
 
-	// Letting go resets the presentation, so the next fullscreen press is fullscreen.
-	grid.setFocusWindowed(true);
-	QVERIFY(grid.focusWindowedForTesting());
-	grid.clearFocusedTile();
-	QVERIFY(!grid.hasFocusedTile());
-	QVERIFY2(!grid.focusWindowedForTesting(),
-			 "letting go of a popped-out tile left the windowed presentation set, so a later fullscreen "
-			 "press would open a window instead");
+// Several at once, each its own window, which is the difference between this and fullscreen.
+void TestVideoGrid::severalTilesCanBePoppedOutAtOnce() {
+	VideoGrid grid;
+	grid.resize(320, 180);
 
-	// And a presentation change with nothing focused must not focus anything by itself.
-	grid.setFocusWindowed(true);
-	QVERIFY(!grid.hasFocusedTile());
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::blue);
 
-	grid.clearFocusedTile();
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	// Three streams: two from one sender, one from another. The two from one sender have to be of
+	// different kinds - a second stream of the same kind is a restart and replaces the first, which is
+	// what aRestartedStreamOfTheSameKindReplacesTheOld covers.
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
+	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
+	announce(grid, SENDER + 1, 1, MumbleProto::VideoState_Codec_TiledImage,
+			 MumbleProto::VideoState_SourceKind_Camera);
+
+	for (const auto &pair : { std::make_pair(SENDER, 1u), std::make_pair(SENDER, 2u),
+							  std::make_pair(SENDER + 1, 1u) }) {
+		grid.onVideoUnitReceived(pair.first, pair.second, 0, true, 0, 0, encoded);
+	}
+	waitForAsyncDecode();
+	QCOMPARE(grid.senderCount(), 3);
+
+	grid.popOutSurface(SENDER, 1);
+	grid.popOutSurface(SENDER + 1, 1);
+
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(2));
+	QVERIFY(grid.isPoppedOut(SENDER, 1));
+	QVERIFY(grid.isPoppedOut(SENDER + 1, 1));
+
+	// The one left behind is the only one still holding a cell.
+	QVERIFY(!grid.isPoppedOut(SENDER, 2));
+	QCOMPARE(grid.senderCount(), 1);
+
+	// Popping the same one again is not a second window.
+	grid.popOutSurface(SENDER, 1);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(2));
+
+	// A sender leaving closes every window of theirs and leaves the other sender's alone.
+	grid.removeSender(SENDER);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+	QVERIFY(grid.isPoppedOut(SENDER + 1, 1));
+
 	QTest::qWait(50);
 }
 
