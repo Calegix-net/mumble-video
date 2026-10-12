@@ -6,6 +6,9 @@
 # and build cache and should be a persistent mount: cold it downloads a couple of gigabytes, warm it
 # rebuilds only what changed.
 #
+# RELEASE_VERSION, if set, is the version the client reports itself as (scripts/installer-version.sh
+# --release). The build cannot work it out itself: the manifest leaves .git out of the sandbox.
+#
 # Usage: build-flatpak.sh <source-dir> <state-dir> <output.flatpak>
 
 set -euo pipefail
@@ -16,6 +19,25 @@ OUT="${3:?usage: build-flatpak.sh <source-dir> <state-dir> <output.flatpak>}"
 
 MANIFEST="${SRC_DIR}/flatpak/com.calegix.MumbleVideo.yml"
 RUNTIME_VERSION="$(grep '^runtime-version:' "${MANIFEST}" | sed 's/.*"\(.*\)"/\1/')"
+
+# flatpak-builder has no way to add a config option from the command line, so the version goes into a
+# copy of the manifest. The copy sits next to the original because the manifest's source path (..) is
+# relative to wherever the manifest is.
+if [[ -n "${RELEASE_VERSION:-}" ]]; then
+    if [[ ! "${RELEASE_VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z.+_-]*$ ]]; then
+        echo "build-flatpak: unusable RELEASE_VERSION '${RELEASE_VERSION}'" >&2
+        exit 1
+    fi
+    RELEASE_MANIFEST="${SRC_DIR}/flatpak/.release-version.com.calegix.MumbleVideo.yml"
+    trap 'rm -f "${RELEASE_MANIFEST}"' EXIT
+    sed "s/^\( *- -Drelease-version=\)\$/\1${RELEASE_VERSION}/" "${MANIFEST}" > "${RELEASE_MANIFEST}"
+    if ! grep -qxF -- "      - -Drelease-version=${RELEASE_VERSION}" "${RELEASE_MANIFEST}"; then
+        echo "build-flatpak: no empty -Drelease-version= line in ${MANIFEST} to fill in" >&2
+        exit 1
+    fi
+    MANIFEST="${RELEASE_MANIFEST}"
+fi
+echo "Release version: ${RELEASE_VERSION:-(worked out by the build)}"
 
 export FLATPAK_USER_DIR="${STATE_DIR}/flatpak-user"
 mkdir -p "${FLATPAK_USER_DIR}" "${STATE_DIR}/builder"

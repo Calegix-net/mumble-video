@@ -161,6 +161,17 @@ target_sources(shared
 		${SHARED_SOURCES}
 )
 
+# MUMBLE_VERSION_MAJOR/MINOR/PATCH make Version::get(), the protocol version. Upstream Mumble gates
+# behaviour on it in both directions - Messages.cpp and MainWindow.cpp compare a peer's version against
+# Version::fromComponents(1, x, y) throughout, and the UDP format switches to protobuf at 1.5.0 - so it
+# has to stay the upstream release whose protocol this fork actually speaks. Raising it to the fork's
+# release number would tell an upstream 1.8 or 1.9 peer that we implement whatever it gates on those.
+#
+# MUMBLE_RELEASE_STRING is the fork's own release (see release-version in the top-level CMakeLists.txt)
+# and becomes Version::getRelease(): display only, never compared. It is private to this target because
+# only Version.cpp uses it, so a new commit does not rebuild everything that includes Version.h.
+# MUMBLE_VERSION is the project version as a bare token, kept for the macOS overlay installer, which
+# checks it against the minimum Mumble version the overlay asks for.
 target_compile_definitions(shared
 	PUBLIC
 		"MUMBLE_VERSION=${CMAKE_PROJECT_VERSION}"
@@ -171,6 +182,7 @@ target_compile_definitions(shared
 
 target_compile_definitions(shared
 	PRIVATE
+		"MUMBLE_RELEASE_STRING=\"${MUMBLE_RELEASE_VERSION}\""
 		"QT_RESTRICTED_CAST_FROM_ASCII"
 )
 

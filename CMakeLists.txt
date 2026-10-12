@@ -24,6 +24,63 @@ project(mumble
 	LANGUAGES "C" "CXX"
 )
 
+# Two versions, deliberately different.
+#
+# The project version above is the upstream Mumble release this fork tracks. It is the protocol version
+# (Version::get(), sent as version_v1/version_v2), and upstream peers decide which features to use by
+# comparing it, so it moves only when the protocol does. See src/CMakeLists.txt.
+#
+# The release version is what this fork is released as, e.g. 1.9.1. It is only ever shown: the About
+# dialog, --version, the server log, and the release string clients and servers exchange for display.
+# CI passes it in (scripts/installer-version.sh --release). Left empty, it is worked out from the
+# newest vX.Y.Z tag: that release on the tagged commit, "<release>-dev+<commit>" after it - the same
+# shape CI gives development builds. With no tags to go by (a shallow clone, the flatpak sandbox, a
+# source archive) it is "unknown-dev" rather than a release number it cannot vouch for: falling back to
+# the project version would say 1.7.0, which is exactly the confusion this is here to end.
+# It is worked out at configure time; reconfigure to pick up a new commit.
+set(release-version "" CACHE STRING "The version this build reports itself as, e.g. 1.9.1 or 1.9.1-dev+0123abcde. Worked out from git when empty.")
+
+set(MUMBLE_RELEASE_VERSION "${release-version}")
+if(MUMBLE_RELEASE_VERSION STREQUAL "")
+	set(MUMBLE_RELEASE_VERSION "unknown-dev")
+	find_package(Git QUIET)
+	if(GIT_FOUND)
+		# --exclude keeps a pre-release tag such as v2.0.0-rc1 from shadowing the release before it.
+		execute_process(
+			COMMAND "${GIT_EXECUTABLE}" describe --tags --long --abbrev=9
+				--match "v[0-9]*.[0-9]*.[0-9]*" --exclude "v*-*"
+			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+			OUTPUT_VARIABLE GIT_DESCRIBE
+			RESULT_VARIABLE GIT_DESCRIBE_RESULT
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			ERROR_QUIET
+		)
+		execute_process(
+			COMMAND "${GIT_EXECUTABLE}" rev-parse --short=9 HEAD
+			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+			OUTPUT_VARIABLE GIT_COMMIT
+			RESULT_VARIABLE GIT_COMMIT_RESULT
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			ERROR_QUIET
+		)
+		if(GIT_DESCRIBE_RESULT EQUAL 0 AND GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)$")
+			if(CMAKE_MATCH_2 EQUAL 0)
+				set(MUMBLE_RELEASE_VERSION "${CMAKE_MATCH_1}")
+			else()
+				set(MUMBLE_RELEASE_VERSION "${CMAKE_MATCH_1}-dev+${CMAKE_MATCH_3}")
+			endif()
+		elseif(GIT_COMMIT_RESULT EQUAL 0 AND GIT_COMMIT MATCHES "^[0-9a-f]+$")
+			set(MUMBLE_RELEASE_VERSION "unknown-dev+${GIT_COMMIT}")
+		endif()
+	endif()
+endif()
+
+# It ends up inside a C string literal and a Windows resource script, so nothing that would need
+# escaping in either.
+if(NOT MUMBLE_RELEASE_VERSION MATCHES "^[0-9A-Za-z][0-9A-Za-z.+_-]*$")
+	message(FATAL_ERROR "release-version \"${MUMBLE_RELEASE_VERSION}\" may only contain letters, digits and . + _ -")
+endif()
+
 set(3RDPARTY_DIR "${CMAKE_SOURCE_DIR}/3rdparty")
 set(PLUGINS_DIR "${CMAKE_SOURCE_DIR}/plugins")
 
@@ -127,7 +184,8 @@ if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "OpenBSD")
 endif()
 
 message(STATUS "##################################################")
-message(STATUS "Mumble version:              ${PROJECT_VERSION}")
+message(STATUS "Mumble version:              ${PROJECT_VERSION} (protocol)")
+message(STATUS "Mumble release:              ${MUMBLE_RELEASE_VERSION}")
 message(STATUS "Architecture:                ${MUMBLE_TARGET_ARCH}")
 if(NOT IS_MULTI_CONFIG)
     message(STATUS "Build type:                  ${CMAKE_BUILD_TYPE}")

@@ -2,7 +2,8 @@
 # Configures and builds the Windows client inside the MinGW cross-build image.
 #
 # Run this from inside the container (see docker/Dockerfile.windows), with the source tree at /src and a
-# writable build directory at /build.
+# writable build directory at /build. RELEASE_VERSION, if set, is the version the build reports itself
+# as (scripts/installer-version.sh --release); unset, CMake works it out from git.
 #
 # The compiler paths are given in full rather than left to the mingw64-cmake wrapper. CMake re-runs
 # itself from inside make whenever a CMakeLists.txt changes, and that re-run does not inherit the
@@ -27,6 +28,7 @@ mingw64-cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -Doverlay=OFF -Doverlay-xcompile=OFF \
     -Dg15=OFF -Dasio=OFF -Dupdate=OFF -Dzeroconf=OFF -Djackaudio=OFF -Dspeechd=OFF \
     -Dtranslations=OFF \
-    -Dlto=OFF
+    -Dlto=OFF \
+    -Drelease-version="${RELEASE_VERSION:-}"
 
 cmake --build "${BUILD_DIR}" -j"$(nproc)"
