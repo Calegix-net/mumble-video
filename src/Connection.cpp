@@ -4,6 +4,7 @@
 // Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
 #include "Connection.h"
+#include "ControlFramer.h"
 #include "Mumble.pb.h"
 #include "SSL.h"
 #include "crypto/CryptStateOCB2.h"
@@ -128,8 +129,10 @@ void Connection::socketRead() {
 			unsigned char a_ucBuffer[6];
 
 			qtsSocket->read(reinterpret_cast< char * >(a_ucBuffer), 6);
-			m_type        = static_cast< Mumble::Protocol::TCPMessageType >(qFromBigEndian< quint16 >(&a_ucBuffer[0]));
-			iPacketLength = qFromBigEndian< int >(&a_ucBuffer[2]);
+			const Mumble::Protocol::ControlHeader header = Mumble::Protocol::readControlHeader(a_ucBuffer);
+
+			m_type        = static_cast< Mumble::Protocol::TCPMessageType >(header.type);
+			iPacketLength = static_cast< int >(header.length);
 			iAvailable -= 6;
 		}
 
@@ -174,14 +177,13 @@ void Connection::socketDisconnected() {
 	// ByteSize() has been deprecated as of protobuf v3.4
 	std::size_t len = msg.ByteSize();
 #endif
-	if (len > 0x7fffff)
+	if (len > Mumble::Protocol::MAX_CONTROL_PAYLOAD_SIZE)
 		return false;
-	cache.resize(static_cast< int >(len + 6));
+	cache.resize(static_cast< int >(len + Mumble::Protocol::CONTROL_HEADER_SIZE));
 	unsigned char *uc = reinterpret_cast< unsigned char * >(cache.data());
-	qToBigEndian< quint16 >(static_cast< quint16 >(msgType), &uc[0]);
-	qToBigEndian< quint32 >(static_cast< unsigned int >(len), &uc[2]);
+	Mumble::Protocol::writeControlHeader(uc, static_cast< std::uint16_t >(msgType), static_cast< std::uint32_t >(len));
 
-	bool success = msg.SerializeToArray(uc + 6, static_cast< int >(len));
+	bool success = msg.SerializeToArray(uc + Mumble::Protocol::CONTROL_HEADER_SIZE, static_cast< int >(len));
 	if (!success) {
 		qWarning("Failed to serialize protobuf message");
 		cache.clear();
