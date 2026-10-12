@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -23,7 +24,9 @@ namespace {
 using Bytes = std::vector< std::uint8_t >;
 
 nlohmann::json loadVectors(const char *name) {
-	std::ifstream file(std::string(MUMBLE_CORE_TEST_VECTORS_DIR) + "/" + name);
+	// MUMBLE_CORE_TEST_VECTORS overrides the build-time path, for running the test somewhere else (a phone).
+	const char *dir = std::getenv("MUMBLE_CORE_TEST_VECTORS");
+	std::ifstream file(std::string(dir ? dir : MUMBLE_CORE_TEST_VECTORS_DIR) + "/" + name);
 	if (!file) {
 		return nlohmann::json();
 	}

@@ -22,6 +22,35 @@ It needs OpenSSL (libcrypto) and Protobuf, and nothing else. The options are:
 CI builds it exactly this way, in a configure that never looks for Qt. That is the check that nothing in
 here has started to need Qt.
 
+## Android
+
+`android/` has two scripts:
+
+```sh
+export ANDROID_NDK_ROOT=~/Android/Sdk/ndk/25.1.8937393
+src/mumble-core/android/build-deps.sh arm64-v8a ~/mumble-core-deps/arm64-v8a
+src/mumble-core/android/build-core.sh arm64-v8a ~/mumble-core-deps/arm64-v8a build-core-arm64
+```
+
+- `build-deps.sh` builds static OpenSSL `libcrypto` (3.5 LTS) and the Protobuf lite runtime (with its
+  Abseil) for one ABI.
+  - OpenSSL's Configure needs a few Perl modules that Fedora packages separately: perl-FindBin,
+    perl-IPC-Cmd, perl-File-Compare, perl-File-Copy and perl-Time-Piece.
+  - Protobuf is built at the version of the `protoc` on `PATH`. The generated code only works against
+    the runtime of the same version, and the cross build generates with that host `protoc`.
+- `build-core.sh` is the configure an app's CMake needs to reproduce:
+  - the NDK toolchain file, `ANDROID_ABI` and `ANDROID_PLATFORM` (API 29);
+  - `CMAKE_FIND_ROOT_PATH` pointing at the deps prefix, and `OPENSSL_USE_STATIC_LIBS=ON`;
+  - `MUMBLE_CORE_PROTOBUF_LITE=ON` and `MUMBLE_CORE_LEGACY_UDP=OFF`.
+
+  From Gradle (`externalNativeBuild`), the JNI library's CMakeLists can `add_subdirectory()` this
+  directory with the same variables set and link `mumble-core`.
+
+The tests run on a device or emulator too. Push `TestMumbleCore` and `test-vectors/`, and point
+`MUMBLE_CORE_TEST_VECTORS` at the vectors.
+
+NDK r25 (clang 14) is enough.
+
 ## For a host
 
 Include `include/mumble-core/MumbleCore.h` and nothing else. The header comment explains how the bytes
