@@ -69,8 +69,15 @@ endforeach()
 target_sources(mumble-core
 	PRIVATE
 		"ByteSwap.h"
+		"ControlFramer.cpp"
+		"ControlFramer.h"
 		"CoreLog.cpp"
 		"CoreLog.h"
+		"CryptoSession.cpp"
+		"CryptoSession.h"
+		"MediaDemux.cpp"
+		"MediaDemux.h"
+		"MumbleCore.cpp"
 		"MumbleProtocol.cpp"
 		"MumbleProtocol.h"
 		"PacketDataStream.h"
@@ -79,6 +86,8 @@ target_sources(mumble-core
 		"VersionNumber.h"
 		"VideoFragmentation.cpp"
 		"VideoFragmentation.h"
+		"VideoReceiver.cpp"
+		"VideoReceiver.h"
 		"VideoTransport.cpp"
 		"VideoTransport.h"
 		"VolumeAdjustment.cpp"
@@ -95,6 +104,14 @@ target_sources(mumble-core
 
 		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.cpp"
 		"${MUMBLE_CORE_3RDPARTY_DIR}/arc4random/arc4random_uniform.h"
+)
+
+# The API a non-Qt host binds to. The desktop uses the internal headers directly.
+target_sources(mumble-core
+	PUBLIC
+		FILE_SET HEADERS
+		BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+		FILES "include/mumble-core/MumbleCore.h"
 )
 
 target_compile_definitions(mumble-core

@@ -9,6 +9,7 @@
 add_executable(TestMumbleCore
 	"CoreTest.h"
 	"TestKnownAnswers.cpp"
+	"TestMediaSession.cpp"
 	"TestMumbleCore.cpp"
 )
 

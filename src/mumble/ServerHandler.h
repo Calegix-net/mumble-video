@@ -31,16 +31,19 @@
 
 #define SERVERSEND_EVENT 3501
 
+#include "MediaDemux.h"
 #include "Mumble.pb.h"
 #include "MumbleProtocol.h"
 #include "ServerAddress.h"
 #include "Timer.h"
 #include "VideoFragmentation.h"
+#include "VideoReceiver.h"
 
 #include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
+#include <span>
 #include <tuple>
 #include <vector>
 
@@ -109,15 +112,15 @@ protected:
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_udpDecoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_tcpTunnelDecoder;
 
-	/// Reassembles inbound video. Its own instance, separate from anything the TCP tunnel might later
-	/// use, because the two are driven from different threads.
-	Mumble::Protocol::VideoReassembler m_videoReassembler;
+	/// Splits inbound datagrams into the audio and video channels. UDP thread only.
+	Mumble::Protocol::MediaDemux m_mediaDemux;
 
-	/// Scratch message used to read the server's sender stamp before reassembly. UDP thread only.
-	MumbleUDP::Video m_videoPeek;
+	/// Decrypts and reassembles inbound video, and asks for what stays missing. Its own instance, separate
+	/// from anything the TCP tunnel might later use, because the two are driven from different threads.
+	Mumble::Protocol::VideoReceiver m_videoReceiver;
 
 	/// Decrypts and reassembles one inbound video datagram.
-	void handleVideoDatagram(const Mumble::Protocol::byte *datagram, std::size_t len);
+	void handleVideoDatagram(std::span< const Mumble::Protocol::byte > datagram);
 
 	/// Fragmenter for the outbound video path. Its own instance, used only from the thread that sends.
 	Mumble::Protocol::VideoFragmenter m_videoFragmenter;
@@ -147,14 +150,6 @@ protected:
 
 	/// Encrypts and sends one plaintext video fragment. False if there is nowhere to send it.
 	bool sendVideoPacket(const std::vector< Mumble::Protocol::byte > &packet);
-
-	/// Receiver side: when retransmission requests were last collected, and how many went out this second.
-	/// UDP thread only.
-	std::uint64_t m_lastNackCollectUsec = 0;
-	std::uint64_t m_nackWindowStartUsec = 0;
-	unsigned int m_nackMessagesInWindow = 0;
-	/// Asks for re-sends of whatever m_videoReassembler has been missing for long enough. UDP thread only.
-	void sendPendingNacks(std::uint64_t nowUsec);
 
 	/// MUMBLE_VIDEO_STATS: retransmission in both directions since the last "VideoNackStats" line. Updated
 	/// from the UDP thread (requests sent) and the GUI thread (requests answered), hence atomic.
