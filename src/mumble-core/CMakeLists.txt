@@ -27,11 +27,21 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	# Pre-1.5 servers and clients speak a UDP format of their own, encoded with PacketDataStream. The
 	# desktop always keeps it; a host that only ever talks to current servers can leave it out.
 	option(MUMBLE_CORE_LEGACY_UDP "Support the legacy (pre-Protobuf) UDP format." ON)
+	# Android and other small hosts only need the lite runtime, which is a fraction of the size. Nothing in
+	# the core uses reflection.
+	option(MUMBLE_CORE_PROTOBUF_LITE "Generate and link against the Protobuf lite runtime." OFF)
 
 	find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 	find_package(Protobuf CONFIG)
 	if(NOT Protobuf_FOUND)
 		find_package(Protobuf MODULE REQUIRED)
+	endif()
+
+	# Cross-compiling (for Android), the target's Protobuf has no protoc that runs here, so the host's is
+	# used. Its version has to match the target library's exactly.
+	if(CMAKE_CROSSCOMPILING AND NOT TARGET protobuf::protoc)
+		find_program(MUMBLE_CORE_PROTOC protoc REQUIRED)
+		set(MUMBLE_CORE_PROTOC_ARGS PROTOC_EXE "${MUMBLE_CORE_PROTOC}")
 	endif()
 
 	if(tests)
@@ -56,10 +66,17 @@ endif()
 
 add_library(mumble-core STATIC)
 
+if(MUMBLE_CORE_PROTOBUF_LITE)
+	set(MUMBLE_CORE_PROTOC_ARGS ${MUMBLE_CORE_PROTOC_ARGS} PLUGIN_OPTIONS lite)
+	set(MUMBLE_CORE_PROTOBUF_TARGET protobuf::libprotobuf-lite)
+else()
+	set(MUMBLE_CORE_PROTOBUF_TARGET protobuf::libprotobuf)
+endif()
+
 protobuf_generate(LANGUAGE cpp TARGET mumble-core PROTOS "${CMAKE_CURRENT_SOURCE_DIR}/Mumble.proto"
-	OUT_VAR BUILT_PROTO_FILES)
+	OUT_VAR BUILT_PROTO_FILES ${MUMBLE_CORE_PROTOC_ARGS})
 protobuf_generate(LANGUAGE cpp TARGET mumble-core PROTOS "${CMAKE_CURRENT_SOURCE_DIR}/MumbleUDP.proto"
-	OUT_VAR BUILT_UDP_PROTO_FILES)
+	OUT_VAR BUILT_UDP_PROTO_FILES ${MUMBLE_CORE_PROTOC_ARGS})
 
 # Disable warnings for the generated source files
 foreach(CURRENT_FILE IN LISTS BUILT_PROTO_FILES BUILT_UDP_PROTO_FILES)
@@ -136,7 +153,7 @@ target_include_directories(mumble-core
 
 target_link_libraries(mumble-core
 	PUBLIC
-		protobuf::libprotobuf
+		${MUMBLE_CORE_PROTOBUF_TARGET}
 		OpenSSL::Crypto
 )
 

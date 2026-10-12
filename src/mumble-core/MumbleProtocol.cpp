@@ -75,7 +75,7 @@ namespace Protocol {
 	}
 
 
-	std::size_t getProtobufSize(const ::google::protobuf::Message &message) {
+	std::size_t getProtobufSize(const ::google::protobuf::MessageLite &message) {
 #if GOOGLE_PROTOBUF_VERSION >= 3002000
 		// ByteSizeLong() was introduced in Protobuf v3.2 as a replacement for ByteSize()
 		return message.ByteSizeLong();
@@ -84,7 +84,7 @@ namespace Protocol {
 #endif
 	}
 
-	[[nodiscard]] std::optional< std::size_t > encodeProtobuf(const ::google::protobuf::Message &message,
+	[[nodiscard]] std::optional< std::size_t > encodeProtobuf(const ::google::protobuf::MessageLite &message,
 															  std::vector< byte > &buffer, std::size_t offset,
 															  std::size_t maxAllowedSize, bool useCachedSize) {
 		// Serialize to buffer
