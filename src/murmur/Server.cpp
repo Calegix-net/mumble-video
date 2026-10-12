@@ -411,6 +411,8 @@ void Server::readParams() {
 	iPluginMessageBurst                = Meta::mp->iPluginMessageBurst;
 	iVideoMessageLimit                 = Meta::mp->iVideoMessageLimit;
 	iVideoMessageBurst                 = Meta::mp->iVideoMessageBurst;
+	iVideoBandwidth                    = Meta::mp->iVideoBandwidth;
+	iVideoStreamsPerChannel            = Meta::mp->iVideoStreamsPerChannel;
 	broadcastListenerVolumeAdjustments = Meta::mp->broadcastListenerVolumeAdjustments;
 	m_suggestVersion                   = Meta::mp->m_suggestVersion;
 	m_suggestPositional                = Meta::mp->suggestPositional;
@@ -540,6 +542,8 @@ void Server::readParams() {
 	if (iVideoMessageBurst < 1) { // Prevent disabling video control entirely
 		iVideoMessageBurst = 1;
 	}
+	m_dbWrapper.getConfigurationTo(iServerNum, "videobandwidth", iVideoBandwidth);
+	m_dbWrapper.getConfigurationTo(iServerNum, "videostreamsperchannel", iVideoStreamsPerChannel);
 	m_dbWrapper.getConfigurationTo(iServerNum, "broadcastlistenervolumeadjustments",
 								   broadcastListenerVolumeAdjustments);
 }
@@ -557,6 +561,22 @@ void Server::setLiveConf(const QString &key, const QString &value) {
 			iMaxBandwidth = length;
 			MumbleProto::ServerConfig mpsc;
 			mpsc.set_max_bandwidth(static_cast< unsigned int >(length));
+			sendAll(mpsc);
+		}
+	} else if (key == "videobandwidth" || key == "videostreamsperchannel") {
+		// 0 is a real value here, "no limit", so only an empty value falls back to the default.
+		const bool bandwidth  = key == "videobandwidth";
+		unsigned int &setting = bandwidth ? iVideoBandwidth : iVideoStreamsPerChannel;
+		const unsigned int value =
+			v.isNull() ? (bandwidth ? Meta::mp->iVideoBandwidth : Meta::mp->iVideoStreamsPerChannel) : v.toUInt();
+		if (value != setting) {
+			setting = value;
+			MumbleProto::ServerConfig mpsc;
+			if (bandwidth) {
+				mpsc.set_max_video_bandwidth(value);
+			} else {
+				mpsc.set_max_video_streams_per_channel(value);
+			}
 			sendAll(mpsc);
 		}
 	} else if (key == "users") {
@@ -1007,33 +1027,30 @@ void Server::run() {
 				}
 
 
-				// Everything from here on is an encrypted media datagram, which carries a channel byte in
-				// the clear. Audio and video hold separate crypt states with separate sequence spaces, so
-				// the receiver has to know which one to use before it can decrypt anything.
-				if (len < 1) {
-					continue;
-				}
+				// Everything from here on is an encrypted media datagram. From a user who speaks video it
+				// carries a channel byte in the clear: audio and video hold separate crypt states with
+				// separate sequence spaces, so the receiver has to know which one to use before it can
+				// decrypt anything. From anyone else - a stock Mumble client - it is the plain audio
+				// datagram it always was. Which of the two it is comes from what the user advertised (see
+				// ServerUser::m_videoCapable), never from the bytes, which cannot tell them apart.
+				const unsigned char *audio = encrypt;
 
-				if (static_cast< Mumble::Protocol::byte >(encrypt[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
-					// Video is only accepted from a peer already identified on the audio channel. Trial
-					// decryption against every user on the host, which is how an unknown peer is matched
-					// below, is not worth doing for video: it is high rate, and a client always sends
-					// audio or a ping first.
-					if (u) {
+				if (u && u->m_videoCapable) {
+					if (static_cast< Mumble::Protocol::byte >(encrypt[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
 						relayVideo(u, reinterpret_cast< const Mumble::Protocol::byte * >(encrypt),
 								   static_cast< std::size_t >(len));
+
+						continue;
 					}
 
-					continue;
-				}
+					if (static_cast< Mumble::Protocol::byte >(encrypt[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+						continue;
+					}
 
-				if (static_cast< Mumble::Protocol::byte >(encrypt[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
-					continue;
+					// Past the channel byte is exactly what the audio crypt state used to receive.
+					audio = encrypt + 1;
+					len -= 1;
 				}
-
-				// Past the channel byte is exactly what the audio crypt state used to receive.
-				const unsigned char *audio = encrypt + 1;
-				len -= 1;
 
 				if (u) {
 					if (!checkDecrypt(u, audio, buffer, static_cast< unsigned int >(len))) {
@@ -1042,11 +1059,23 @@ void Server::run() {
 				} else {
 					ZoneScopedN(TracyConstants::DECRYPT_UNKNOWN_PEER_ZONE);
 
-					// Unknown peer
+					// Unknown peer. Each candidate is tried under its own framing. Video is never
+					// accepted from a peer not yet identified this way: trial decryption against every
+					// user on the host is not worth doing for it, as it is high rate and a client always
+					// sends audio or a ping first.
 					for (ServerUser *usr : qhHostUsers.value(ha)) {
-						if (checkDecrypt(
-								usr, audio, buffer,
-								static_cast< unsigned int >(len))) { // checkDecrypt takes the User's qrwlCrypt lock.
+						const qint32 channelBytes = usr->m_videoCapable ? 1 : 0;
+
+						if (channelBytes > 0
+							&& static_cast< Mumble::Protocol::byte >(encrypt[0])
+								   != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+							continue;
+						}
+
+						if (checkDecrypt(usr, encrypt + channelBytes, buffer,
+										 static_cast< unsigned int >(
+											 len - channelBytes))) { // checkDecrypt takes the User's qrwlCrypt lock.
+							len -= channelBytes;
 							// Every time we relock, reverify users' existence.
 							// The main thread might delete the user while the lock isn't held.
 							unsigned int uiSession = usr->uiSession;
@@ -1162,8 +1191,10 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 	ZoneScoped;
 
 	if ((u.aiUdpFlag.loadRelaxed() == 1 || force) && (u.sUdpSocket != INVALID_SOCKET)) {
-		// One byte longer than the ciphertext: audio datagrams are prefixed with their channel byte so the
-		// receiver can tell them from video before decrypting.
+		// For a user who speaks video, one byte longer than the ciphertext: audio datagrams are prefixed
+		// with their channel byte so the receiver can tell them from video before decrypting. Anyone else
+		// gets the plain datagram every Mumble client expects. See ServerUser::m_videoCapable.
+		const int channelBytes = u.m_videoCapable ? 1 : 0;
 #if defined(__LP64__)
 		static std::vector< char > ebuffer;
 		ebuffer.resize(static_cast< std::size_t >(len + 5 + 16));
@@ -1174,9 +1205,11 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 		bufVec.resize(static_cast< std::size_t >(len + 5));
 		char *datagram = bufVec.data();
 #endif
-		char *buffer = datagram + 1;
+		char *buffer = datagram + channelBytes;
 
-		datagram[0] = static_cast< char >(Mumble::Protocol::MEDIA_CHANNEL_AUDIO);
+		if (channelBytes > 0) {
+			datagram[0] = static_cast< char >(Mumble::Protocol::MEDIA_CHANNEL_AUDIO);
+		}
 
 		{
 			QMutexLocker wl(&u.qmCrypt);
@@ -1201,7 +1234,7 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 		struct iovec iov[1];
 
 		iov[0].iov_base = datagram;
-		iov[0].iov_len  = static_cast< unsigned int >(len + 5);
+		iov[0].iov_len  = static_cast< unsigned int >(len + 4 + channelBytes);
 
 		uint8_t controldata[CMSG_SPACE(std::max(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo)))];
 		memset(controldata, 0, sizeof(controldata));
@@ -1245,7 +1278,7 @@ void Server::sendMessage(ServerUser &u, const unsigned char *data, int len, QByt
 #	else
 		using size_type = std::size_t;
 #	endif
-		::sendto(u.sUdpSocket, datagram, static_cast< size_type >(len + 5), 0,
+		::sendto(u.sUdpSocket, datagram, static_cast< size_type >(len + 4 + channelBytes), 0,
 				 reinterpret_cast< struct sockaddr * >(&u.saiUdpAddress),
 				 (u.saiUdpAddress.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
 #endif
@@ -1700,7 +1733,8 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 bool Server::mayShareVideo(unsigned int senderSession) {
 	ServerUser *sender = qhUsers.value(senderSession);
 
-	if (!sender || !sender->cChannel) {
+	// Speaking video is part of being allowed to share it. See mayReceiveVideo.
+	if (!sender || !sender->m_videoCapable || !sender->cChannel) {
 		return false;
 	}
 
@@ -1712,6 +1746,15 @@ bool Server::mayReceiveVideo(unsigned int subscriberSession, unsigned int sender
 	ServerUser *sender     = qhUsers.value(senderSession);
 
 	if (!subscriber || !sender || !sender->cChannel) {
+		return false;
+	}
+
+	// A client that did not advertise video is never offered it. This is the one check every path goes
+	// through - the relay of a VideoState, its replay to a client that joins later, the announcements and
+	// withdrawals when someone changes channel, subscriptions and the relay itself - so a stock Mumble
+	// client is never sent a video message it would not understand, nor a video datagram its unframed
+	// UDP could not carry.
+	if (!subscriber->m_videoCapable) {
 		return false;
 	}
 
@@ -2663,7 +2706,9 @@ void Server::flushClientPermissionCache(ServerUser *u, MumbleProto::PermissionQu
 }
 
 void Server::sendActiveVideoStreams(ServerUser *user) {
-	if (!user || user->sState != ServerUser::Authenticated) {
+	// mayReceiveVideo() below would refuse every stream to a client that does not speak video anyway; this
+	// just says so up front.
+	if (!user || user->sState != ServerUser::Authenticated || !user->m_videoCapable) {
 		return;
 	}
 

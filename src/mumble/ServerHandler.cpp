@@ -232,6 +232,14 @@ void ServerHandler::setProtocolVersion(Version::full_t version) {
 	m_tcpTunnelDecoder.setProtocolVersion(version);
 }
 
+void ServerHandler::setMediaFraming(MediaFraming framing) {
+	m_mediaFraming = framing;
+}
+
+ServerHandler::MediaFraming ServerHandler::mediaFraming() const {
+	return m_mediaFraming;
+}
+
 void ServerHandler::udpReady() {
 	while (qusUdp->hasPendingDatagrams()) {
 		// Sized for the larger of the two media channels, since which one a datagram belongs to is only
@@ -265,25 +273,26 @@ void ServerHandler::udpReady() {
 		if (buflen < 5)
 			continue;
 
-		// Media datagrams carry their channel in the clear, because audio and video hold separate crypt
-		// states and neither can be decrypted with the other's.
-		if (buflen < 1) {
-			continue;
-		}
+		// Media datagrams from a server that speaks video carry their channel in the clear, because audio
+		// and video hold separate crypt states and neither can be decrypted with the other's. Any other
+		// server sends plain audio datagrams. See Feature in Mumble.proto.
+		const unsigned int channelBytes = m_mediaFraming == MediaFraming::ChannelByte ? 1 : 0;
 
-		if (static_cast< Mumble::Protocol::byte >(encrypted[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
+		if (channelBytes > 0
+			&& static_cast< Mumble::Protocol::byte >(encrypted[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
 			handleVideoDatagram(reinterpret_cast< const Mumble::Protocol::byte * >(encrypted), buflen);
 
 			continue;
 		}
 
-		if (static_cast< Mumble::Protocol::byte >(encrypted[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+		if (channelBytes > 0
+			&& static_cast< Mumble::Protocol::byte >(encrypted[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
 			continue;
 		}
 
-		// Past the channel byte is what the audio crypt state expects.
-		const char *audio = encrypted + 1;
-		buflen -= 1;
+		// Past the channel byte, if there is one, is what the audio crypt state expects.
+		const char *audio = encrypted + channelBytes;
+		buflen -= channelBytes;
 
 		std::span< Mumble::Protocol::byte > buffer = m_udpDecoder.getBuffer();
 
@@ -366,7 +375,13 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 	if (!connection || !connection->csCrypt->isValid())
 		return;
 
-	if (!force && (NetworkConfig::TcpModeEnabled() || !bUdp)) {
+	// Nothing goes out on UDP before the server has said how it frames it; voice takes the tunnel meanwhile.
+	const MediaFraming framing = m_mediaFraming;
+	if (force && framing == MediaFraming::Undecided) {
+		return;
+	}
+
+	if (!force && (NetworkConfig::TcpModeEnabled() || !bUdp || framing == MediaFraming::Undecided)) {
 		QByteArray qba;
 
 		qba.resize(len + 6);
@@ -379,13 +394,17 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 		QApplication::postEvent(this,
 								new ServerHandlerMessageEvent(qba, Mumble::Protocol::TCPMessageType::UDPTunnel, true));
 	} else {
-		crypto[0] = Mumble::Protocol::MEDIA_CHANNEL_AUDIO;
+		const int channelBytes = framing == MediaFraming::ChannelByte ? 1 : 0;
+		if (channelBytes > 0) {
+			crypto[0] = Mumble::Protocol::MEDIA_CHANNEL_AUDIO;
+		}
 
-		if (!connection->csCrypt->encrypt(reinterpret_cast< const unsigned char * >(data), crypto.data() + 1,
+		if (!connection->csCrypt->encrypt(reinterpret_cast< const unsigned char * >(data), crypto.data() + channelBytes,
 										  static_cast< unsigned int >(len))) {
 			return;
 		}
-		qusUdp->writeDatagram(reinterpret_cast< const char * >(crypto.data()), len + 5, qhaRemote, usResolvedPort);
+		qusUdp->writeDatagram(reinterpret_cast< const char * >(crypto.data()), len + 4 + channelBytes, qhaRemote,
+							  usResolvedPort);
 	}
 }
 
@@ -463,7 +482,7 @@ void ServerHandler::sendVideoUnit(const Mumble::Protocol::VideoUnitHeader &heade
 bool ServerHandler::sendVideoPacket(const std::vector< Mumble::Protocol::byte > &packet) {
 	ConnectionPtr connection(cConnection);
 
-	if (!connection || !connection->videoCrypt.isValid()) {
+	if (!connection || !connection->videoCrypt.isValid() || m_mediaFraming != MediaFraming::ChannelByte) {
 		return false;
 	}
 
@@ -1202,6 +1221,7 @@ void ServerHandler::serverConnectionConnected() {
 		const QSslCertificate &qsc = qscCert.first();
 		qbaDigest                  = sha1(qsc.publicKey().toDer());
 		bUdp                       = database->getUdp(qbaDigest);
+		m_mediaFraming             = MediaFraming::Undecided;
 	} else {
 		// Shouldn't reach this
 		qCritical("Server must have a certificate. Dropping connection");
@@ -1232,6 +1252,8 @@ void ServerHandler::serverConnectionConnected() {
 	}
 
 	mpa.set_opus(true);
+	// Also what has the server frame this connection's UDP for video - see Feature in Mumble.proto.
+	mpa.add_features(MumbleProto::FEATURE_VIDEO);
 	sendMessage(mpa);
 
 	{

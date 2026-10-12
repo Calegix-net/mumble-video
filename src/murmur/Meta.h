@@ -116,6 +116,13 @@ public:
 	unsigned int iVideoMessageLimit;
 	unsigned int iVideoMessageBurst;
 
+	/// Advertised as ServerConfig.max_video_bandwidth: the most, in bits per second, one video stream may
+	/// use. 0 means no limit.
+	unsigned int iVideoBandwidth;
+	/// Advertised as ServerConfig.max_video_streams_per_channel: how many users may share video in one
+	/// channel at once. 0 means no limit.
+	unsigned int iVideoStreamsPerChannel;
+
 	bool broadcastListenerVolumeAdjustments;
 
 	QSslCertificate qscCert;

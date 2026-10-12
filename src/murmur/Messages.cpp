@@ -204,6 +204,10 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 	{
 		QWriteLocker wl(&qrwlVoiceThread);
 		uSource->uiSession = qqIds.dequeue();
+		// Read here, from the Authenticate that completes authentication and never from a later one (see
+		// Feature in Mumble.proto), and before the UDP thread can find this user: it decides how the
+		// user's datagrams are framed.
+		uSource->m_videoCapable = MumbleProto::speaksVideo(msg.features(), uSource->m_version, uSource->qsRelease);
 		qhUsers.insert(uSource->uiSession, uSource);
 		qhHostUsers[uSource->haAddress].insert(uSource);
 	}
@@ -605,6 +609,11 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 	mpsc.set_image_message_length(static_cast< unsigned int >(iMaxImageMessageLength));
 	mpsc.set_max_users(static_cast< unsigned int >(iMaxUsers));
 	mpsc.set_recording_allowed(allowRecording);
+	// Advertised to everyone, whether or not they speak video themselves: a client that does not know the
+	// fields ignores them, and it is the advertisement that tells a client this server has video at all.
+	mpsc.add_features(MumbleProto::FEATURE_VIDEO);
+	mpsc.set_max_video_bandwidth(iVideoBandwidth);
+	mpsc.set_max_video_streams_per_channel(iVideoStreamsPerChannel);
 	sendMessage(uSource, mpsc);
 
 	MumbleProto::SuggestConfig mpsug;
@@ -2588,6 +2597,13 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	MSG_SETUP(ServerUser::Authenticated);
 
+	// A client that did not advertise video has no business announcing a stream, and could not send one:
+	// its UDP is unframed, so there is no video channel to send on. Ignored, as an unknown message would
+	// be, rather than answered with a denial it would not understand.
+	if (!uSource->m_videoCapable) {
+		return;
+	}
+
 	QWriteLocker videoLock(&qrwlVoiceThread);
 
 	msg.set_session(uSource->uiSession);
@@ -2620,6 +2636,35 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), false);
 
 		return;
+	}
+
+	if (msg.active() && !alreadyAnnounced && iVideoStreamsPerChannel > 0 && uSource->cChannel) {
+		// The limit is on people sharing, not streams: a screen with its audio, or a camera beside it, is
+		// still one person. So someone already sharing may always add a stream; anyone else needs a free
+		// place in the channel.
+		std::set< unsigned int > sharing;
+		for (const auto &announcement : m_videoAnnouncements) {
+			ServerUser *sender = qhUsers.value(announcement.first.first);
+			if (sender && sender->cChannel == uSource->cChannel) {
+				sharing.insert(sender->uiSession);
+			}
+		}
+
+		if (sharing.find(uSource->uiSession) == sharing.end() && sharing.size() >= iVideoStreamsPerChannel) {
+			MumbleProto::PermissionDenied mppd;
+			mppd.set_type(MumbleProto::PermissionDenied_DenyType_Text);
+			mppd.set_reason(u8(QString("%1 people are already sharing video in this channel, which is as many as "
+									   "this server allows")
+								   .arg(iVideoStreamsPerChannel)));
+			sendMessage(uSource, mppd);
+
+			return;
+		}
+	}
+
+	// Clamped as ServerConfig.max_video_bandwidth promises, and relayed as clamped.
+	if (iVideoBandwidth > 0 && msg.has_target_bandwidth() && msg.target_bandwidth() > iVideoBandwidth) {
+		msg.set_target_bandwidth(iVideoBandwidth);
 	}
 
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
@@ -2670,6 +2715,10 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 	// heavy but entirely conforming watcher starved and its watch/keyframe requests were dropped - tiles
 	// that never painted. The video bucket is sized for that traffic; see Meta::iVideoMessageLimit.
 	MSG_SETUP(ServerUser::Authenticated);
+	// Ignored from a client that did not advertise video, for the same reason as in msgVideoState.
+	if (!uSource->m_videoCapable) {
+		return;
+	}
 	if (uSource->m_videoControlBucket.ratelimit(1)) {
 		return;
 	}
