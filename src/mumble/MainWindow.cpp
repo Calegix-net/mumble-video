@@ -26,6 +26,7 @@
 #include "GlobalShortcutTypes.h"
 #ifdef USE_OVERLAY
 #	include "OverlayClient.h"
+#	include "OverlayUserGroup.h"
 #endif
 #include "../SignalCurry.h"
 #include "AudioLoopbackSource.h"
@@ -573,6 +574,39 @@ void MainWindow::setupVideoGrid() {
 	auto *departedSenderTimer = new QTimer(this);
 	connect(departedSenderTimer, &QTimer::timeout, this, &MainWindow::pruneDepartedVideoSenders);
 	departedSenderTimer->start(3000);
+
+#ifdef USE_OVERLAY
+	// The grid draws the overlay over a fullscreened or popped-out tile but deliberately knows nothing
+	// about it - the overlay lives behind USE_OVERLAY and reads the user's configuration out of the global
+	// Settings, and a dependency on either would drag the whole client into a class that TestVideoGrid
+	// compiles on its own. So the overlay is handed in from here, which already has both.
+	m_videoGrid->setOverlaySupport(
+		[]() -> QGraphicsItem * {
+			// The viewer's own overlay configuration, not a copy: what it shows - talking only, the home
+			// channel, linked channels - and where it sits is already their decision, and answering that
+			// differently over video would be a second overlay to configure. bShowExamples stays false,
+			// so this is the live user list rather than the configuration dialog's sample one.
+			return new OverlayUserGroup(&Global::get().s.os);
+		},
+		[](QGraphicsItem *item, const QSizeF &) {
+			// Safe because the only thing that ever reaches here is what the factory above built.
+			auto *const group = static_cast< OverlayUserGroup * >(item);
+
+			// A no-op while disconnected: the group needs a self user to decide what to show and returns
+			// without touching anything when there is not one.
+			group->updateUsers();
+			group->updateLayout();
+		});
+
+	m_videoGrid->setVideoOverlayEnabled(Global::get().s.bVideoOverlay);
+
+	// The detached window's overlay button asks rather than decides, so that the preference is recorded
+	// in one place and survives a restart.
+	connect(m_videoGrid, &VideoGrid::videoOverlayToggleRequested, this, [this]() {
+		Global::get().s.bVideoOverlay = !Global::get().s.bVideoOverlay;
+		m_videoGrid->setVideoOverlayEnabled(Global::get().s.bVideoOverlay);
+	});
+#endif
 
 	// The grid can tell that a stream's decoder is stuck - a run of undecodable units means its
 	// reference frames are gone - but it deliberately knows nothing about the server. The request goes

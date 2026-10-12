@@ -308,6 +308,12 @@ struct Settings {
 	/// Screen-share frame rate, either codec.
 	int iScreenShareFramerate = 30;
 
+	/// Whether the Mumble overlay - the same talking-user list it draws over a fullscreen game - is drawn
+	/// over video being watched fullscreen or popped out. Off by default: it is the overlay's own
+	/// configuration that decides what it looks like, but whether it belongs on top of someone else's
+	/// screen share is a separate question from whether it belongs on top of a game.
+	bool bVideoOverlay = false;
+
 	int iFramesPerPacket                = 2;
 	QString qsAudioInput                = {};
 	QString qsAudioOutput               = {};

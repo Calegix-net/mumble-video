@@ -91,6 +91,7 @@ const SettingsKey SCREEN_SHARE_CODEC_KEY       = { "screen_share_codec" };
 const SettingsKey SCREEN_SHARE_BITRATE_KEY     = { "screen_share_bitrate" };
 const SettingsKey SCREEN_SHARE_VP9_BITRATE_KEY = { "screen_share_vp9_bitrate" };
 const SettingsKey SCREEN_SHARE_FRAMERATE_KEY   = { "screen_share_framerate" };
+const SettingsKey VIDEO_OVERLAY_KEY            = { "video_overlay" };
 const SettingsKey VIDEO_WIZARD_SHOWN_KEY       = { "video_wizard_shown" };
 
 // Idle settings

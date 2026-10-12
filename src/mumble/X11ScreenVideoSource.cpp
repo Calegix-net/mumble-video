@@ -5,6 +5,7 @@
 
 #include "X11ScreenVideoSource.h"
 
+#include <QtCore/QThread>
 #include <QtGui/QGuiApplication>
 
 #include <X11/Xlib.h>
@@ -58,12 +59,12 @@ bool X11ScreenVideoSource::isAvailable() {
 X11ScreenVideoSource::X11ScreenVideoSource(const QRect &region, QString label, int intervalMsec, QObject *parent)
 	: VideoSource(parent), m_impl(std::make_unique< Impl >()), m_region(region), m_label(std::move(label)),
 	  m_intervalMsec(std::max(1, intervalMsec)) {
-	m_timer.setTimerType(Qt::PreciseTimer);
-	connect(&m_timer, &QTimer::timeout, this, &X11ScreenVideoSource::capture);
 }
 
 X11ScreenVideoSource::~X11ScreenVideoSource() {
-	teardown();
+	// stop() rather than teardown() directly: the Xlib state belongs to the capture thread, and this
+	// also brings the object back off that thread before it is destroyed.
+	stop();
 }
 
 QString X11ScreenVideoSource::describe() const {
@@ -76,11 +77,55 @@ bool X11ScreenVideoSource::start() {
 		return true;
 	}
 
+	// Checked here rather than on the capture thread: it needs no X server, and a region this wrong is a
+	// caller bug worth refusing before a thread is stood up for it.
 	if (m_region.width() <= 0 || m_region.height() <= 0 || m_region.width() > MAX_DIMENSION
 		|| m_region.height() > MAX_DIMENSION) {
 		return false;
 	}
 
+	m_ownerThread = QThread::currentThread();
+
+	m_thread = new QThread();
+	m_thread->setObjectName(QStringLiteral("X11ScreenCapture"));
+	m_thread->start();
+
+	// From here until stop(), this object lives on the capture thread, so its slots - capture() above all
+	// - run there, and its signals reach the GUI thread as queued calls.
+	moveToThread(m_thread);
+
+	bool started = false;
+
+	// Blocking, because VideoBroadcaster::start() uses this return value to decide whether the share
+	// happened at all. Reporting success before the display is even open would turn a refused grab into a
+	// share that silently produces nothing.
+	QMetaObject::invokeMethod(this, "beginOnCaptureThread", Qt::BlockingQueuedConnection,
+							  Q_RETURN_ARG(bool, started));
+
+	if (!started) {
+		// Still owned by the capture thread at this point, so the hand-back has to go through it too -
+		// endOnCaptureThread() does that, and its teardown is idempotent after a failed begin.
+		QMetaObject::invokeMethod(this, "endOnCaptureThread", Qt::BlockingQueuedConnection);
+
+		joinCaptureThread();
+	}
+
+	return started;
+}
+
+void X11ScreenVideoSource::joinCaptureThread() {
+	if (!m_thread) {
+		return;
+	}
+
+	m_thread->quit();
+	m_thread->wait();
+
+	delete m_thread;
+	m_thread = nullptr;
+}
+
+bool X11ScreenVideoSource::beginOnCaptureThread() {
 	m_impl->display = XOpenDisplay(nullptr);
 
 	if (!m_impl->display) {
@@ -150,17 +195,53 @@ bool X11ScreenVideoSource::start() {
 
 	m_previous = QImage();
 	m_running  = true;
-	m_timer.start(m_intervalMsec);
+
+	if (!m_timer) {
+		// Parented to this object, which is on the capture thread by now, so the timer belongs to that
+		// thread and capture() is delivered there rather than on the GUI thread.
+		m_timer = new QTimer(this);
+		m_timer->setTimerType(Qt::PreciseTimer);
+		connect(m_timer, &QTimer::timeout, this, &X11ScreenVideoSource::capture);
+	}
+
+	m_timer->start(m_intervalMsec);
 
 	return true;
 }
 
-void X11ScreenVideoSource::stop() {
+void X11ScreenVideoSource::endOnCaptureThread() {
 	teardown();
+
+	// Handed back from here, on the capture thread, because Qt only allows moveToThread() from the thread
+	// that currently owns the object - the owner cannot reach in and reclaim it. Without this the move
+	// fails with "Cannot move to target thread", the object is left belonging to a thread that is about to
+	// be destroyed, and the next start() has nowhere valid to move it from. Last statement on purpose:
+	// nothing below it would still be running on the thread it was queued to.
+	if (m_ownerThread) {
+		moveToThread(m_ownerThread);
+	}
+}
+
+void X11ScreenVideoSource::stop() {
+	if (!m_thread) {
+		// Never started, or already stopped. teardown() is safe to run here: there is no capture thread
+		// to race with, and nothing was opened from one.
+		teardown();
+
+		return;
+	}
+
+	// Xlib is only ever touched from the capture thread, so the teardown has to happen there too.
+	QMetaObject::invokeMethod(this, "endOnCaptureThread", Qt::BlockingQueuedConnection);
+
+	joinCaptureThread();
 }
 
 void X11ScreenVideoSource::teardown() {
-	m_timer.stop();
+	if (m_timer) {
+		m_timer->stop();
+	}
+
 	m_running  = false;
 	m_previous = QImage();
 

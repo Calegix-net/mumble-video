@@ -14,6 +14,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QImage>
 
+#include <atomic>
 #include <memory>
 
 /**
@@ -38,9 +39,20 @@
  *     already read the root window, the protocol has no capture isolation - but a share that silently
  *     grabs every monitor because nobody was asked is still the wrong behaviour.
  *
- * Frames are polled on a timer on the owning thread. Xlib is only ever touched from there, so this
- * needs no XInitThreads and shares no state with the Xlib connection GlobalShortcutX keeps.
+ * Frames are polled on a timer on a capture thread of this object's own, and every Xlib call - opening
+ * the display, the MIT-SHM setup, the grabs, the teardown - happens there. Xlib is still only ever
+ * touched from one thread per connection, so this continues to need no XInitThreads and still shares no
+ * state with the Xlib connection GlobalShortcutX keeps on its own display.
+ *
+ * The thread is not an optimisation detail, it is the difference between a usable share and a visibly
+ * stuttering one. A poll copies the grabbed frame out of the shared segment and then compares it against
+ * the previous one to answer captureIdle, which at 1080p is about 16 MB of memory traffic every poll - and
+ * on the GUI thread, as this used to be, that lands between the event loop and every repaint, so the
+ * sharer's own client stutters and frames go out uneven. The encode that follows a changed frame still
+ * runs on the GUI thread; moving that too is a change to shared code and is deliberately not bundled here.
  */
+class QThread;
+
 class X11ScreenVideoSource : public VideoSource {
 	Q_OBJECT
 
@@ -67,6 +79,18 @@ public:
 	static constexpr int MAX_DIMENSION = 8192;
 
 private:
+	/// Opens the display, sets up MIT-SHM and starts the poll timer - all on m_thread. start() invokes
+	/// this with a blocking queued call so the caller still receives the real answer, which
+	/// VideoBroadcaster needs in order to report a share that could not start.
+	Q_INVOKABLE bool beginOnCaptureThread();
+
+	/// Stops polling and releases every Xlib resource, on m_thread.
+	Q_INVOKABLE void endOnCaptureThread();
+
+	/// Stops and destroys the capture thread. Called on the owning thread only, and only once the capture
+	/// thread has already handed this object back (see endOnCaptureThread).
+	void joinCaptureThread();
+
 	void capture();
 	void teardown();
 
@@ -80,15 +104,30 @@ private:
 	QRect m_region;
 	QString m_label;
 	int m_intervalMsec;
-	bool m_running = false;
+
+	/// Written on the capture thread - start, stop and every failure path run there - and read from the
+	/// GUI thread through isRunning(), so a plain bool would be a data race.
+	std::atomic< bool > m_running{ false };
 
 	/// The previous frame, to answer the captureIdle half of the VideoSource contract. A screen that is
 	/// not changing is the normal case, and saying so is cheaper for everything downstream than handing
 	/// the encoder an identical frame to diff tile by tile.
 	QImage m_previous;
 
-	QTimer m_timer;
+	/// Created on the capture thread rather than held by value. A QTimer's thread affinity is its own and
+	/// does not follow the object that owns it, so a by-value member would keep firing on whichever thread
+	/// constructed this source no matter where the source itself was moved.
+	QTimer *m_timer = nullptr;
 	Timer m_clock;
+
+	/// The capture thread. Owns nothing by itself; this object is moved onto it for the duration of a
+	/// share, which is what puts every Xlib call and the per-poll copy on it.
+	QThread *m_thread = nullptr;
+
+	/// The thread this object belongs to between shares - whichever one called start(). Qt only permits
+	/// moveToThread() from the thread that currently owns the object, so the capture thread has to hand
+	/// the object back itself rather than the owner reclaiming it; this is where it hands it back to.
+	QThread *m_ownerThread = nullptr;
 };
 
 #endif

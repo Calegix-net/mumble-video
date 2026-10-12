@@ -22,6 +22,8 @@
 #include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QGraphicsItem>
+#include <QtWidgets/QGraphicsScene>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMenu>
@@ -90,6 +92,10 @@ public:
 	/// The control bar hides after the mouse has been still this long, like a video player's.
 	static constexpr int CONTROLS_HIDE_MSEC = 3000;
 	static constexpr int CONTROLS_HEIGHT    = 44;
+	/// How often the overlay's contents are brought up to date while it is showing. Ten times a second:
+	/// fast enough that a talking indicator does not read as broken, and a fraction of what the real
+	/// overlay does, which refreshes the same item once per game frame.
+	static constexpr int OVERLAY_REFRESH_MSEC = 100;
 
 	explicit FullscreenVideoWindow(VideoGrid *owner, ContentProvider provider, VolumeProvider volume,
 								   VolumeSetter setVolume)
@@ -119,6 +125,115 @@ public:
 		scheduleRepaint();
 		refreshVolume();
 		showControls();
+	}
+
+	/// Shows this window either filling the monitor or as an ordinary movable, resizable window, and
+	/// switches between the two in place. The pop-out is exactly this class in its windowed presentation:
+	/// everything else about it - the pull-based content provider, the coalesced repaints, the volume
+	/// control, the auto-hiding bar - is wanted identically either way, so none of it is duplicated.
+	void setPresentation(bool windowed) {
+		const bool changed = windowed != m_windowed || !isVisible();
+
+		m_windowed = windowed;
+
+		if (!changed) {
+			return;
+		}
+
+		if (windowed) {
+			if (!m_hasWindowedSize) {
+				// Big enough to be worth watching, small enough to leave the rest of the desktop usable,
+				// which is the entire point of asking for a window instead of fullscreen.
+				resize(960, 540);
+				m_hasWindowedSize = true;
+			}
+
+			showNormal();
+			raise();
+		} else {
+			showFullScreen();
+		}
+
+		applyPresentationLabels();
+		showControls();
+	}
+
+	/// Turns the overlay on or off over this window, building it on demand through the owner's factory so
+	/// that a viewer who never asks for it pays nothing, and tearing it down when switched off so it stops
+	/// costing a refresh.
+	void setOverlayEnabled(bool enabled) {
+		if (enabled == (m_overlayScene != nullptr)) {
+			applyPresentationLabels();
+
+			return;
+		}
+
+		if (!enabled) {
+			delete m_overlayScene;
+			m_overlayScene = nullptr;
+			m_overlayItem  = nullptr;
+
+			if (m_overlayTimer) {
+				m_overlayTimer->stop();
+			}
+
+			m_wholeDirty = true;
+			scheduleRepaint();
+			applyPresentationLabels();
+
+			return;
+		}
+
+		QGraphicsItem *const item = m_owner->buildOverlayItem();
+
+		if (!item) {
+			// Built without overlay support, or the owner declined. Nothing to show, nothing to undo.
+			applyPresentationLabels();
+
+			return;
+		}
+
+		m_overlayScene = new QGraphicsScene(this);
+		m_overlayScene->setBackgroundBrush(Qt::NoBrush);
+		m_overlayScene->addItem(item);
+		item->show();
+		m_overlayItem = item;
+
+		if (!m_overlayTimer) {
+			m_overlayTimer = new QTimer(this);
+			m_overlayTimer->setInterval(OVERLAY_REFRESH_MSEC);
+			connect(m_overlayTimer, &QTimer::timeout, this, &FullscreenVideoWindow::refreshOverlay);
+		}
+
+		resizeOverlayScene();
+		m_overlayTimer->start();
+		refreshOverlay();
+		applyPresentationLabels();
+	}
+
+	/// The overlay sizes itself from the scene rect, exactly as it sizes itself from a game's resolution
+	/// when drawn over one, so the scene has to track this window.
+	void resizeOverlayScene() {
+		if (!m_overlayScene) {
+			return;
+		}
+
+		m_overlayScene->setSceneRect(QRectF(0.0, 0.0, width(), height()));
+		m_owner->refreshOverlayItem(m_overlayItem, QSizeF(width(), height()));
+	}
+
+	/// Brings the overlay up to date - who is talking, who joined, who left - and repaints.
+	void refreshOverlay() {
+		if (!m_overlayItem) {
+			return;
+		}
+
+		m_owner->refreshOverlayItem(m_overlayItem, QSizeF(width(), height()));
+
+		// The overlay can sit anywhere in the window, and its contents move independently of which video
+		// tiles changed, so there is no useful dirty rectangle for it.
+		m_wholeDirty = true;
+		scheduleRepaint();
 	}
 
 	/// The level changed somewhere else - the tile's own slider - so the bar's follows it.
@@ -226,18 +341,32 @@ protected:
 			painter.setPen(Qt::white);
 			painter.drawText(margin, Qt::AlignTop | Qt::AlignLeft, label);
 		}
+
+		// The overlay, composited straight into this paint out of a scene that is deliberately never put
+		// in a QGraphicsView. The overlay's user group carries its own wheel and context-menu handlers,
+		// which edit the overlay's configuration - so a view would mean scrolling over somebody else's
+		// screen share silently resized the viewer's overlay. With no view, no event reaches the item at
+		// all and it is strictly something to look at.
+		if (m_overlayScene) {
+			m_overlayScene->render(&painter, rect(), m_overlayScene->sceneRect());
+		}
 	}
 
 	void resizeEvent(QResizeEvent *event) override {
 		QWidget::resizeEvent(event);
 		m_wholeDirty = true;
 		m_controls->setGeometry(0, height() - CONTROLS_HEIGHT, width(), CONTROLS_HEIGHT);
+		resizeOverlayScene();
 	}
 
 	void showEvent(QShowEvent *event) override {
 		QWidget::showEvent(event);
 		refreshVolume();
 		showControls();
+
+		// Read on every show rather than once at construction: the preference is persisted, and this
+		// window outlives any one viewing of a tile.
+		setOverlayEnabled(m_owner->videoOverlayEnabled());
 	}
 
 	void mouseMoveEvent(QMouseEvent *event) override {
@@ -256,6 +385,14 @@ protected:
 	}
 
 	void mouseDoubleClickEvent(QMouseEvent *) override { m_owner->clearFocusedTile(); }
+
+	/// Only reachable in the windowed presentation - fullscreen has no title bar to close from. Without
+	/// this the window would hide while m_focus still pointed at the tile, so the grid would go on
+	/// treating it as focused and the next relayout() would put the window straight back up.
+	void closeEvent(QCloseEvent *event) override {
+		event->ignore();
+		m_owner->clearFocusedTile();
+	}
 
 private:
 	/// The bar along the bottom: the stream's volume (speaker button, slider, level), and a button out of
@@ -291,17 +428,49 @@ private:
 
 		// Words, not just an icon: the theme's "restore" icon is small and grey and was easy to miss on top of
 		// video. The glyph is the one the tile's own fullscreen button uses.
-		auto *exitButton = new QToolButton(m_controls);
-		exitButton->setAutoRaise(true);
-		exitButton->setText(tr("⛶  Exit fullscreen"));
-		exitButton->setCursor(Qt::PointingHandCursor);
-		exitButton->setStyleSheet(QStringLiteral("QToolButton { color: white; padding: 4px 10px; border-radius: 4px; }"
-												 "QToolButton:hover { background: rgba(255, 255, 255, 40); }"));
-		exitButton->setFocusPolicy(Qt::NoFocus);
-		exitButton->setToolTip(tr("Exit fullscreen (Esc or double-click)"));
-		layout->addWidget(exitButton);
+		const QString buttonStyle =
+			QStringLiteral("QToolButton { color: white; padding: 4px 10px; border-radius: 4px; }"
+						   "QToolButton:hover { background: rgba(255, 255, 255, 40); }");
 
-		connect(exitButton, &QToolButton::clicked, this, [this]() { m_owner->clearFocusedTile(); });
+		// Switches between filling the monitor and being an ordinary window, without leaving the view.
+		// Popping a tile out and then wanting it fullscreen (or the reverse) should not mean going back to
+		// the grid to press a different button.
+		// Only offered when the client was actually built with the overlay.
+		if (m_owner->videoOverlayAvailable()) {
+			m_overlayButton = new QToolButton(m_controls);
+			m_overlayButton->setAutoRaise(true);
+			m_overlayButton->setCursor(Qt::PointingHandCursor);
+			m_overlayButton->setStyleSheet(buttonStyle);
+			m_overlayButton->setFocusPolicy(Qt::NoFocus);
+			layout->addWidget(m_overlayButton);
+
+			// Asked of the owner rather than decided here: it holds the persisted preference, and calls
+			// setVideoOverlayEnabled() back once it has recorded the answer.
+			connect(m_overlayButton, &QToolButton::clicked, m_owner,
+					[owner = m_owner]() { emit owner->videoOverlayToggleRequested(); });
+		}
+
+		m_modeButton = new QToolButton(m_controls);
+		m_modeButton->setAutoRaise(true);
+		m_modeButton->setCursor(Qt::PointingHandCursor);
+		m_modeButton->setStyleSheet(buttonStyle);
+		m_modeButton->setFocusPolicy(Qt::NoFocus);
+		layout->addWidget(m_modeButton);
+
+		connect(m_modeButton, &QToolButton::clicked, this, [this]() { m_owner->setFocusWindowed(!m_windowed); });
+
+		// Words, not just an icon: the theme's "restore" icon is small and grey and was easy to miss on top of
+		// video. The glyph is the one the tile's own fullscreen button uses.
+		m_exitButton = new QToolButton(m_controls);
+		m_exitButton->setAutoRaise(true);
+		m_exitButton->setCursor(Qt::PointingHandCursor);
+		m_exitButton->setStyleSheet(buttonStyle);
+		m_exitButton->setFocusPolicy(Qt::NoFocus);
+		layout->addWidget(m_exitButton);
+
+		connect(m_exitButton, &QToolButton::clicked, this, [this]() { m_owner->clearFocusedTile(); });
+
+		applyPresentationLabels();
 
 		connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int value) {
 			if (value > 0) {
@@ -352,12 +521,52 @@ private:
 	VolumeSetter m_setVolume;
 	QTimer *m_repaintTimer = nullptr;
 
+	/// Keeps the two buttons describing what they actually do in the current presentation, rather than
+	/// setting their text once, because the same window serves both.
+	void applyPresentationLabels() {
+		if (!m_modeButton || !m_exitButton) {
+			return;
+		}
+
+		m_modeButton->setText(m_windowed ? tr("⛶  Fullscreen") : tr("❐  Pop out"));
+		m_modeButton->setToolTip(m_windowed ? tr("Fill the screen") : tr("Show in its own movable window"));
+
+		m_exitButton->setText(m_windowed ? tr("✕  Close") : tr("⛶  Exit fullscreen"));
+		m_exitButton->setToolTip(m_windowed ? tr("Close this window (Esc or double-click)")
+											: tr("Exit fullscreen (Esc or double-click)"));
+
+		if (m_overlayButton) {
+			const bool on = m_overlayScene != nullptr;
+
+			m_overlayButton->setText(on ? tr("◉  Overlay") : tr("○  Overlay"));
+			m_overlayButton->setToolTip(on ? tr("Hide the Mumble overlay")
+										   : tr("Show the Mumble overlay, as it appears over a game"));
+		}
+	}
+
 	QWidget *m_controls       = nullptr;
+	QToolButton *m_overlayButton = nullptr;
+	QToolButton *m_modeButton    = nullptr;
+	QToolButton *m_exitButton = nullptr;
 	QToolButton *m_muteButton = nullptr;
 	QSlider *m_volumeSlider   = nullptr;
 	QLabel *m_volumeLabel     = nullptr;
 	QTimer *m_hideTimer       = nullptr;
 	int m_volumeBeforeMute    = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+
+	/// Which presentation is showing. Fullscreen is the default, so the existing fullscreen button
+	/// behaves exactly as it did before the pop-out existed.
+	bool m_windowed = false;
+
+	/// Whether a windowed size has been picked yet. Set once, so a user who resizes or moves the pop-out
+	/// keeps that geometry across a pop-in and back out.
+	bool m_hasWindowedSize = false;
+
+	/// The overlay, or null while it is switched off. Never attached to a QGraphicsView - see paintEvent().
+	/// The scene owns the item; m_overlayItem is a borrowed pointer, for handing back to the refresher.
+	QGraphicsScene *m_overlayScene = nullptr;
+	QGraphicsItem *m_overlayItem   = nullptr;
+	QTimer *m_overlayTimer         = nullptr;
 
 	/// Accumulated since the last repaint, in picture pixels. Ignored while m_wholeDirty is set.
 	QRect m_dirtySource;
@@ -1856,6 +2065,11 @@ void VideoGrid::clearFocusedTile() {
 	}
 
 	m_focus = FocusTarget::None;
+
+	// Back to the default, so a later press of a tile's fullscreen button is fullscreen rather than
+	// inheriting whatever the last pop-out left behind.
+	m_focusWindowed = false;
+
 	relayout();
 }
 
@@ -1962,6 +2176,22 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 
 	layout->addStretch();
 
+	controls->popOutButton = new QToolButton(controls->bar);
+	controls->popOutButton->setAutoRaise(true);
+	controls->popOutButton->setText(QStringLiteral("❐"));
+	controls->popOutButton->setToolTip(tr("Pop out into its own window"));
+	layout->addWidget(controls->popOutButton);
+
+	connect(controls->popOutButton, &QToolButton::clicked, this, [this, target]() {
+		if (m_focus == target && m_focusWindowed) {
+			clearFocusedTile();
+		} else {
+			m_focus         = target;
+			m_focusWindowed = true;
+			relayout();
+		}
+	});
+
 	controls->fullscreenButton = new QToolButton(controls->bar);
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
@@ -1969,10 +2199,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, target]() {
-		if (m_focus == target) {
+		if (m_focus == target && !m_focusWindowed) {
 			clearFocusedTile();
 		} else {
-			m_focus = target;
+			m_focus         = target;
+			m_focusWindowed = false;
 			relayout();
 		}
 	});
@@ -2065,20 +2296,41 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 
 	layout->addStretch();
 
+	const std::uint64_t key = surfaceKey(senderSession, streamID);
+
+	// Beside the fullscreen button rather than replacing it: watching somebody's screen share while
+	// getting on with something else is a different thing from filling the monitor with it, and both are
+	// worth one press.
+	controls->popOutButton = new QToolButton(controls->bar);
+	controls->popOutButton->setAutoRaise(true);
+	controls->popOutButton->setText(QStringLiteral("❐"));
+	controls->popOutButton->setToolTip(tr("Pop out into its own window"));
+	layout->addWidget(controls->popOutButton);
+
+	connect(controls->popOutButton, &QToolButton::clicked, this, [this, key]() {
+		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key && m_focusWindowed) {
+			clearFocusedTile();
+		} else {
+			m_focus             = FocusTarget::Surface;
+			m_focusedSurfaceKey = key;
+			m_focusWindowed     = true;
+			relayout();
+		}
+	});
+
 	controls->fullscreenButton = new QToolButton(controls->bar);
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
 	controls->fullscreenButton->setToolTip(tr("Fullscreen"));
 	layout->addWidget(controls->fullscreenButton);
 
-	const std::uint64_t key = surfaceKey(senderSession, streamID);
-
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, key]() {
-		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key) {
+		if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == key && !m_focusWindowed) {
 			clearFocusedTile();
 		} else {
 			m_focus             = FocusTarget::Surface;
 			m_focusedSurfaceKey = key;
+			m_focusWindowed     = false;
 			relayout();
 		}
 	});
@@ -2363,8 +2615,47 @@ void VideoGrid::updateFullscreenWindow() {
 	// changed rectangle instead.
 	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
 
-	if (!m_fullscreenWindow->isVisible()) {
-		m_fullscreenWindow->showFullScreen();
+	// Handles the first show and a change of presentation while already visible, so popping a tile out
+	// of fullscreen (or back into it) needs nothing here beyond the flag.
+	static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setPresentation(m_focusWindowed);
+}
+
+void VideoGrid::setOverlaySupport(OverlayItemFactory factory, OverlayItemRefresher refresher) {
+	m_overlayFactory   = std::move(factory);
+	m_overlayRefresher = std::move(refresher);
+}
+
+QGraphicsItem *VideoGrid::buildOverlayItem() {
+	return m_overlayFactory ? m_overlayFactory() : nullptr;
+}
+
+void VideoGrid::refreshOverlayItem(QGraphicsItem *item, const QSizeF &size) {
+	if (item && m_overlayRefresher) {
+		m_overlayRefresher(item, size);
+	}
+}
+
+void VideoGrid::setVideoOverlayEnabled(bool enabled) {
+	if (m_videoOverlayEnabled == enabled) {
+		return;
+	}
+
+	m_videoOverlayEnabled = enabled;
+
+	if (m_fullscreenWindow) {
+		static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->setOverlayEnabled(enabled);
+	}
+}
+
+void VideoGrid::setFocusWindowed(bool windowed) {
+	if (m_focusWindowed == windowed) {
+		return;
+	}
+
+	m_focusWindowed = windowed;
+
+	if (m_focus != FocusTarget::None) {
+		relayout();
 	}
 }
 

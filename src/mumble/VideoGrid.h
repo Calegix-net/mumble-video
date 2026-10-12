@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <deque>
 #include <limits>
 #include <map>
@@ -31,6 +32,7 @@
 #include <vector>
 
 class QEnterEvent;
+class QGraphicsItem;
 class QKeyEvent;
 class QLabel;
 class QMouseEvent;
@@ -155,6 +157,11 @@ public:
 	/// Not meant to be called outside a test.
 	int hoveredBarAppliedCountForTesting() const { return m_hoveredBarAppliedCount; }
 
+	/// Whether the focused tile is currently presented as a window rather than filling the monitor - see
+	/// m_focusWindowed. Exposed so a test can tell the two presentations apart, which is otherwise
+	/// invisible from outside: hasFocusedTile() is true for both. Not meant to be called outside a test.
+	bool focusWindowedForTesting() const { return m_focusWindowed; }
+
 	/// Number of other participants' tiles currently drawable - one per stream, not one per person, since
 	/// a sender may hold more than one stream (a camera and a screen, say). A stream not being watched
 	/// occupies its cell the moment it is announced, showing a preview placeholder there - it does not
@@ -187,6 +194,46 @@ public:
 	/// stream" behaviour every other video call offers. Exposed so the containing window can, for
 	/// instance, know to hide unrelated chrome while a tile fills it.
 	bool hasFocusedTile() const { return m_focus != FocusTarget::None; }
+
+	/// Switches the focused tile between filling the monitor and being an ordinary movable window. Public
+	/// because the detached window's own mode button calls it, so that switching presentation does not
+	/// mean going back to the grid to press a different tile button.
+	void setFocusWindowed(bool windowed);
+
+	/// Builds the item to draw over detached video - in practice the Mumble overlay's own user group. The
+	/// returned item is handed to a QGraphicsScene, which takes ownership.
+	using OverlayItemFactory = std::function< QGraphicsItem *() >;
+
+	/// Brings that item up to date for a given window size: who is talking now, and where the overlay
+	/// sits at this size.
+	using OverlayItemRefresher = std::function< void(QGraphicsItem *, const QSizeF &) >;
+
+	/**
+	 * Teaches this class how to draw the Mumble overlay over a fullscreened or popped-out tile, without
+	 * teaching it anything about the overlay itself.
+	 *
+	 * Injected rather than called directly, for the same reason the rest of this class knows nothing about
+	 * the server: the overlay lives behind USE_OVERLAY and reads the user's configuration out of the
+	 * global Settings, and depending on either here would drag the whole client in behind it - which is
+	 * precisely what lets TestVideoGrid compile this file on its own today. The owner, which already has
+	 * both, supplies the two callbacks; with none set there is simply no overlay to offer.
+	 */
+	void setOverlaySupport(OverlayItemFactory factory, OverlayItemRefresher refresher);
+
+	/// Whether the overlay is drawn over detached video. Set from the persisted preference by the owner,
+	/// never decided here.
+	void setVideoOverlayEnabled(bool enabled);
+	bool videoOverlayEnabled() const { return m_videoOverlayEnabled; }
+
+	/// Whether an overlay can be offered at all - i.e. whether setOverlaySupport() was given anything.
+	bool videoOverlayAvailable() const { return static_cast< bool >(m_overlayFactory); }
+
+	/// Creates the overlay item through the injected factory, or null if there is none. Called by the
+	/// detached window; public only because that window is a free class in the .cpp rather than a member.
+	QGraphicsItem *buildOverlayItem();
+
+	/// Brings an overlay item built above up to date for the given size, through the injected refresher.
+	void refreshOverlayItem(QGraphicsItem *item, const QSizeF &size);
 
 public slots:
 	/**
@@ -323,6 +370,10 @@ signals:
 	/// is what lets the owner also withdraw the now-pointless subscription, the same VideoSubscribe(false)
 	/// a normal unwatch sends, so the server stops relaying a stream nothing is looking at any more.
 	void streamWentStale(unsigned int senderSession, unsigned int streamID);
+
+	/// The detached window's overlay button was pressed. The owner decides what that means and persists
+	/// it, then calls setVideoOverlayEnabled() back - this class holds no preference of its own.
+	void videoOverlayToggleRequested();
 
 	/// A VP8 frame never arrived at all: ask the sender to re-send it (see MumbleProto::VideoNack).
 	/// Partially arrived frames are asked for by ServerHandler, which can see which fragments are missing.
@@ -669,6 +720,19 @@ protected:
 	/// it means anything right now.
 	std::uint64_t m_focusedSurfaceKey = 0;
 
+	/// Whether the focused tile is shown as an ordinary window - the pop-out - rather than filling the
+	/// monitor. One flag rather than a second window: the detached window reads whatever is focused
+	/// through its content provider, so the two presentations differ only in how it is shown. Reset by
+	/// clearFocusedTile(), so a later fullscreen press is never quietly windowed.
+	bool m_focusWindowed = false;
+
+	/// See setOverlaySupport(). Both null unless an owner supplied them.
+	OverlayItemFactory m_overlayFactory;
+	OverlayItemRefresher m_overlayRefresher;
+
+	/// See setVideoOverlayEnabled().
+	bool m_videoOverlayEnabled = false;
+
 	/// The always-on control strip drawn across the bottom of a tile. One real QWidget (not hand-painted)
 	/// so its buttons and slider get ordinary click/drag handling for free; positioned by relayoutControls()
 	/// to sit at the bottom of whatever cell rect the tile currently occupies, which changes every time the
@@ -677,6 +741,10 @@ protected:
 	struct TileControlBar {
 		QWidget *bar                  = nullptr;
 		QToolButton *fullscreenButton = nullptr;
+
+		/// Opens the tile in its own movable, resizable window instead of filling the monitor. Exists on
+		/// every tile, own or remote, alongside fullscreenButton.
+		QToolButton *popOutButton = nullptr;
 		QToolButton *watchButton      = nullptr;
 		/// On your own tiles: how many are watching, and who, on click.
 		QToolButton *viewersButton = nullptr;

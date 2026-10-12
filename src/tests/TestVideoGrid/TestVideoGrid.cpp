@@ -147,6 +147,7 @@ private slots:
 	void aRestartOfADifferentKindDoesNotResume();
 	void aRestartFromADepartedSenderDoesNotResume();
 	void fullscreenDoesNotCopyTheCanvasOnEveryTile();
+	void popOutAndFullscreenAreSeparatePresentations();
 };
 
 namespace {
@@ -1664,6 +1665,67 @@ void TestVideoGrid::aRestartFromADepartedSenderDoesNotResume() {
 	}
 
 	QVERIFY2(!resumed, "a departed sender's later stream resumed watching");
+}
+
+// A tile can be watched either filling the monitor or in its own movable window, and the two are one
+// window in two presentations rather than two windows - so the thing worth pinning down is that the state
+// machine keeps them apart: each button selects its own presentation, pressing the same one again lets go
+// of the tile, and letting go returns to the fullscreen default so a later fullscreen press is never
+// quietly windowed.
+void TestVideoGrid::popOutAndFullscreenAreSeparatePresentations() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::green);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
+	QVERIFY(!grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// Nothing focused, and so no presentation chosen.
+	QVERIFY(!grid.hasFocusedTile());
+	QVERIFY(!grid.focusWindowedForTesting());
+
+	// Fullscreen, as it always was: focused and not windowed.
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(grid.hasFocusedTile());
+	QVERIFY(!grid.focusWindowedForTesting());
+
+	// The window's own mode button switches presentation in place - the tile stays focused throughout,
+	// which is what makes it a switch rather than a close and reopen.
+	grid.setFocusWindowed(true);
+	QVERIFY(grid.hasFocusedTile());
+	QVERIFY(grid.focusWindowedForTesting());
+
+	grid.setFocusWindowed(false);
+	QVERIFY(grid.hasFocusedTile());
+	QVERIFY(!grid.focusWindowedForTesting());
+
+	// Letting go resets the presentation, so the next fullscreen press is fullscreen.
+	grid.setFocusWindowed(true);
+	QVERIFY(grid.focusWindowedForTesting());
+	grid.clearFocusedTile();
+	QVERIFY(!grid.hasFocusedTile());
+	QVERIFY2(!grid.focusWindowedForTesting(),
+			 "letting go of a popped-out tile left the windowed presentation set, so a later fullscreen "
+			 "press would open a window instead");
+
+	// And a presentation change with nothing focused must not focus anything by itself.
+	grid.setFocusWindowed(true);
+	QVERIFY(!grid.hasFocusedTile());
+
+	grid.clearFocusedTile();
+	QTest::qWait(50);
 }
 
 QTEST_MAIN(TestVideoGrid)
