@@ -86,29 +86,33 @@ message Ping {
 
 /**
  * One MTU-sized fragment of a video stream, whether that stream is a camera or a captured screen. This
- * is what rides the UDP socket, or the TCP UDPTunnel when UDP is unavailable.
+ * is what rides the UDP socket, on the video channel with a crypt state of its own (see VideoTransport.h).
+ * It is never tunnelled over TCP: a client whose connection has fallen back to the TCP UDPTunnel stops
+ * sending video, and the server does not relay it to anyone without a UDP path.
  *
- * It must fit, encrypted, inside Mumble::Protocol::MAX_UDP_PACKET_SIZE (1024 bytes): 4 bytes of OCB2
- * overhead plus 1 header byte plus this Protobuf. The sender must additionally leave headroom for the
- * server to stamp sender_session. Do not hardcode the resulting payload budget: it is whatever remains
- * after a worst-case encoding of every field below, and it shrinks whenever a field is added. Compute it
- * the way VideoFragmenter::maxPayloadPerFragment does, by measuring a message with every field at its
- * widest varint. At the time of writing that is 926 bytes, not the round number it is tempting to
- * assume.
- * MAX_UDP_PACKET_SIZE cannot be raised without breaking every deployed peer, so fragmentation is
- * mandatory.
+ * The whole datagram must fit inside Mumble::Protocol::MAX_VIDEO_DATAGRAM_SIZE (1200 bytes): an 8-byte
+ * header in the clear (channel byte, 32-bit sequence number, 3 bytes of the OCB2 tag), then, encrypted,
+ * 1 message type byte plus this Protobuf. The sender must additionally leave headroom for the server to
+ * stamp sender_session. Do not hardcode the resulting payload budget: it is whatever remains after a
+ * worst-case encoding of every field below, and it shrinks whenever a field is added. Compute it the way
+ * VideoFragmenter::maxPayloadPerFragment does, by measuring a message with every field at its widest
+ * varint. At the time of writing that is 1098 bytes, not the round number it is tempting to assume.
+ * Units larger than that are fragmented; at most MAX_VIDEO_FRAGMENTS_PER_UNIT fragments per unit.
  *
  * There are deliberately three levels of structure:
  *   frame_number         one complete update of the source
  *   unit_id              an independently decodable region within that frame: one tile for TiledImage,
- *                        always 0 for whole-frame codecs such as VP8
+ *                        0 for whole-frame codecs such as VP8 and VP9, the part's index for an H.264
+ *                        frame split across several units
  *   fragment_index/count the MTU chopping of a single unit
  * Losing a fragment therefore costs one unit rather than the whole frame.
  *
- * There is no FEC and no retransmission. A unit that does not reassemble within a short timeout is
- * dropped; its region stays stale until the sender resends it, either through a periodic refresh or in
- * response to VideoSubscribe.request_keyframe. Receivers must bound the number of in-flight units per
- * sender and must not allocate based on fragment_count, which is attacker-controlled.
+ * There is no FEC. Lost fragments are retransmitted on request: a receiver names the fragments a unit is
+ * still missing in a VideoNack (below), and the sender re-sends them from a short history. A unit that
+ * still does not reassemble within a short timeout is dropped; its region stays stale until the sender
+ * resends it, either through a periodic refresh or in response to VideoSubscribe.request_keyframe.
+ * Receivers must bound the number of in-flight units per sender and must not allocate based on
+ * fragment_count, which is attacker-controlled.
  *
  * The stream's codec, dimensions and source kind are not repeated here; they are carried reliably over
  * TCP in VideoState. A receiver drops any fragment whose (sender_session, stream_id) pair it has no

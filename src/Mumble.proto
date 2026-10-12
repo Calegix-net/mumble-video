@@ -790,8 +790,9 @@ message PluginDataTransmission {
 // client that joins mid-stream has to be told about streams already running. The server MUST therefore
 // replay the current VideoState for each streaming user, in the same way it replays UserState -- but
 // note that it must do so *after* ServerConfig, not during the ServerSync burst, because until the
-// client has seen ServerConfig it does not know the server supports video at all. No such replay exists
-// yet; this is a requirement on the implementation, not a description of one.
+// client has seen ServerConfig it does not know the server supports video at all.
+// Server::sendActiveVideoStreams does this at the end of authentication, after ServerSync and
+// ServerConfig, and skips streams the new client would not be allowed to subscribe to.
 //
 // Subscription is not authorisation. The server MUST reject a VideoSubscribe unless the subscriber
 // would be permitted to enter the streaming user's current channel, MUST re-evaluate that when either
@@ -811,7 +812,8 @@ message VideoState {
 		// alone, so it requires no new library on either side. Suitable for screen content; poor for
 		// camera content.
 		TiledImage = 1;
-		// Reserved for a future libvpx-based codec.
+		// libvpx, whole-frame. Cameras send VP8; screen shares send VP9 when no hardware H.264 encoder is
+		// available. AV1 is reserved.
 		VP8 = 2;
 		VP9 = 3;
 		AV1 = 4;
@@ -899,7 +901,8 @@ message VideoSubscribe {
 	// Ask the sender to emit a keyframe or full refresh as soon as possible. Set on initial subscribe
 	// and after unrecoverable loss. Relayed to the sender, rate-limited by the server: unbounded
 	// keyframe requests from many subscribers are an amplification attack on the sender's uplink. This
-	// is the only loss-recovery mechanism; there is no FEC and no retransmission.
+	// is the fallback for loss that MumbleUDP.VideoNack, which re-sends individual lost fragments, could
+	// not repair; there is no FEC.
 	optional bool request_keyframe = 4;
 
 	// Fraction of coded units the receiver failed to reassemble since its last report, in parts per

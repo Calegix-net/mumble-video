@@ -1142,8 +1142,8 @@ void Server::run() {
 							// Unreachable: UDPDecoder::decode returns false for Video, so getMessageType()
 							// never yields it. Asserted rather than logged, matching msgUDPTunnel, so that it
 							// fails loudly in a debug build if that ever stops being true instead of letting a
-							// remote peer write to the log. This is also where the video relay will be
-							// implemented.
+							// remote peer write to the log. Video arrives on its own channel and is relayed
+							// by relayVideo() above, before this decoder is reached.
 							assert(false);
 							break;
 						}
@@ -2247,14 +2247,9 @@ void Server::message(Mumble::Protocol::TCPMessageType type, const QByteArray &qb
 		if (m_tcpTunnelDecoder.decode(std::span< const Mumble::Protocol::byte >(
 				reinterpret_cast< const Mumble::Protocol::byte * >(qbaMsg.constData()),
 				static_cast< std::size_t >(qbaMsg.size())))) {
-			// Note: when video relaying is implemented, it has to be handled here as well as in the raw UDP
-			// path above. Forgetting this branch would silently disable video for every user whose media is
-			// tunnelled over TCP.
-			//
-			// It must use a *separate* VideoReassembler instance from the one the raw UDP path uses, for
-			// the same reason this code path has its own m_tcpTunnelDecoder: this function runs on the
-			// main thread holding only a read lock, so it is concurrent with Server::run(). Sharing one
-			// reassembler between the two would be a use-after-free on remote data, not just a data race.
+			// Note: only audio is handled here. Video is never tunnelled over TCP - a client that has fallen
+			// back to the tunnel stops sending it, and relayVideo() skips recipients without a UDP path - so
+			// anything else arriving in a UDPTunnel message is dropped.
 			if (m_tcpTunnelDecoder.getMessageType() == Mumble::Protocol::UDPMessageType::Audio) {
 				Mumble::Protocol::AudioData audioData = m_tcpTunnelDecoder.getAudioData();
 				// Allow all voice packets through by default.
