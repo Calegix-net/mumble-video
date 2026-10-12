@@ -187,6 +187,10 @@ modules:
       # Module builds have no network, so the rnnoise model the build normally fetches at configure
       # time is declared below as a source and FetchContent is pointed at the extracted copy.
       - -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=/run/build/mumble-video/rnnoise-model-src
+      # The version the client reports itself as. Left empty the build works it out from git, which it
+      # cannot see here (.git is skipped below) and so says "unknown-dev"; scripts/build-flatpak.sh
+      # fills this in from RELEASE_VERSION.
+      - -Drelease-version=
     sources:
       - type: dir
         path: ..

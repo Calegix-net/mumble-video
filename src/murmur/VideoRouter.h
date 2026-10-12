@@ -153,6 +153,28 @@ public:
 	 */
 	std::vector< StreamKey > staleStreams(std::int64_t nowMsec, std::int64_t timeoutMsec) const;
 
+	/// Shortest interval between two keyframe requests relayed to the sender of one stream.
+	static constexpr std::int64_t KEYFRAME_REQUEST_INTERVAL_MSEC = 1000;
+
+	/**
+	 * Whether a keyframe request from @p requester should be relayed to the stream's sender. Records it as
+	 * the stream's latest if so.
+	 *
+	 * Only a subscriber may ask. Call this after subscribe() has applied the same VideoSubscribe, so that a
+	 * request riding on a new subscription counts and one riding on an unsubscribe does not: a viewer that
+	 * has just stopped watching, or never could, would only be spending the sender's uplink on a picture
+	 * nobody is going to see.
+	 *
+	 * Limited per stream rather than per sender. A keyframe costs several normal frames, so a burst of new
+	 * subscribers to one stream should cost its sender one keyframe between them; but a sender's camera,
+	 * its screen and that screen's audio each need their own, and one of them being asked for must not
+	 * swallow a request for another.
+	 *
+	 * @param nowMsec Caller-supplied, as for noteRelayed().
+	 */
+	bool admitKeyframeRequest(std::uint32_t requester, std::uint32_t sender, std::uint32_t streamID,
+							  std::int64_t nowMsec);
+
 protected:
 	ReceiveAuthorizer m_mayReceive;
 	SendAuthorizer m_maySend;
@@ -170,6 +192,10 @@ protected:
 	// the existing, security-sensitive subscription logic above, not something worth touching every
 	// existing call site over.
 	std::map< StreamKey, std::int64_t > m_lastRelayedMsec;
+
+	// When each live stream last had a keyframe request admitted - see admitKeyframeRequest(). Forgotten
+	// with the stream, so a stream id that is ended and announced again starts with a clean slate.
+	std::map< StreamKey, std::int64_t > m_lastKeyframeRequestMsec;
 };
 
 #endif // MUMBLE_MURMUR_VIDEOROUTER_H_

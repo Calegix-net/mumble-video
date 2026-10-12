@@ -306,6 +306,22 @@ protected:
 	/// Stops camera, screen and screen-audio capture without announcing anything (there is no connection).
 	void stopAllSharesLocally();
 	void reannounceSharesAfterReconnect();
+	/// Whether the server this client is connected to speaks video, as its first ServerConfig said (see
+	/// Feature in Mumble.proto). False until that arrives, and between connections, so every video control
+	/// stays disabled until the server has said it supports video.
+	bool m_serverSpeaksVideo = false;
+	/// Whether this connection's first ServerConfig has been seen. Later ones are partial updates, whose
+	/// missing features field means "unchanged", never "disabled".
+	bool m_serverConfigSeen = false;
+	/// ServerConfig.max_video_bandwidth in bits per second, 0 while the server has set no limit.
+	unsigned int m_serverMaxVideoBandwidth = 0;
+	/// Settles, once the server has said, whether this connection has video and how its UDP is framed.
+	void setServerSpeaksVideo(bool speaks);
+	/// Share actions are enabled only where they can do something: to start one, on a server that speaks
+	/// video; to stop one, whenever it is running, connected or not.
+	void refreshShareActions();
+	/// A bitrate in kbit/s, lowered to the server's ServerConfig.max_video_bandwidth if it sets one.
+	unsigned int clampToServerVideoBandwidth(unsigned int kbps) const;
 	/// What this client was watching when its connection dropped, as (sender identity, source kind): a
 	/// reconnect gives everyone new session numbers, so the sender is remembered by certificate hash (or
 	/// name). A matching announcement before m_resumeWatchDeadlineMsec is watched again automatically.

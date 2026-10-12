@@ -3,6 +3,9 @@
 # (three numbers, which Windows Installer compares to decide upgrades) and the version shown to people
 # in Settings > Apps.
 #
+# With --release it prints only the second, which is also what every build reports itself as (CMake's
+# release-version: the About dialog, --version, the server log).
+#
 # A v* tag build is that release. Anything else - main, a pull request - is a development build after
 # the newest release, so it carries that release's number plus "-dev" and the commit. Its MSI version
 # equals the release's, and the MSI treats an equal version as an upgrade, so a development build and
@@ -11,9 +14,15 @@
 # Runs on the CI runner, not in a build container: it asks the remote for tags, which a shallow
 # checkout does not have.
 #
-# Usage: installer-version.sh
+# Usage: installer-version.sh [--release]
 
 set -euo pipefail
+
+mode="${1:-}"
+if [[ -n "${mode}" && "${mode}" != "--release" ]]; then
+    echo "usage: installer-version.sh [--release]" >&2
+    exit 2
+fi
 
 if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
     tag="${GITHUB_REF#refs/tags/}"
@@ -41,4 +50,8 @@ if (( major > 255 || minor > 255 || patch > 65535 )); then
     exit 1
 fi
 
-echo "${major}.${minor}.${patch} ${major}.${minor}.${patch}${suffix}"
+if [[ "${mode}" == "--release" ]]; then
+    echo "${major}.${minor}.${patch}${suffix}"
+else
+    echo "${major}.${minor}.${patch} ${major}.${minor}.${patch}${suffix}"
+fi

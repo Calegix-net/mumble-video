@@ -21,6 +21,28 @@ option optimize_for = SPEED;
 // Because the client sends Version and Authenticate back-to-back without waiting for the server's
 // Version, the client's advertisement is unconditional.
 //
+// FEATURE_VIDEO also decides how the UDP socket is framed. A peer speaking video puts a channel byte in
+// the clear in front of every encrypted datagram (MEDIA_CHANNEL_AUDIO or MEDIA_CHANNEL_VIDEO, see
+// VideoTransport.h), because audio and video hold separate crypt states and the receiver has to pick
+// one before it can decrypt anything. Every other Mumble sends the plain OCB2 datagram it always has.
+// The two cannot be told apart by looking: the first byte of a plain datagram is a rolling IV byte and
+// takes every value, 0x00 and 0x01 included. So the framing follows the advertisement, never the
+// packet. The server frames for a client exactly when that client's Authenticate listed FEATURE_VIDEO,
+// in both directions, and decides it before sending CryptSetup, so no datagram is ever exchanged under
+// the wrong framing. A stock client therefore keeps its voice on UDP; it is simply never told about
+// video. The client frames for the server exactly when the server's first ServerConfig listed
+// FEATURE_VIDEO. That arrives after CryptSetup, so until it does the client sends nothing on UDP and
+// tunnels its voice over TCP, which needs no framing; against a stock server it then uses plain UDP.
+//
+// One exception to never inferring from the version, for this fork's own releases v1.7.0 to v1.9.1.
+// They speak video - framed UDP, VideoState, VideoSubscribe - but predate the advertisement: they send
+// no features, and every one of them reports version 1.7.0 with the release string "1.7.0". A peer that
+// advertises no features and matches both exactly is treated as though it had advertised
+// FEATURE_VIDEO (MumbleProto::isLegacyVideoPeer). Upstream release builds carry a build number in the
+// patch field, so the only upstream build that matches is one compiled from source without one. It is
+// treated as speaking video, which costs it UDP - it falls back to the TCP tunnel, as every stock
+// client did against those releases - and nothing else.
+//
 // Ordering, which is easy to get wrong: the server sends ServerSync *before* ServerConfig (see
 // Server::sendUserList and the sync burst in murmur/Messages.cpp). ServerSync is what unblocks the
 // client's UI, so there is a window in which the user is fully connected and the server's feature set
@@ -59,23 +81,22 @@ enum Feature {
 	FEATURE_FILE_TRANSFER = 2;
 }
 
-// Neither feature above is implemented, and neither can be until Mumble's ACL system grows permissions
-// for them. This is recorded here because it is easy to miss: ChanACL::Perm currently ends at
-// Listen = 0x800 and has 0x1000, 0x2000, 0x4000 and 0x8000 free before the root-only block, which is
-// exactly enough for the four that are needed:
+// FEATURE_VIDEO is implemented, with its two permissions: ChanACL::ShareVideo (0x1000) to send
+// VideoState with active=true into a channel - separate from Speak, so an operator can allow talking
+// while forbidding screen sharing - and ChanACL::ReceiveVideo (0x2000) to subscribe to a stream in one.
 //
-//   ShareVideo    - send VideoState with active=true into a channel. Must be separate from Speak:
-//                   an operator has to be able to allow talking while forbidding screen sharing.
-//   ReceiveVideo  - subscribe to a stream in a channel.
+// FEATURE_FILE_TRANSFER is not, and cannot be until the ACL system grows the two permissions it needs.
+// 0x4000 and 0x8000 are still free before the root-only block, which is exactly enough:
+//
 //   UploadFile    - offer a file into a channel. Not equivalent to TextMessage: text is ephemeral,
 //                   files consume disk and persist.
 //   DownloadFile  - fetch a stored file, re-checked per request rather than implied by holding an id.
 //
 // Deletion should reuse the existing root-only ResetUserContent, which already exists to wipe a user's
 // comment and avatar. Adding a Perm is not a one-line change: it touches ChanACL::All, permName(),
-// whatsThis(), the client's ACL editor, the Ice and gRPC interfaces, and the ACL database schema. That
-// work is deliberately not part of this change, but shipping the wire format without it would all but
-// guarantee that the first implementation has no permission model at all.
+// whatsThis(), the client's ACL editor, the Ice and gRPC interfaces, and the ACL database schema.
+// Shipping file transfer without that work would all but guarantee that its first implementation has
+// no permission model at all.
 
 message Version {
 	// Legacy version number format.
@@ -114,6 +135,7 @@ message Authenticate {
 	// Optional protocol features this client implements. Sent unconditionally, as the client has not
 	// yet seen the server's Version at this point. Servers that do not know this field discard it,
 	// which is exactly the desired behaviour: they will never send the corresponding messages either.
+	// FEATURE_VIDEO here is also what makes the server frame this client's UDP for video; see Feature.
 	repeated Feature features = 7;
 }
 
@@ -699,17 +721,21 @@ message ServerConfig {
 	// Whether using Mumble's recording feature is allowed on the server
 	optional bool recording_allowed = 7;
 	// Optional protocol features this server implements and permits. A feature that is not listed here
-	// is disabled; there is deliberately no separate "enabled" boolean per feature. Absent for every
-	// pre-1.6 server, which is why the client must construct all video and file UI disabled and enable
+	// is disabled; there is deliberately no separate "enabled" boolean per feature. Absent from every
+	// stock Mumble server and from this fork's releases before it was sent (see Feature for how those
+	// are recognised), which is why the client must construct all video and file UI disabled and enable
 	// it only on receipt of this message.
 	repeated Feature features = 8;
 
-	// The following are only meaningful if FEATURE_VIDEO is advertised.
+	// The following are only meaningful if FEATURE_VIDEO is advertised. 0 means no limit.
 
-	// Maximum bandwidth in bits per second a single video stream may use. The sender clamps to this;
-	// the server enforces it independently.
+	// Maximum bandwidth in bits per second a single video stream may use. The sender clamps its encoder
+	// to this, and the server clamps VideoState.target_bandwidth to it. The server does not meter the
+	// datagrams themselves.
 	optional uint32 max_video_bandwidth = 9;
-	// Maximum number of users that may stream video simultaneously in one channel.
+	// Maximum number of users that may share video at once in one channel, counting a user once however
+	// many streams they hold. Enforced when a user starts sharing: a user already sharing may add
+	// streams, and moving into a channel is not refused because of it.
 	optional uint32 max_video_streams_per_channel = 10;
 
 	// The following are only meaningful if FEATURE_FILE_TRANSFER is advertised.
