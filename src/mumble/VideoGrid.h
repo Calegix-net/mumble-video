@@ -465,6 +465,18 @@ protected:
 		/// not that it is drawn twice - so it is excluded from the layout by occupiesCell().
 		bool poppedOut = false;
 
+		/// This surface replaced one that was being watched: the sender changed resolution or turned
+		/// their phone mid-share, and neither is expressible within one stream id, so the share restarts
+		/// under a new one. Set from the moment the replacement is announced until its first frame
+		/// decodes.
+		///
+		/// While it is set, whatever the viewer was watching the old stream id *with* is kept - the
+		/// fullscreen focus, or a picture-in-picture window, both carried over by
+		/// repointPresentations() - and the tile keeps its cell. Without it, a rotating phone drops the
+		/// viewer back into the grid several times a minute: the presentation was bound to a stream id
+		/// that no longer exists, so it was torn down as though the share had ended.
+		bool awaitingReplacementPicture = false;
+
 		/// Set once a stall refresh request has gone out for the current silence - see
 		/// checkForStaleStreams() - so the same stall does not re-trigger keyframeNeeded() on every poll
 		/// between the stall threshold and the much longer stale-drop one. Cleared alongside lastUnitMsec
@@ -694,9 +706,14 @@ protected:
 	 * and its first frame decoding, and reserving a cell for it would lay the grid out around an empty
 	 * square; unwatched is not that case, since a preview placeholder is shown there immediately. And a
 	 * popped-out surface has moved to its own window.
+	 *
+	 * A surface replacing a watched one is the exception to watched-but-blank: it is blank only until
+	 * the restarted share's first frame arrives, and it already has the previous stream's cell. Letting
+	 * it fall out and back in reflows the whole grid twice per rotation.
 	 */
 	static bool occupiesCell(const Surface &surface) {
-		return !surface.poppedOut && !(surface.watching && surface.canvas.isNull());
+		return !surface.poppedOut
+			   && !(surface.watching && surface.canvas.isNull() && !surface.awaitingReplacementPicture);
 	}
 
 	/// Number of distinct senders currently holding at least one surface, regardless of how many streams
@@ -816,10 +833,37 @@ protected:
 	QPoint m_lastMousePos;
 	QWidget *m_fullscreenWindow = nullptr;
 
-	/// The picture-in-picture windows, keyed by the surface each one shows. Raw pointers to parentless
-	/// top-level windows, so they are deleted explicitly - by popInSurface(), by whatever removes the
-	/// surface, and by this class's destructor.
-	std::map< std::uint64_t, QWidget * > m_pipWindows;
+	/// A picture-in-picture window, with the surface key its content callbacks read.
+	///
+	/// The key is held indirectly, through a pointer the callbacks share with this map, because it can
+	/// change underneath the window: a sender who turns their phone restarts the share under a new
+	/// stream id, and the window has to follow the stream rather than go down with the old id. Captured
+	/// by value instead, every callback would keep looking up a surface that no longer exists and the
+	/// window would paint black for as long as it stayed open.
+	struct PipWindow {
+		/// Parentless top-level window, so Qt's parent-child ownership does not own it and it is deleted
+		/// explicitly - by popInSurface(), by whatever removes the surface, and, for any still open,
+		/// by ~VideoGrid(), which has to because the callbacks below read the grid. A plain QWidget*
+		/// because FullscreenVideoWindow is declared in VideoGrid.cpp, not here.
+		QWidget *window = nullptr;
+		std::shared_ptr< std::uint64_t > key;
+	};
+
+	/// The picture-in-picture windows, keyed by the surface each one currently shows.
+	std::map< std::uint64_t, PipWindow > m_pipWindows;
+
+	/// Hands whatever is presenting oldKey over to newKey: the picture-in-picture window showing it, the
+	/// fullscreen focus, or both.
+	///
+	/// For the one case where a surface is replaced rather than ended - the same sender announcing
+	/// another stream of the same kind, which is how a resolution or orientation change reaches us.
+	/// Everything else about the old stream is deliberately dropped, decoder included; what the viewer
+	/// chose to watch, and where, is the part worth keeping.
+	void repointPresentations(std::uint64_t oldKey, std::uint64_t newKey);
+
+	/// popInSurface() by key, for the callback a window holds: its stream id can change while it is
+	/// open, so it cannot capture one.
+	void popInSurfaceByKey(std::uint64_t key);
 
 	/// Closes a picture-in-picture window and clears the surface's flag, without the relayout()
 	/// popInSurface() does - for the paths that are already going to lay out, or are tearing everything

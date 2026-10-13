@@ -149,6 +149,8 @@ private slots:
 	void fullscreenDoesNotCopyTheCanvasOnEveryTile();
 	void aPoppedOutTileLeavesTheGrid();
 	void severalTilesCanBePoppedOutAtOnce();
+	void aPoppedOutWindowFollowsARotatedStream();
+	void fullscreenFollowsARotatedStream();
 };
 
 namespace {
@@ -1771,6 +1773,135 @@ void TestVideoGrid::severalTilesCanBePoppedOutAtOnce() {
 	QTest::qWait(50);
 }
 
+// A sender who turns their phone cannot keep the same stream id: the frame shape changes, and none of
+// the codecs here can change shape mid-stream, so the share restarts under a new id - the Android client
+// announces the new one before withdrawing the old, exactly as this client's own resize path does.
+//
+// Both presentations are keyed by sender *and* stream id, so a turn used to close the picture-in-picture
+// window and drop the fullscreen focus as though the share had ended, putting the viewer back in front of
+// the main window every single time the phone moved. The presentation has to follow the stream.
+void TestVideoGrid::aPoppedOutWindowFollowsARotatedStream() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+
+	QImage landscape(48, 24, QImage::Format_RGB32);
+	landscape.fill(Qt::green);
+
+	QByteArray wide;
+	QBuffer wideBuffer(&wide);
+	wideBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(landscape.save(&wideBuffer, "JPEG", 90));
+	wideBuffer.close();
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
+	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, wide);
+	waitForAsyncDecode();
+
+	grid.popOutSurface(SENDER, 1);
+	QVERIFY(grid.isPoppedOut(SENDER, 1));
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+
+	// The phone turns.
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+
+	// Still exactly one window, now showing the new stream: not a closed one, and not a second one.
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+	QVERIFY(grid.isPoppedOut(SENDER, 2));
+	QVERIFY(!grid.isPoppedOut(SENDER, 1));
+
+	// And still out of the grid, rather than having reflowed back into it.
+	QCOMPARE(grid.senderCount(), 0);
+
+	// The old stream's end arriving afterwards concerns a surface that no longer exists, and must not
+	// take the window with it on its way past.
+	grid.removeSender(SENDER, 1);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+	QVERIFY(grid.isPoppedOut(SENDER, 2));
+
+	// A portrait frame on the new stream reaches the window that carried over.
+	QImage portrait(24, 48, QImage::Format_RGB32);
+	portrait.fill(Qt::blue);
+
+	QByteArray tall;
+	QBuffer tallBuffer(&tall);
+	tallBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(portrait.save(&tallBuffer, "JPEG", 90));
+	tallBuffer.close();
+
+	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, tall);
+	waitForAsyncDecode();
+
+	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(24, 48));
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(1));
+
+	// Closing it by hand still works, and the tile returns to the grid under its new id.
+	grid.popInSurface(SENDER, 2);
+	QCOMPARE(grid.poppedOutCountForTesting(), std::size_t(0));
+	QCOMPARE(grid.senderCount(), 1);
+
+	QTest::qWait(50);
+}
+
+// The same turn, watched fullscreen instead of in its own window. validateFocus() runs on every
+// relayout() and drops the focus when the focused key no longer resolves - or resolves to a surface with
+// no picture yet - which is both halves of what a replacement looks like for the moment before its first
+// frame decodes.
+void TestVideoGrid::fullscreenFollowsARotatedStream() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage landscape(48, 24, QImage::Format_RGB32);
+	landscape.fill(Qt::green);
+
+	QByteArray wide;
+	QBuffer wideBuffer(&wide);
+	wideBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(landscape.save(&wideBuffer, "JPEG", 90));
+	wideBuffer.close();
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
+	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, wide);
+	waitForAsyncDecode();
+	QCOMPARE(grid.senderCount(), 1);
+
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(grid.hasFocusedTile());
+
+	// The phone turns.
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+
+	// Without the handover, this is where the viewer was dropped back into the grid.
+	QVERIFY(grid.hasFocusedTile());
+
+	// The tile also keeps its cell across the gap rather than falling out of the layout and back in.
+	QCOMPARE(grid.senderCount(), 1);
+
+	QImage portrait(24, 48, QImage::Format_RGB32);
+	portrait.fill(Qt::blue);
+
+	QByteArray tall;
+	QBuffer tallBuffer(&tall);
+	tallBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(portrait.save(&tallBuffer, "JPEG", 90));
+	tallBuffer.close();
+
+	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, tall);
+	waitForAsyncDecode();
+
+	// And it is still fullscreen once the new stream is actually painting.
+	QVERIFY(grid.hasFocusedTile());
+	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(24, 48));
+
+	grid.clearFocusedTile();
+	QVERIFY(!grid.hasFocusedTile());
+
+	QTest::qWait(50);
+}
+
 QTEST_MAIN(TestVideoGrid)
 #include "TestVideoGrid.moc"
 
@@ -1798,7 +1929,12 @@ void TestVideoGrid::aRestartedStreamOfTheSameKindReplacesTheOld() {
 	announce(grid, SENDER, 2, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Camera);
 
 	QVERIFY2(grid.surfaceFor(SENDER, 1).isNull(), "the stale camera surface survived a camera restart");
-	QCOMPARE(grid.senderCount(), 0);
+
+	// One tile, not none: the replacement holds the cell its predecessor held until its own first frame
+	// arrives. This asserted 0 for as long as a watched-but-blank surface held no cell at all, which
+	// meant every restart reflowed the whole grid out and back - and a phone being turned restarts the
+	// share on every turn. See Surface::awaitingReplacementPicture.
+	QCOMPARE(grid.senderCount(), 1);
 
 	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, encoded);
 	waitForAsyncDecode();

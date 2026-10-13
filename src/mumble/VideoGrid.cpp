@@ -901,6 +901,26 @@ QImage VideoGrid::decodeUnit(Surface &surface, const QByteArray &payload) {
 }
 
 VideoGrid::~VideoGrid() {
+	// Picture-in-picture windows are parentless top-level windows, so Qt's parent-child ownership never
+	// reaches them and nothing else is going to close them. Their content callbacks read this grid, so
+	// one left open outlives what it reads from - and it keeps its own repaint timer, which calls that
+	// callback a few times a second. The result is a window painting from freed memory for as long as
+	// anything still pumps an event loop, which on the way out of the client is the rest of shutdown.
+	//
+	// Deleted outright rather than through destroyPipWindow(), whose deleteLater() is right for every
+	// other caller - they are reached from a window's own close handler - but here would leave exactly
+	// the window this is closing alive until an event loop that may never run again.
+	while (!m_pipWindows.empty()) {
+		const auto it   = m_pipWindows.begin();
+		QWidget *window = it->second.window;
+
+		// Erased before the delete, so nothing reached from the window's teardown can find it here.
+		m_pipWindows.erase(it);
+
+		window->hide();
+		delete window;
+	}
+
 	// The decode thread may be working on a frame; it finishes that one, and its result, queued to this
 	// object, is discarded with it.
 	if (m_decodeThread) {
@@ -1078,6 +1098,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 
 	// Stream ids of replaced surfaces this client was still subscribed to - see below.
 	std::vector< unsigned int > replacedWatchedStreams;
+	// And their keys, to hand any presentation of them over to the replacement.
+	std::vector< std::uint64_t > replacedKeys;
 
 	if (isNewSurface) {
 		bool senderAlreadyPresent = false;
@@ -1091,6 +1113,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 				if (it->second.watching) {
 					resumeWatching = true;
 					replacedWatchedStreams.push_back(it->second.streamID);
+					replacedKeys.push_back(it->first);
 				}
 
 				it                   = m_surfaces.erase(it);
@@ -1167,6 +1190,20 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	surface.codec         = codec;
 	surface.sourceKind    = sourceKind;
 
+	if (isNewSurface && resumeWatching && !replacedKeys.empty()) {
+		// The viewer was watching the stream this one replaces, and may well have been watching it
+		// somewhere other than the grid. Both presentations are bound to a surface key, and a key is a
+		// sender and a stream id - so a sender who turns their phone, which forces a new stream id
+		// every time they turn it, would have the fullscreen focus dropped and the picture-in-picture
+		// window closed on each turn, putting the viewer back in front of the main window. The
+		// presentation follows the stream instead.
+		surface.awaitingReplacementPicture = true;
+
+		for (const std::uint64_t oldKey : replacedKeys) {
+			repointPresentations(oldKey, key);
+		}
+	}
+
 	if (isNewSurface) {
 		// The watch button must be available before the first frame: an unwatched stream receives none.
 		emit senderCountChanged(tileCount());
@@ -1205,6 +1242,9 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 		it->second.vp8RequestedThrough = 0;
 		it->second.hasDecodedFrame = false;
 		it->second.lastFrameNumber = 0;
+		// Nothing is going to arrive to end the transition, and the surface holds a cell as an ordinary
+		// unwatched placeholder from here on.
+		it->second.awaitingReplacementPicture = false;
 		++it->second.decodeEpoch;
 		resetPlayout(it->second);
 	}
@@ -1842,6 +1882,11 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 	// than a tile or two, without the sender who never triggers this path ever seeing it. update() alone
 	// is enough for the picture itself: Qt coalesces any number of update() calls made before the next
 	// paint into one repaint, unlike relayoutControls()'s immediate, uncoalesced widget work.
+
+	// Whatever this surface replaced has been superseded by a frame of its own, so it is no longer in
+	// the transition repointPresentations() held its presentation open for.
+	surface.awaitingReplacementPicture = false;
+
 	if (wasBlank) {
 		emit senderCountChanged(tileCount());
 		relayout();
@@ -2704,21 +2749,25 @@ void VideoGrid::popOutSurface(unsigned int senderSession, unsigned int streamID)
 		setWatching(senderSession, streamID, true);
 	}
 
+	// Shared with the window's callbacks rather than captured by value - see PipWindow. The stream id
+	// inside it changes if the sender changes resolution or turns their phone, and the window follows.
+	auto keyHolder = std::make_shared< std::uint64_t >(key);
+
 	auto *window = new FullscreenVideoWindow(
 		this,
 		// Bound to this one surface rather than to whatever is focused, which is what lets several of
 		// these exist at once showing different streams.
-		[this, key](QImage &image, QString &label) {
-			const auto it = m_surfaces.find(key);
+		[this, keyHolder](QImage &image, QString &label) {
+			const auto it = m_surfaces.find(*keyHolder);
 
 			if (it != m_surfaces.end()) {
 				image = it->second.canvas;
 				label = labelForSurface(it->second);
 			}
 		},
-		[this, key]() {
+		[this, keyHolder]() {
 			FullscreenVideoWindow::VolumeState state;
-			const auto it = m_surfaces.find(key);
+			const auto it = m_surfaces.find(*keyHolder);
 
 			if (it == m_surfaces.end() || it->second.sourceKind == MumbleProto::VideoState_SourceKind_Camera) {
 				return state;
@@ -2731,16 +2780,16 @@ void VideoGrid::popOutSurface(unsigned int senderSession, unsigned int streamID)
 								   : static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
 			return state;
 		},
-		[this, key](int percent) {
-			const auto it = m_surfaces.find(key);
+		[this, keyHolder](int percent) {
+			const auto it = m_surfaces.find(*keyHolder);
 
 			if (it != m_surfaces.end()) {
 				setShareVolumePercent(it->second.senderSession, percent);
 			}
 		},
-		true, [this, senderSession, streamID]() { popInSurface(senderSession, streamID); });
+		true, [this, keyHolder]() { popInSurfaceByKey(*keyHolder); });
 
-	m_pipWindows[key]          = window;
+	m_pipWindows[key]           = PipWindow{ window, keyHolder };
 	surfaceIt->second.poppedOut = true;
 
 	window->contentReplaced();
@@ -2760,8 +2809,8 @@ void VideoGrid::destroyPipWindow(std::uint64_t key) {
 
 	// deleteLater() rather than delete: this is reached from the window's own close handler, by way of its
 	// closeEvent, so the window is still inside its own event delivery.
-	windowIt->second->hide();
-	windowIt->second->deleteLater();
+	windowIt->second.window->hide();
+	windowIt->second.window->deleteLater();
 	m_pipWindows.erase(windowIt);
 
 	const auto surfaceIt = m_surfaces.find(key);
@@ -2772,8 +2821,10 @@ void VideoGrid::destroyPipWindow(std::uint64_t key) {
 }
 
 void VideoGrid::popInSurface(unsigned int senderSession, unsigned int streamID) {
-	const std::uint64_t key = surfaceKey(senderSession, streamID);
+	popInSurfaceByKey(surfaceKey(senderSession, streamID));
+}
 
+void VideoGrid::popInSurfaceByKey(std::uint64_t key) {
 	if (!m_pipWindows.count(key)) {
 		return;
 	}
@@ -2782,6 +2833,51 @@ void VideoGrid::popInSurface(unsigned int senderSession, unsigned int streamID) 
 
 	emit senderCountChanged(tileCount());
 	relayout();
+}
+
+void VideoGrid::repointPresentations(std::uint64_t oldKey, std::uint64_t newKey) {
+	if (oldKey == newKey) {
+		return;
+	}
+
+	const auto windowIt = m_pipWindows.find(oldKey);
+
+	if (windowIt != m_pipWindows.end()) {
+		const PipWindow carried = windowIt->second;
+
+		m_pipWindows.erase(windowIt);
+
+		// Cannot happen - the new key belongs to a surface created moments ago, which has never been
+		// popped out - but a window dropped from this map is a parentless top-level window nothing will
+		// ever close, so it is worth not assuming.
+		destroyPipWindow(newKey);
+
+		// This is the part that makes the window show the new stream: its content callbacks read the
+		// key through this pointer on every repaint, so they now resolve the replacement surface
+		// instead of looking up one that no longer exists.
+		*carried.key         = newKey;
+		m_pipWindows[newKey] = carried;
+
+		const auto surfaceIt = m_surfaces.find(newKey);
+
+		if (surfaceIt != m_surfaces.end()) {
+			// The replacement has moved out of the grid along with the window showing it.
+			surfaceIt->second.poppedOut = true;
+		}
+
+		// Nothing of the old picture is still valid - a turned phone is a different shape - and there
+		// is no patch of the new one yet, so the window is told to repaint whole rather than handed a
+		// rectangle.
+		static_cast< FullscreenVideoWindow * >(carried.window)->contentReplaced();
+	}
+
+	if (m_focus == FocusTarget::Surface && m_focusedSurfaceKey == oldKey) {
+		m_focusedSurfaceKey = newKey;
+
+		if (m_fullscreenWindow) {
+			static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
+		}
+	}
 }
 
 void VideoGrid::setOwnViewers(bool screen, const std::vector< Viewer > &viewers) {
@@ -2862,7 +2958,7 @@ void VideoGrid::notifyPipContentChanged(std::uint64_t key, const QRect &changed)
 		return;
 	}
 
-	static_cast< FullscreenVideoWindow * >(it->second)->contentChanged(changed);
+	static_cast< FullscreenVideoWindow * >(it->second.window)->contentChanged(changed);
 }
 
 void VideoGrid::notifyFullscreenContentChanged(const QRect &changed) {
@@ -2922,7 +3018,11 @@ void VideoGrid::validateFocus() {
 	} else if (m_focus == FocusTarget::Surface) {
 		const auto it = m_surfaces.find(m_focusedSurfaceKey);
 
-		if (it == m_surfaces.end() || it->second.canvas.isNull() || !it->second.watching) {
+		// A surface still waiting for its replacement's first frame keeps the focus: it is blank for a
+		// moment, not gone, and dropping focus here is what sent a viewer watching a rotating phone
+		// fullscreen back to the grid.
+		if (it == m_surfaces.end() || !it->second.watching
+			|| (it->second.canvas.isNull() && !it->second.awaitingReplacementPicture)) {
 			m_focus = FocusTarget::None;
 		}
 	}
