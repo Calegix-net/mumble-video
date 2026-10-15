@@ -4,10 +4,13 @@
 // Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
 #include "MumbleProtocol.h"
-#include "PacketDataStream.h"
+#include "ByteSwap.h"
+#include "CoreLog.h"
 #include "VolumeAdjustment.h"
 
-#include <QtEndian>
+#ifdef MUMBLE_CORE_LEGACY_UDP
+#	include "PacketDataStream.h"
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -72,7 +75,7 @@ namespace Protocol {
 	}
 
 
-	std::size_t getProtobufSize(const ::google::protobuf::Message &message) {
+	std::size_t getProtobufSize(const ::google::protobuf::MessageLite &message) {
 #if GOOGLE_PROTOBUF_VERSION >= 3002000
 		// ByteSizeLong() was introduced in Protobuf v3.2 as a replacement for ByteSize()
 		return message.ByteSizeLong();
@@ -81,7 +84,7 @@ namespace Protocol {
 #endif
 	}
 
-	[[nodiscard]] std::optional< std::size_t > encodeProtobuf(const ::google::protobuf::Message &message,
+	[[nodiscard]] std::optional< std::size_t > encodeProtobuf(const ::google::protobuf::MessageLite &message,
 															  std::vector< byte > &buffer, std::size_t offset,
 															  std::size_t maxAllowedSize, bool useCachedSize) {
 		// Serialize to buffer
@@ -96,15 +99,15 @@ namespace Protocol {
 		if (serializedSize + offset > maxAllowedSize) {
 			// In non-Debug builds above assertion will not fire, thus we have to explicitly catch
 			// this issue here
-			qWarning("Protobuf package size (%zu) would exceed UDP packet size limit (%zu)", serializedSize,
-					 maxAllowedSize);
+			Mumble::Core::logWarning("Protobuf package size (%zu) would exceed UDP packet size limit (%zu)",
+									 serializedSize, maxAllowedSize);
 
 			return std::nullopt;
 		}
 		std::vector< byte > temp(serializedSize);
 		bool success = message.SerializePartialToArray(temp.data(), static_cast< int >(serializedSize));
 		if (!success) {
-			qWarning("Failed to serialize protobuf message");
+			Mumble::Core::logWarning("Failed to serialize protobuf message");
 			return std::nullopt;
 		}
 		buffer.resize(offset + serializedSize);
@@ -170,6 +173,7 @@ namespace Protocol {
 	}
 
 	template< Role role > void UDPAudioEncoder< role >::prepareAudioPacket_legacy(const AudioData &data) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		m_byteBuffer.resize(MAX_UDP_PACKET_SIZE);
 
 		byte type = 0;
@@ -228,15 +232,21 @@ namespace Protocol {
 		m_staticPartSize = stream.size() + 1;
 
 		if (!stream.isValid()) {
-			qWarning("MumbleProtocol: Encoding legacy packet (fixed part) overflowed buffer size");
+			Mumble::Core::logWarning("MumbleProtocol: Encoding legacy packet (fixed part) overflowed buffer size");
 			m_staticPartSize = 0;
 		}
 
 		m_positionalAudioSize = m_staticPartSize;
+#else
+		m_staticPartSize      = 0;
+		m_positionalAudioSize = 0;
+		(void) data;
+#endif
 	}
 
 	template< Role role >
 	std::span< const byte > UDPAudioEncoder< role >::updateAudioPacket_legacy(const AudioData &data) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		m_byteBuffer.resize(MAX_UDP_PACKET_SIZE);
 
 		// The 5 least significant bits are where the target is supposed to be encoded
@@ -251,10 +261,15 @@ namespace Protocol {
 		std::size_t packetSize = data.containsPositionalData ? m_positionalAudioSize : m_staticPartSize;
 
 		return std::span< byte >(m_byteBuffer.data(), packetSize);
+#else
+		(void) data;
+		return {};
+#endif
 	}
 
 
 	template< Role role > void UDPAudioEncoder< role >::addPositionalData_legacy(const AudioData &data) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		if (data.containsPositionalData) {
 			assert(m_byteBuffer.size() >= m_staticPartSize);
 			PacketDataStream stream(m_byteBuffer.data() + m_staticPartSize,
@@ -269,10 +284,14 @@ namespace Protocol {
 			m_positionalAudioSize = stream.size() + m_staticPartSize;
 
 			if (!stream.isValid()) {
-				qWarning("MumbleProtocol: Adding positional data to legacy packet overflowed buffer size");
+				Mumble::Core::logWarning(
+					"MumbleProtocol: Adding positional data to legacy packet overflowed buffer size");
 				m_positionalAudioSize = m_staticPartSize;
 			}
 		}
+#else
+		(void) data;
+#endif
 	}
 
 	template< Role role > void UDPAudioEncoder< role >::prepareAudioPacket_protobuf(const AudioData &data) {
@@ -303,7 +322,7 @@ namespace Protocol {
 		std::optional< std::size_t > maybeSize =
 			encodeProtobuf(m_audioMessage, m_byteBuffer, 1, MAX_UDP_PACKET_SIZE, false);
 		if (!maybeSize) {
-			qWarning("MumbleProtocol: Failed to encode fixed part of audio packet");
+			Mumble::Core::logWarning("MumbleProtocol: Failed to encode fixed part of audio packet");
 			return; // Abort sending this packet
 		}
 		m_staticPartSize      = maybeSize.value() + 1;
@@ -314,9 +333,10 @@ namespace Protocol {
 	std::size_t writeSnippet(std::span< const byte > source, std::vector< byte > &destination, std::size_t offset,
 							 std::size_t maxPacketSize) {
 		if (maxPacketSize < offset + source.size()) {
-			qWarning("MumbleProtocol: Buffer overflow while writing snippet. Max buffer size is %zu and required size "
-					 "is %zu",
-					 maxPacketSize, offset + source.size());
+			Mumble::Core::logWarning(
+				"MumbleProtocol: Buffer overflow while writing snippet. Max buffer size is %zu and required size "
+				"is %zu",
+				maxPacketSize, offset + source.size());
 			return 0;
 		}
 		destination.resize(offset + source.size());
@@ -332,7 +352,7 @@ namespace Protocol {
 
 		// We assume that something was encoded before
 		if (offset == 0) {
-			qWarning("MumbleProtocol: Can't update a packet that hasn't been prepared yet");
+			Mumble::Core::logWarning("MumbleProtocol: Can't update a packet that hasn't been prepared yet");
 			return {};
 		}
 
@@ -344,7 +364,7 @@ namespace Protocol {
 				std::optional< std::size_t > maybeSize =
 					encodeProtobuf(m_audioMessage, m_byteBuffer, offset, MAX_UDP_PACKET_SIZE, false);
 				if (!maybeSize) {
-					qWarning("MumbleProtocol: Failed to encode Client audio message");
+					Mumble::Core::logWarning("MumbleProtocol: Failed to encode Client audio message");
 					return {}; // abort update
 				}
 				offset += maybeSize.value();
@@ -364,7 +384,7 @@ namespace Protocol {
 						std::optional< std::size_t > maybeSize =
 							encodeProtobuf(m_audioMessage, m_byteBuffer, offset, MAX_UDP_PACKET_SIZE, false);
 						if (!maybeSize) {
-							qWarning("MumbleProtocol: Failed to encode Client audio message");
+							Mumble::Core::logWarning("MumbleProtocol: Failed to encode Client audio message");
 							return {}; // abort update
 						}
 						offset += maybeSize.value();
@@ -383,7 +403,7 @@ namespace Protocol {
 					std::optional< std::size_t > maybeSize =
 						encodeProtobuf(m_audioMessage, m_byteBuffer, offset, MAX_UDP_PACKET_SIZE, false);
 					if (!maybeSize) {
-						qWarning("MumbleProtocol: Failed to encode Client audio message");
+						Mumble::Core::logWarning("MumbleProtocol: Failed to encode Client audio message");
 						return {}; // abort update
 					}
 					offset += maybeSize.value();
@@ -393,7 +413,7 @@ namespace Protocol {
 			}
 		}
 
-		qWarning("MumbleProtocol: Reached theoretically unreachable code");
+		Mumble::Core::logWarning("MumbleProtocol: Reached theoretically unreachable code");
 		return {};
 	}
 
@@ -430,7 +450,7 @@ namespace Protocol {
 				encodeProtobuf(m_audioMessage, m_preEncodedContext[current], 0, sizeof(std::uint32_t) + 2, false);
 			assert(maybeSize.has_value());
 			if (!maybeSize) {
-				qWarning("Failed to pre-encode audio context %d", current);
+				Mumble::Core::logWarning("Failed to pre-encode audio context %d", current);
 				continue; // or abort, depending on your design
 			}
 		}
@@ -455,7 +475,7 @@ namespace Protocol {
 				sizeof(float) + 1, false);
 			assert(maybeSize.has_value());
 			if (!maybeSize) {
-				qWarning("Failed to pre-encode volume adjustment %d", dbAdjustment);
+				Mumble::Core::logWarning("Failed to pre-encode volume adjustment %d", dbAdjustment);
 				continue; // or abort
 			}
 		}
@@ -506,6 +526,7 @@ namespace Protocol {
 
 	template< Role role >
 	std::span< const byte > UDPPingEncoder< role >::encodePingPacket_legacy(const PingData &data) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		m_byteBuffer.clear();
 
 		std::size_t actualSize = 0;
@@ -536,11 +557,11 @@ namespace Protocol {
 			if (writeAdditionalInformation) {
 				std::uint32_t *dataArray = reinterpret_cast< std::uint32_t * >(m_byteBuffer.data());
 				// Legacy pings expect the version to be encoded using the old (legacy) format
-				dataArray[0] = qToBigEndian(Version::toLegacyVersion(data.serverVersion));
+				dataArray[0] = Mumble::toBigEndian32(Version::toLegacyVersion(data.serverVersion));
 				// dataArray[1] and dataArray[2] together hold the timestamp (written below)
-				dataArray[3] = qToBigEndian(data.userCount);
-				dataArray[4] = qToBigEndian(data.maxUserCount);
-				dataArray[5] = qToBigEndian(data.maxBandwidthPerUser);
+				dataArray[3] = Mumble::toBigEndian32(data.userCount);
+				dataArray[4] = Mumble::toBigEndian32(data.maxUserCount);
+				dataArray[5] = Mumble::toBigEndian32(data.maxBandwidthPerUser);
 			}
 
 			// Leave four empty bytes up front and then write the uint64 timestamp to the remaining 8 bytes
@@ -557,13 +578,17 @@ namespace Protocol {
 
 			PacketDataStream stream(m_byteBuffer.data() + 1, MAX_SIZE - 1);
 
-			stream << static_cast< quint64 >(data.timestamp);
+			stream << static_cast< std::uint64_t >(data.timestamp);
 
 			// +1 as the stream doesn't know about the header byte
 			actualSize = stream.size() + 1;
 		}
 
 		return std::span< byte >(m_byteBuffer.data(), actualSize);
+#else
+		(void) data;
+		return {};
+#endif
 	}
 
 	template< Role role >
@@ -585,7 +610,7 @@ namespace Protocol {
 		std::optional< std::size_t > maybeSize =
 			encodeProtobuf(m_pingMessage, m_byteBuffer, 1, MAX_UDP_PACKET_SIZE, false);
 		if (!maybeSize) {
-			qWarning("Failed to encode ping message");
+			Mumble::Core::logWarning("Failed to encode ping message");
 			return {}; // Return an empty span to indicate failure
 		}
 
@@ -704,6 +729,7 @@ namespace Protocol {
 	}
 
 	template< Role role > bool UDPDecoder< role >::decodePing_legacy(const std::span< const byte > data) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		m_messageType = UDPMessageType::Ping;
 		m_pingData    = {};
 
@@ -716,7 +742,7 @@ namespace Protocol {
 		if (data.size() <= sizeof(std::uint64_t) + 1) {
 			// Regular connectivity ping (contains a single varint which may be up to a full 64bit number plus
 			// one header byte
-			quint64 timestamp;
+			std::uint64_t timestamp;
 			stream >> timestamp;
 
 			m_pingData.timestamp = timestamp;
@@ -733,14 +759,14 @@ namespace Protocol {
 					const std::uint32_t *dataArray = reinterpret_cast< const std::uint32_t * >(data.data());
 
 					// Legacy pings only support the version to be encoded using the old (legacy) format
-					m_pingData.serverVersion = Version::fromLegacyVersion(qFromBigEndian(dataArray[0]));
+					m_pingData.serverVersion = Version::fromLegacyVersion(Mumble::fromBigEndian32(dataArray[0]));
 
 					// Virtual array entries 1 and 2 are actually a single uint64. Note that the timestamp is
 					// whatever the client sent to the server and thus it does not require an endian-transformation
 					m_pingData.timestamp           = *reinterpret_cast< const std::uint64_t * >(&dataArray[1]);
-					m_pingData.userCount           = qFromBigEndian(dataArray[3]);
-					m_pingData.maxUserCount        = qFromBigEndian(dataArray[4]);
-					m_pingData.maxBandwidthPerUser = qFromBigEndian(dataArray[5]);
+					m_pingData.userCount           = Mumble::fromBigEndian32(dataArray[3]);
+					m_pingData.maxUserCount        = Mumble::fromBigEndian32(dataArray[4]);
+					m_pingData.maxBandwidthPerUser = Mumble::fromBigEndian32(dataArray[5]);
 
 					return true;
 				} else {
@@ -773,6 +799,10 @@ namespace Protocol {
 
 		// This code should never be reached
 		return false;
+#else
+		(void) data;
+		return false;
+#endif
 	}
 
 	template< Role role > bool UDPDecoder< role >::decodePing_protobuf(const std::span< const byte > data) {
@@ -808,6 +838,7 @@ namespace Protocol {
 
 	template< Role role >
 	bool UDPDecoder< role >::decodeAudio_legacy(const std::span< const byte > data, AudioCodec codec) {
+#ifdef MUMBLE_CORE_LEGACY_UDP
 		m_messageType = UDPMessageType::Audio;
 		m_audioData   = {};
 
@@ -830,7 +861,7 @@ namespace Protocol {
 			stream >> m_audioData.senderSession;
 		}
 
-		quint64 helper;
+		std::uint64_t helper;
 		stream >> helper;
 		m_audioData.frameNumber = helper;
 
@@ -899,6 +930,11 @@ namespace Protocol {
 		// Legacy audio packets don't contain volume adjustments
 
 		return true;
+#else
+		(void) data;
+		(void) codec;
+		return false;
+#endif
 	}
 
 	template< Role role > bool UDPDecoder< role >::decodeAudio_protobuf(const std::span< const byte > data) {
@@ -961,7 +997,9 @@ namespace Protocol {
 		}
 	}
 
-	bool operator!=(const AudioData &lhs, const AudioData &rhs) { return !(lhs == rhs); }
+	bool operator!=(const AudioData &lhs, const AudioData &rhs) {
+		return !(lhs == rhs);
+	}
 
 	bool operator==(const PingData &lhs, const PingData &rhs) {
 		return lhs.timestamp == rhs.timestamp && lhs.requestAdditionalInformation == rhs.requestAdditionalInformation
@@ -970,7 +1008,9 @@ namespace Protocol {
 			   && lhs.maxUserCount == rhs.maxUserCount && lhs.maxBandwidthPerUser == rhs.maxBandwidthPerUser;
 	}
 
-	bool operator!=(const PingData &lhs, const PingData &rhs) { return !(lhs == rhs); }
+	bool operator!=(const PingData &lhs, const PingData &rhs) {
+		return !(lhs == rhs);
+	}
 
 	// Explicit template instantiation of our classes. We require once instantiation for every available Role.
 #define ALL_CLASSES                \

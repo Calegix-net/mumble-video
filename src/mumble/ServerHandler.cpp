@@ -16,6 +16,7 @@
 #include "AudioOutput.h"
 #include "Cert.h"
 #include "Connection.h"
+#include "ControlFramer.h"
 #include "Database.h"
 #include "HostAddress.h"
 #include "MainWindow.h"
@@ -270,36 +271,35 @@ void ServerHandler::udpReady() {
 		if (!connection->csCrypt->isValid())
 			continue;
 
-		if (buflen < 5)
-			continue;
-
 		// Media datagrams from a server that speaks video carry their channel in the clear, because audio
 		// and video hold separate crypt states and neither can be decrypted with the other's. Any other
 		// server sends plain audio datagrams. See Feature in Mumble.proto.
-		const unsigned int channelBytes = m_mediaFraming == MediaFraming::ChannelByte ? 1 : 0;
+		m_mediaDemux.setFraming(m_mediaFraming == MediaFraming::ChannelByte
+									? Mumble::Protocol::MediaDemux::Framing::ChannelByte
+									: Mumble::Protocol::MediaDemux::Framing::Plain);
+		const Mumble::Protocol::MediaDatagram media = m_mediaDemux.classify(std::span< const Mumble::Protocol::byte >(
+			reinterpret_cast< const Mumble::Protocol::byte * >(encrypted), buflen));
 
-		if (channelBytes > 0
-			&& static_cast< Mumble::Protocol::byte >(encrypted[0]) == Mumble::Protocol::MEDIA_CHANNEL_VIDEO) {
-			handleVideoDatagram(reinterpret_cast< const Mumble::Protocol::byte * >(encrypted), buflen);
+		if (media.channel == Mumble::Protocol::MediaChannel::Video) {
+			handleVideoDatagram(media.datagram);
 
 			continue;
 		}
 
-		if (channelBytes > 0
-			&& static_cast< Mumble::Protocol::byte >(encrypted[0]) != Mumble::Protocol::MEDIA_CHANNEL_AUDIO) {
+		if (media.channel != Mumble::Protocol::MediaChannel::Audio) {
 			continue;
 		}
 
 		// Past the channel byte, if there is one, is what the audio crypt state expects.
-		const char *audio = encrypted + channelBytes;
-		buflen -= channelBytes;
+		const unsigned char *audio = media.payload.data();
+		buflen                     = static_cast< unsigned int >(media.payload.size());
 
 		std::span< Mumble::Protocol::byte > buffer = m_udpDecoder.getBuffer();
 
 		// 4 bytes is the overhead of the encryption
 		assert(buffer.size() >= buflen - 4);
 
-		if (!connection->csCrypt->decrypt(reinterpret_cast< const unsigned char * >(audio), buffer.data(), buflen)) {
+		if (!connection->csCrypt->decrypt(audio, buffer.data(), buflen)) {
 			if (connection->csCrypt->tLastGood.elapsed() > std::chrono::seconds(5)) {
 				if (connection->csCrypt->tLastRequest.elapsed() > std::chrono::seconds(5)) {
 					connection->csCrypt->tLastRequest.restart();
@@ -384,12 +384,12 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 	if (!force && (NetworkConfig::TcpModeEnabled() || !bUdp || framing == MediaFraming::Undecided)) {
 		QByteArray qba;
 
-		qba.resize(len + 6);
+		qba.resize(len + static_cast< int >(Mumble::Protocol::CONTROL_HEADER_SIZE));
 		unsigned char *uc = reinterpret_cast< unsigned char * >(qba.data());
-		*reinterpret_cast< quint16 * >(&uc[0]) =
-			qToBigEndian(static_cast< quint16 >(Mumble::Protocol::TCPMessageType::UDPTunnel));
-		*reinterpret_cast< quint32 * >(&uc[2]) = qToBigEndian(static_cast< quint32 >(len));
-		memcpy(uc + 6, data, static_cast< std::size_t >(len));
+		Mumble::Protocol::writeControlHeader(uc,
+											 static_cast< std::uint16_t >(Mumble::Protocol::TCPMessageType::UDPTunnel),
+											 static_cast< std::uint32_t >(len));
+		memcpy(uc + Mumble::Protocol::CONTROL_HEADER_SIZE, data, static_cast< std::size_t >(len));
 
 		QApplication::postEvent(this,
 								new ServerHandlerMessageEvent(qba, Mumble::Protocol::TCPMessageType::UDPTunnel, true));
@@ -571,9 +571,8 @@ void ServerHandler::resendVideoUnits(const MumbleUDP::VideoNack &request) {
 }
 
 void ServerHandler::sendVideoNack(const MumbleUDP::VideoNack &nack) {
-	std::vector< Mumble::Protocol::byte > packet(1 + nack.ByteSizeLong());
-	packet[0] = static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack);
-	if (!nack.SerializeToArray(packet.data() + 1, static_cast< int >(packet.size() - 1))) {
+	const std::vector< Mumble::Protocol::byte > packet = Mumble::Protocol::encodeVideoNackPacket(nack);
+	if (packet.empty()) {
 		return;
 	}
 
@@ -639,110 +638,35 @@ void ServerHandler::maybeLogNackStats(std::uint64_t nowUsec) {
 		  static_cast< unsigned long long >(m_nackStats.resendBudgetHit.exchange(0)));
 }
 
-void ServerHandler::sendPendingNacks(std::uint64_t nowUsec) {
-	// Messages per second, at most, so a burst of loss costs the server's rate limit for this client a
-	// bounded amount, leaving room for its subscriptions and keyframe requests.
-	constexpr unsigned int MAX_NACK_MESSAGES_PER_SECOND = 30;
-
-	maybeLogNackStats(nowUsec);
-
-	std::vector< Mumble::Protocol::VideoNackRequest > requests;
-	m_videoReassembler.collectNacks(nowUsec, requests);
-
-	if (requests.empty()) {
-		return;
-	}
-	m_nackStats.unitsRequested += requests.size();
-
-	if (nowUsec - m_nackWindowStartUsec >= 1000 * 1000) {
-		m_nackWindowStartUsec  = nowUsec;
-		m_nackMessagesInWindow = 0;
-	}
-
-	// One message per stream, carrying every unit of it that is missing something.
-	std::map< std::pair< std::uint32_t, std::uint32_t >, MumbleUDP::VideoNack > messages;
-	for (const Mumble::Protocol::VideoNackRequest &request : requests) {
-		MumbleUDP::VideoNack &nack = messages[{ request.senderSession, request.streamID }];
-		nack.set_sender_session(request.senderSession);
-		nack.set_stream_id(request.streamID);
-
-		if (nack.units_size() < Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
-			MumbleUDP::VideoNack::Unit *unit = nack.add_units();
-			unit->set_frame_number(request.frameNumber);
-			unit->set_unit_id(request.unitID);
-			unit->set_missing_fragments(request.missingFragments);
-			for (std::uint32_t index : request.missingIndices) {
-				unit->add_missing_indices(index);
-			}
-		}
-	}
-
-	for (const auto &entry : messages) {
-		if (m_nackMessagesInWindow >= MAX_NACK_MESSAGES_PER_SECOND) {
-			return;
-		}
-		++m_nackMessagesInWindow;
-		++m_nackStats.requestsSent;
-		sendVideoNack(entry.second);
-	}
-}
-
-void ServerHandler::handleVideoDatagram(const Mumble::Protocol::byte *datagram, std::size_t len) {
+void ServerHandler::handleVideoDatagram(std::span< const Mumble::Protocol::byte > datagram) {
 	ConnectionPtr connection(cConnection);
 
 	if (!connection || !connection->videoCrypt.isValid()) {
 		return;
 	}
 
-	std::vector< Mumble::Protocol::byte > plaintext;
-
-	if (connection->videoCrypt.decrypt(std::span< const Mumble::Protocol::byte >(datagram, len), plaintext)
-		!= Mumble::Protocol::VideoCryptState::Result::Ok) {
-		return;
-	}
-
-	if (plaintext.size() >= 2
-		&& plaintext[0] == static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::VideoNack)) {
-		// A viewer asking for part of one of our streams again, forwarded by the server. Answered on the GUI
-		// thread, which owns the history of what was sent.
-		emit videoNackReceived(QByteArray(reinterpret_cast< const char * >(plaintext.data() + 1),
-										  static_cast< int >(plaintext.size() - 1)));
-		return;
-	}
-
-	if (plaintext.size() < 2
-		|| plaintext[0] != static_cast< Mumble::Protocol::byte >(Mumble::Protocol::UDPMessageType::Video)) {
-		return;
-	}
-
-	// The reassembler keys on an authenticated sender rather than on whatever the packet claims. On this
-	// side that identity is the one the server stamped: the server is the only party that can attribute a
-	// relayed packet, and it is already trusted to route them at all.
-	m_videoPeek.Clear();
-
-	if (!m_videoPeek.ParseFromArray(plaintext.data() + 1, static_cast< int >(plaintext.size() - 1))) {
-		return;
-	}
-
-	const std::uint32_t senderSession = m_videoPeek.sender_session();
-
-	if (senderSession == 0) {
-		// Unstamped, so unattributable. A conforming server always stamps.
-		return;
-	}
-
-	Mumble::Protocol::VideoUnit unit;
 	const std::uint64_t nowUsec = static_cast< std::uint64_t >(tTimestamp.elapsed().count());
 
-	// Every 10 ms at most: ask for whatever has been incomplete for long enough. Driven by arriving packets,
-	// which is exactly when there is anything to ask about.
-	if (nowUsec - m_lastNackCollectUsec >= 10 * 1000) {
-		m_lastNackCollectUsec = nowUsec;
-		sendPendingNacks(nowUsec);
+	Mumble::Protocol::VideoReceiveEvents events;
+	m_videoReceiver.receive(connection->videoCrypt, datagram, nowUsec, events);
+
+	if (events.collectedNacks) {
+		maybeLogNackStats(nowUsec);
+	}
+	m_nackStats.unitsRequested += events.unitsRequested;
+	for (const std::vector< Mumble::Protocol::byte > &packet : events.packetsToSend) {
+		++m_nackStats.requestsSent;
+		sendVideoPacket(packet);
 	}
 
-	if (m_videoReassembler.processPacket(plaintext, senderSession, nowUsec, unit)
-		== Mumble::Protocol::VideoReassemblyResult::Complete) {
+	for (const std::vector< Mumble::Protocol::byte > &nack : events.nacksForUs) {
+		// A viewer asking for part of one of our streams again, forwarded by the server. Answered on the GUI
+		// thread, which owns the history of what was sent.
+		emit videoNackReceived(
+			QByteArray(reinterpret_cast< const char * >(nack.data()), static_cast< int >(nack.size())));
+	}
+
+	for (const Mumble::Protocol::VideoUnit &unit : events.units) {
 		emit videoUnitReceived(
 			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,
 			unit.header.x, unit.header.y,

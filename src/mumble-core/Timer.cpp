@@ -40,5 +40,6 @@ bool Timer::isStarted() const {
 std::strong_ordering Timer::operator<=>(const Timer &other) const {
 	// Note that the comparison of the timer, which is meant to be based on duration, has the inverse ordering than the
 	// comparison of the starting time
-	return other.m_start <=> m_start;
+	// Compared through the tick count: the NDK's older libc++ has no <=> for time_point.
+	return other.m_start.time_since_epoch().count() <=> m_start.time_since_epoch().count();
 }

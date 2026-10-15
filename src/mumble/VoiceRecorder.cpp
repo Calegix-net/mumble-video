@@ -10,7 +10,7 @@
 #include "ServerHandler.h"
 #include "Global.h"
 
-#include "../Timer.h"
+#include "Timer.h"
 
 #include <QRegularExpression>
 

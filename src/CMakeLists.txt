@@ -3,9 +3,6 @@
 # that can be found in the LICENSE file at the root of the
 # Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
-set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Mumble.proto")
-set(UDP_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/MumbleUDP.proto")
-
 option(benchmarks "Build benchmarks" OFF)
 
 option(qssldiffiehellmanparameters "Build support for custom Diffie-Hellman parameters." ON)
@@ -38,28 +35,22 @@ find_pkg(Protobuf REQUIRED)
 
 add_compile_options(${MUMBLE_COMPILER_FLAGS})
 
+# The Qt-free protocol core, including the generated Protobuf code.
+set(MUMBLE_CORE_IN_MUMBLE_TREE ON)
+add_subdirectory(mumble-core)
+
 add_library(shared STATIC)
-
-protobuf_generate(LANGUAGE cpp TARGET shared PROTOS ${PROTO_FILE} OUT_VAR BUILT_PROTO_FILES)
-protobuf_generate(LANGUAGE cpp TARGET shared PROTOS ${UDP_PROTO_FILE} OUT_VAR BUILT_UDP_PROTO_FILES)
-
-# Disable warnings for the generated source files
-foreach(CURRENT_FILE IN LISTS BUILT_PROTO_FILES BUILT_UDP_PROTO_FILES)
-	set_source_files_properties("${CURRENT_FILE}" PROPERTIES COMPILE_FLAGS "-w")
-endforeach()
 
 set_target_properties(shared
 	PROPERTIES
 		AUTOMOC ON
-		# We explicitly tell CMake not to call any autogen tools (e.g. MOC) for the generated files.
-		# @ref https://cmake.org/cmake/help/latest/policy/CMP0071.html
-		SKIP_AUTOGEN ON
 )
 
 set(SHARED_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(SHARED_SOURCES
 	"Ban.cpp"
+	"CoreLogBridge.cpp"
 	"EnvUtils.cpp"
 	"ExceptionUtils.cpp"
 	"FFDHE.cpp"
@@ -68,7 +59,6 @@ set(SHARED_SOURCES
 	"License.cpp"
 	"LogEmitter.cpp"
 	"Logger.cpp"
-	"MumbleProtocol.cpp"
 	"OSInfo.cpp"
 	"PasswordGenerator.cpp"
 	"PlatformCheck.cpp"
@@ -81,24 +71,15 @@ set(SHARED_SOURCES
 	"ServerResolverRecord.cpp"
 	"SSL.cpp"
 	"SSLLocks.cpp"
-	"Timer.cpp"
 	"UnresolvedServerAddress.cpp"
 	"Version.cpp"
-	"VideoFragmentation.cpp"
-	"VideoTransport.cpp"
-	"VolumeAdjustment.cpp"
 
 	"crypto/CryptographicHash.cpp"
-	"crypto/CryptographicRandom.cpp"
-	"crypto/CryptState.cpp"
-	"crypto/CryptStateOCB2.cpp"
-
-	"${3RDPARTY_DIR}/arc4random/arc4random_uniform.cpp"
 )
 
 set(SHARED_HEADERS
 	"Ban.h"
-	"ByteSwap.h"
+	"CoreLogBridge.h"
 	"EnvUtils.h"
 	"ExceptionUtils.h"
 	"FFDHE.h"
@@ -107,7 +88,6 @@ set(SHARED_HEADERS
 	"License.h"
 	"LogEmitter.h"
 	"Logger.h"
-	"MumbleProtocol.h"
 	"Net.h"
 	"OSInfo.h"
 	"PasswordGenerator.h"
@@ -120,19 +100,10 @@ set(SHARED_HEADERS
 	"ServerResolverRecord.h"
 	"SSL.h"
 	"SSLLocks.h"
-	"Timer.h"
 	"UnresolvedServerAddress.h"
 	"Version.h"
-	"VideoFragmentation.h"
-	"VideoTransport.h"
-	"VolumeAdjustment.h"
 
 	"crypto/CryptographicHash.h"
-	"crypto/CryptographicRandom.h"
-	"crypto/CryptState.h"
-	"crypto/CryptStateOCB2.h"
-
-	"${3RDPARTY_DIR}/arc4random/arc4random_uniform.h"
 )
 
 add_custom_command(
@@ -161,25 +132,18 @@ target_sources(shared
 		${SHARED_SOURCES}
 )
 
-# MUMBLE_VERSION_MAJOR/MINOR/PATCH make Version::get(), the protocol version. Upstream Mumble gates
-# behaviour on it in both directions - Messages.cpp and MainWindow.cpp compare a peer's version against
-# Version::fromComponents(1, x, y) throughout, and the UDP format switches to protobuf at 1.5.0 - so it
-# has to stay the upstream release whose protocol this fork actually speaks. Raising it to the fork's
-# release number would tell an upstream 1.8 or 1.9 peer that we implement whatever it gates on those.
+# MUMBLE_VERSION_MAJOR/MINOR/PATCH, set on mumble-core, make Version::get(), the protocol version.
+# Upstream Mumble gates behaviour on it in both directions - Messages.cpp and MainWindow.cpp compare a
+# peer's version against Version::fromComponents(1, x, y) throughout, and the UDP format switches to
+# protobuf at 1.5.0 - so it has to stay the upstream release whose protocol this fork actually speaks.
+# Raising it to the fork's release number would tell an upstream 1.8 or 1.9 peer that we implement
+# whatever it gates on those.
 #
 # MUMBLE_RELEASE_STRING is the fork's own release (see release-version in the top-level CMakeLists.txt)
 # and becomes Version::getRelease(): display only, never compared. It is private to this target because
 # only Version.cpp uses it, so a new commit does not rebuild everything that includes Version.h.
 # MUMBLE_VERSION is the project version as a bare token, kept for the macOS overlay installer, which
 # checks it against the minimum Mumble version the overlay asks for.
-target_compile_definitions(shared
-	PUBLIC
-		"MUMBLE_VERSION=${CMAKE_PROJECT_VERSION}"
-		"MUMBLE_VERSION_MAJOR=${CMAKE_PROJECT_VERSION_MAJOR}"
-		"MUMBLE_VERSION_MINOR=${CMAKE_PROJECT_VERSION_MINOR}"
-		"MUMBLE_VERSION_PATCH=${CMAKE_PROJECT_VERSION_PATCH}"
-)
-
 target_compile_definitions(shared
 	PRIVATE
 		"MUMBLE_RELEASE_STRING=\"${MUMBLE_RELEASE_VERSION}\""
@@ -190,12 +154,11 @@ target_include_directories(shared
 	PUBLIC
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_BINARY_DIR}
-	PRIVATE
-		"${3RDPARTY_DIR}/arc4random"
 )
 
 target_link_libraries(shared
 	PUBLIC
+		mumble-core
 		protobuf::libprotobuf
 		OpenSSL::Crypto
 		OpenSSL::SSL

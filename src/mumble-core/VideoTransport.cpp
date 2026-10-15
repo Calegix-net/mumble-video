@@ -5,9 +5,7 @@
 
 #include "VideoTransport.h"
 
-#include "crypto/CryptographicHash.h"
-
-#include <QByteArray>
+#include "crypto/Digest.h"
 
 #include <cstring>
 
@@ -71,15 +69,13 @@ namespace Protocol {
 			return false;
 		}
 
-		const QByteArray base(sessionKey.data(), static_cast< int >(sessionKey.size()));
+		const auto derive = [&sessionKey](const char *label, std::size_t bytes) {
+			std::vector< std::uint8_t > input(sessionKey.begin(), sessionKey.end());
+			input.insert(input.end(), label, label + std::strlen(label));
 
-		const auto derive = [&base](const char *label, std::size_t bytes) {
-			QByteArray input = base;
-			input.append(label);
+			const std::vector< std::uint8_t > digest = Crypto::Digest::hash(input, Crypto::DigestAlgorithm::Sha256);
 
-			const QByteArray digest = CryptographicHash::hash(input, CryptographicHash::Sha256);
-
-			return std::string(digest.constData(), bytes);
+			return std::string(reinterpret_cast< const char * >(digest.data()), bytes);
 		};
 
 		// Three independent labels: one for the key, one for each direction's nonce base. The server
