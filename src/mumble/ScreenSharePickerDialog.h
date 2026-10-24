@@ -24,7 +24,15 @@ class QTabWidget;
 class QTimer;
 
 /// What kind of thing a ScreenSharePickerDialog's selection resolved to once accepted.
-enum class ScreenShareTargetKind { None, Display, Window };
+enum class ScreenShareTargetKind {
+	None,
+	Display,
+	Window,
+	/// One rectangle of a display, chosen by dragging a box over it after this dialog closes. The display
+	/// it sits on is reported by chosenDisplay(), exactly as for Display - a region is that display's
+	/// capture with everything outside the box cropped away, not a different kind of capture.
+	Region
+};
 
 /**
  * Lets the user choose what to share before a screen share starts: a whole display or a single window,
@@ -55,7 +63,8 @@ public:
 	/// exec() has returned QDialog::Accepted.
 	ScreenShareTargetKind targetKind() const { return m_targetKind; }
 
-	/// Populated only when targetKind() == Display.
+	/// Populated when targetKind() is Display or Region: for a region, the display it will be cropped
+	/// out of.
 	DxgiDisplayVideoSource::DisplayInfo chosenDisplay() const { return m_chosenDisplay; }
 
 	/// Populated only when targetKind() == Window.
@@ -91,6 +100,10 @@ protected:
 	QTabWidget *m_tabs             = nullptr;
 	QListWidget *m_displayList     = nullptr;
 	QListWidget *m_windowList      = nullptr;
+	/// The same displays as m_displayList. Picking one here shares a box drawn on it rather than all of
+	/// it; the box itself is dragged after this dialog has closed, so that the dialog is not sitting on
+	/// top of the screen being chosen from.
+	QListWidget *m_regionList      = nullptr;
 	QCheckBox *m_includeAudio      = nullptr;
 	QCheckBox *m_windowAudioOnly   = nullptr;
 	QCheckBox *m_showCursor        = nullptr;

@@ -67,6 +67,8 @@
 #include "VideoStreamDispatcher.h"
 #include "VideoWizard.h"
 #include "ViewCert.h"
+#include "CroppedVideoSource.h"
+#include "RegionSelectOverlay.h"
 #include "VoiceRecorderDialog.h"
 // Screen capture is implemented against DXGI Desktop Duplication, Windows.Graphics.Capture and WASAPI
 // loopback, so these headers - and everything below that uses them - exist only on Windows. They are
@@ -75,6 +77,9 @@
 #ifdef Q_OS_WIN
 #	include "DxgiDisplayVideoSource.h"
 #	include "ScreenSharePickerDialog.h"
+
+#	include <QtGui/QGuiApplication>
+#	include <QtGui/QScreen>
 
 #	include <QtWidgets/QTabWidget>
 #	include "WasapiLoopbackSource.h"
@@ -1010,7 +1015,11 @@ void MainWindow::setupScreenShare() {
 				picker->findChild< QTabWidget * >()->setCurrentIndex(1);
 				QTimer::singleShot(5000, picker, [picker, base]() {
 					picker->grab().save(base + QLatin1String("-applications.png"));
-					qApp->quit();
+					picker->findChild< QTabWidget * >()->setCurrentIndex(2);
+					QTimer::singleShot(3000, picker, [picker, base]() {
+						picker->grab().save(base + QLatin1String("-region.png"));
+						qApp->quit();
+					});
 				});
 			});
 		});
@@ -1405,14 +1414,37 @@ void MainWindow::toggleScreenShare(bool share) {
 		// keeps a scaled one from capturing a quarter of the screen.
 		const qreal ratio   = chosen->devicePixelRatio();
 		const QRect logical = chosen->geometry();
-		const QRect region(qRound(logical.x() * ratio), qRound(logical.y() * ratio), qRound(logical.width() * ratio),
-						   qRound(logical.height() * ratio));
+		QRect region(qRound(logical.x() * ratio), qRound(logical.y() * ratio), qRound(logical.width() * ratio),
+					 qRound(logical.height() * ratio));
+
+		QString sourceName = chosen->name().isEmpty() ? tr("Screen") : chosen->name();
+
+		if (picker.regionRequested()) {
+			// Asked for after the picker has closed, so the dialog is not sitting over the screen being
+			// drawn on.
+			const QRect selection = RegionSelectOverlay::selectOn(chosen, this);
+
+			if (selection.isNull()) {
+				// Escape, or a click that was not a drag.
+				m_shareScreenAction->setChecked(false);
+
+				return;
+			}
+
+			// X11ScreenVideoSource grabs whatever rectangle it is given, so a region needs no cropping
+			// on this path at all - X copies only those pixels out of the root window, which is less
+			// work than grabbing the screen and throwing most of it away. The selection is relative to
+			// the screen; the grab is relative to the root window, hence the offset.
+			region = QRect(region.x() + selection.x(), region.y() + selection.y(), selection.width(),
+						   selection.height());
+
+			sourceName = tr("%1 (region)").arg(sourceName);
+		}
 
 		const int framerate = Global::get().s.iScreenShareFramerate;
 
 		screenSource = std::make_unique< X11ScreenVideoSource >(
-			region, tr("%1 (X11)").arg(chosen->name().isEmpty() ? tr("Screen") : chosen->name()),
-			framerate > 0 ? std::max(1, 1000 / framerate) : 66);
+			region, tr("%1 (X11)").arg(sourceName), framerate > 0 ? std::max(1, 1000 / framerate) : 66);
 	}
 #		endif
 
@@ -1510,6 +1542,63 @@ void MainWindow::toggleScreenShare(bool share) {
 
 		if (!m_screenVideoBroadcaster->start(std::make_unique< WgcWindowVideoSource >(window, picker.showCursor()))) {
 			Global::get().l->log(Log::Warning, tr("Could not start capturing this window."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+	} else if (targetKind == ScreenShareTargetKind::Region) {
+		const DxgiDisplayVideoSource::DisplayInfo display = picker.chosenDisplay();
+
+		if (display.deviceName.isEmpty()) {
+			Global::get().l->log(Log::Warning, tr("No display was chosen."));
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		// Matched by the rectangle each reports, not by name. The two name the same monitor entirely
+		// differently: Qt gives the model out of its EDID, such as "DELL S2725QS (1)", while DXGI gives
+		// the GDI device name Windows itself uses for that output, such as DISPLAY3. Comparing those
+		// never succeeds, and quietly falling through to the primary screen is what put the selection
+		// overlay on the wrong monitor.
+		QScreen *screen = nullptr;
+
+		for (QScreen *candidate : QGuiApplication::screens()) {
+			if (candidate && candidate->geometry() == display.geometry) {
+				screen = candidate;
+
+				break;
+			}
+		}
+
+		if (!screen) {
+			// Only reachable when Qt's rectangle for a monitor differs from DXGI's, which happens when
+			// the display is scaled: Qt reports device-independent pixels there and DXGI reports real
+			// ones. Said out loud rather than guessed at, because guessing is what this replaced - and
+			// with several identical monitors there is nothing left to tell them apart by.
+			screen = QGuiApplication::primaryScreen();
+
+			Global::get().l->log(Log::Warning,
+								 tr("Could not tell which monitor \"%1\" is - using the primary one.")
+									 .arg(display.friendlyName));
+		}
+
+		// Asked for once the picker has closed, so the dialog is not sitting over the screen being drawn
+		// on - what the user sees dimmed is then exactly what they can select from.
+		const QRect region = RegionSelectOverlay::selectOn(screen, this);
+
+		if (region.isNull()) {
+			// Escape, or a click that was not a drag. Not an error: they changed their mind.
+			m_shareScreenAction->setChecked(false);
+
+			return;
+		}
+
+		auto cropped =
+			std::make_unique< CroppedVideoSource >(std::make_unique< DxgiDisplayVideoSource >(display), region);
+
+		if (!m_screenVideoBroadcaster->start(std::move(cropped))) {
+			Global::get().l->log(Log::Warning, tr("Could not start capturing this region."));
 			m_shareScreenAction->setChecked(false);
 
 			return;
@@ -2968,8 +3057,16 @@ void MainWindow::setupView(bool toggle_minimize) {
 	bool showit = !Global::get().s.bMinimalView;
 
 	switch (Global::get().s.wlWindowLayout) {
+		// Both docks are taken out of the layout before either is put back, in every branch. splitDockWidget()
+		// positions one dock relative to another and needs both to actually be in this window's dock areas;
+		// handed one that the just-restored layout left floating, or tabbed somewhere it no longer expects,
+		// it follows a layout item that is not there. That is a crash inside Qt, not an exception - seen
+		// once here as a SIGSEGV in splitDockWidget() reached straight from this function, with the saved
+		// layout restored moments earlier. Only the Hybrid branch below removed both; Classic and Stacked
+		// removed the log dock and trusted whatever state the chat dock happened to be in.
 		case Settings::LayoutClassic:
 			removeDockWidget(qdwLog);
+			removeDockWidget(qdwChat);
 			addDockWidget(Qt::LeftDockWidgetArea, qdwLog);
 			qdwLog->show();
 			splitDockWidget(qdwLog, qdwChat, Qt::Vertical);
@@ -2977,6 +3074,7 @@ void MainWindow::setupView(bool toggle_minimize) {
 			break;
 		case Settings::LayoutStacked:
 			removeDockWidget(qdwLog);
+			removeDockWidget(qdwChat);
 			addDockWidget(Qt::BottomDockWidgetArea, qdwLog);
 			qdwLog->show();
 			splitDockWidget(qdwLog, qdwChat, Qt::Vertical);
@@ -3801,6 +3899,14 @@ void MainWindow::on_qmConfig_aboutToShow() {
 	qmConfig->addAction(qaTalkingUIToggle);
 	if (Global::get().s.bMinimalView)
 		qmConfig->addAction(qaConfigHideFrame);
+
+	// Last in the menu, after the Talking UI.
+	qaConfigHideOthersVideo->setChecked(Global::get().s.bHideOthersVideo);
+
+	if (m_videoGrid) {
+		m_videoGrid->setRemoteVideoHidden(Global::get().s.bHideOthersVideo);
+	}
+	qmConfig->addAction(qaConfigHideOthersVideo);
 }
 
 void MainWindow::qmChannel_aboutToShow() {
@@ -4344,6 +4450,16 @@ void MainWindow::on_qaAudioUnlink_triggered() {
 
 void MainWindow::on_qaConfigDialog_triggered() {
 	openConfigDialog();
+}
+
+void MainWindow::on_qaConfigHideOthersVideo_triggered() {
+	const bool hide = qaConfigHideOthersVideo->isChecked();
+
+	Global::get().s.bHideOthersVideo = hide;
+
+	if (m_videoGrid) {
+		m_videoGrid->setRemoteVideoHidden(hide);
+	}
 }
 
 void MainWindow::on_qaConfigMinimal_triggered() {

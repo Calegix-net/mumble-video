@@ -201,6 +201,11 @@ public:
 	/// How many streams are currently in their own window. Exposed for tests.
 	std::size_t poppedOutCountForTesting() const { return m_pipWindows.size(); }
 
+	/// What a surface would actually put on screen, which during a replacement's first moments is the
+	/// outgoing stream's last frame rather than its own empty canvas. surfaceFor() deliberately still
+	/// reports the surface's own picture - the distinction is the point of Surface::heldPicture.
+	QImage displayedImageForTesting(unsigned int senderSession, unsigned int streamID) const;
+
 	/// Builds the item to draw over detached video - in practice the Mumble overlay's own user group. The
 	/// returned item is handed to a QGraphicsScene, which takes ownership.
 	using OverlayItemFactory = std::function< QGraphicsItem *() >;
@@ -290,6 +295,22 @@ public slots:
 
 	/// setWatching() for every advertised stream at once. Used by remote control (`mumble rpc watchall`).
 	void setWatchingAll(bool watching);
+
+	/**
+	 * Show or hide every other person's video at once, for the "hide other people's video" preference.
+	 *
+	 * Hiding keeps the surfaces and stops watching them, rather than dropping them: the streams carry on
+	 * being announced and ended as usual, so showing them again puts back exactly who is sharing right
+	 * now. Dropping them instead meant un-hiding showed nothing at all until somebody happened to start
+	 * a new share, which is not what "show them again" should mean.
+	 *
+	 * What was being watched when it was hidden starts being watched again when it is shown, if it is
+	 * still there.
+	 */
+	void setRemoteVideoHidden(bool hidden);
+
+	/// Whether that preference is currently suppressing other people's video.
+	bool remoteVideoHidden() const { return m_remoteVideoHidden; }
 
 	/**
 	 * Decodes VP8, VP9 and H.264 frames on a thread of its own instead of the GUI thread.
@@ -465,6 +486,11 @@ protected:
 		/// not that it is drawn twice - so it is excluded from the layout by occupiesCell().
 		bool poppedOut = false;
 
+		/// Held back by the "hide other people's video" preference rather than by anything about the
+		/// stream itself. The surface stays, fully tracked, and simply holds no cell - so turning the
+		/// preference off puts everyone back immediately instead of waiting for them to announce again.
+		bool hiddenByPreference = false;
+
 		/// This surface replaced one that was being watched: the sender changed resolution or turned
 		/// their phone mid-share, and neither is expressible within one stream id, so the share restarts
 		/// under a new one. Set from the moment the replacement is announced until its first frame
@@ -476,6 +502,17 @@ protected:
 		/// viewer back into the grid several times a minute: the presentation was bound to a stream id
 		/// that no longer exists, so it was torn down as though the share had ended.
 		bool awaitingReplacementPicture = false;
+
+		/// The last picture the surface this one replaced had, kept only until the replacement decodes
+		/// a frame of its own.
+		///
+		/// A rotation costs the viewer a round trip to subscribe plus the wait for the sender's next
+		/// keyframe, and a watched surface with no picture paints black. Freezing on the last frame
+		/// instead is both less alarming and what this client already does when a VP8 reference goes
+		/// missing. Kept apart from canvas rather than copied into it because the two are different
+		/// shapes - that is the whole reason the stream was replaced - and anything decoded into a
+		/// canvas of the old shape would leave a strip of the old picture beside the new one.
+		QImage heldPicture;
 
 		/// Set once a stall refresh request has gone out for the current silence - see
 		/// checkForStaleStreams() - so the same stall does not re-trigger keyframeNeeded() on every poll
@@ -711,8 +748,15 @@ protected:
 	 * the restarted share's first frame arrives, and it already has the previous stream's cell. Letting
 	 * it fall out and back in reflows the whole grid twice per rotation.
 	 */
+	/// What to actually paint for a surface: its own picture, or, in the gap between a replacement being
+	/// announced and its first frame arriving, the picture of the stream it replaced. See
+	/// Surface::heldPicture.
+	static const QImage &displayImage(const Surface &surface) {
+		return surface.canvas.isNull() ? surface.heldPicture : surface.canvas;
+	}
+
 	static bool occupiesCell(const Surface &surface) {
-		return !surface.poppedOut
+		return !surface.poppedOut && !surface.hiddenByPreference
 			   && !(surface.watching && surface.canvas.isNull() && !surface.awaitingReplacementPicture);
 	}
 
@@ -851,6 +895,13 @@ protected:
 
 	/// The picture-in-picture windows, keyed by the surface each one currently shows.
 	std::map< std::uint64_t, PipWindow > m_pipWindows;
+
+	/// See setRemoteVideoHidden(). Applied to surfaces as they are announced, so a share that starts
+	/// while this is on is hidden too rather than appearing for a moment.
+	bool m_remoteVideoHidden = false;
+
+	/// What was being watched when hiding began, to start watching again when it ends.
+	std::vector< std::uint64_t > m_watchedBeforeHidden;
 
 	/// Hands whatever is presenting oldKey over to newKey: the picture-in-picture window showing it, the
 	/// fullscreen focus, or both.

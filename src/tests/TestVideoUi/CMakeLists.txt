@@ -21,6 +21,8 @@ set(TESTVIDEOUI_SOURCES
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.h"
 	"${MUMBLE_SOURCE_DIR}/VideoSource.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoSource.h"
+	"${MUMBLE_SOURCE_DIR}/CroppedVideoSource.cpp"
+	"${MUMBLE_SOURCE_DIR}/CroppedVideoSource.h"
 )
 
 add_executable(TestVideoUi ${TESTVIDEOUI_SOURCES})

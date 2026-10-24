@@ -51,9 +51,21 @@ LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent, bool directCaptu
 	auto *what       = new QGroupBox(tr("What to share"), this);
 	auto *whatLayout = new QVBoxLayout(what);
 	m_screen         = new QRadioButton(tr("An entire screen"), what);
+	m_region         = new QRadioButton(tr("Part of a screen"), what);
 	m_window         = new QRadioButton(tr("A window"), what);
 	whatLayout->addWidget(m_screen);
+	whatLayout->addWidget(m_region);
 	whatLayout->addWidget(m_window);
+
+	// Offered only when this client grabs the screen itself. Through the portal it is the desktop that
+	// decides which screen is captured, and a Wayland client cannot put a window on a chosen output, so
+	// there is nothing to dim and drag a box over. Shown disabled with the reason rather than hidden,
+	// because an option that silently appears on one machine and not another is worse than one that
+	// explains itself.
+	if (!m_directCapture) {
+		m_region->setEnabled(false);
+		m_region->setToolTip(tr("Not available when the desktop's own screen picker is used."));
+	}
 	auto *group = new QButtonGroup(this);
 	group->addButton(m_screen);
 	group->addButton(m_window);
@@ -209,6 +221,10 @@ QScreen *LinuxSharePickerDialog::captureScreen() const {
 	const int index = m_screenChoice ? m_screenChoice->currentIndex() : 0;
 
 	return index >= 0 && index < m_screens.size() ? m_screens.at(index).data() : nullptr;
+}
+
+bool LinuxSharePickerDialog::regionRequested() const {
+	return m_region && m_region->isChecked() && m_region->isEnabled();
 }
 
 bool LinuxSharePickerDialog::includeAudio() const {

@@ -198,6 +198,7 @@ const SettingsKey SHOW_DEVELOPER_MENU_KEY              = { "show_developer_menu"
 const SettingsKey LOCK_LAYOUT_KEY                      = { "lock_layout" };
 const SettingsKey MINIMAL_VIEW_KEY                     = { "minimal_view" };
 const SettingsKey HIDE_FRAME_KEY                       = { "hide_frame" };
+const SettingsKey HIDE_OTHERS_VIDEO_KEY                = { "hide_others_video" };
 const SettingsKey DISPLAY_USERS_BEFORE_CHANNELS        = { "display_users_before_channels" };
 const SettingsKey WINDOW_GEOMETRY_KEY                  = { "window_geometry" };
 const SettingsKey WINDOW_GEOMETRY_MINIMAL_VIEW_KEY     = { "minimal_view_window_geometry" };

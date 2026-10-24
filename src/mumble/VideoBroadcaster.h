@@ -133,6 +133,32 @@ public:
 	static constexpr int MAX_VP9_WIDTH  = 2560;
 	static constexpr int MAX_VP9_HEIGHT = 1440;
 
+	/// Smallest frame a hardware H.264 encoder will accept.
+	///
+	/// NVENC refuses to open below about 145x49 and the refusal is final: H264Encoder marks that size
+	/// failed and returns no units at all from then on, so the stream is announced, carries nothing, and
+	/// every viewer sits asking for a keyframe until their tile gives up. Nothing could reach those sizes
+	/// while a share was always a whole display or a whole window; sharing a region can be any size at
+	/// all, including a 138x46 sliver of a toolbar.
+	///
+	/// Above the hardware minimum with room to spare, because the figure varies between GPU generations
+	/// and the encoder rounds odd dimensions down before opening.
+	static constexpr int MIN_H264_WIDTH  = 160;
+	static constexpr int MIN_H264_HEIGHT = 64;
+
+	/// libvpx has no comparable floor, but H264Encoder refuses anything under 16 pixels outright and a
+	/// frame that small is not worth sending. Applied to every codec so the floor exists either way.
+	static constexpr int MIN_ENCODED_WIDTH  = 32;
+	static constexpr int MIN_ENCODED_HEIGHT = 32;
+
+	/// The size a frame is encoded at: clamped down to what receivers accept, then raised to what the
+	/// codec's encoder will open at.
+	///
+	/// Takes the codec rather than reading the member, because which codecs exist depends on how the
+	/// build was configured - setCodec() quietly substitutes VP8 for H.264 in a build without USE_H264 -
+	/// and the arithmetic here is worth checking for a codec this particular binary cannot encode with.
+	static QSize encodeSizeFor(const QSize &source, int codec);
+
 	/**
 	 * Seeds the stream id this broadcaster will use for its next (first) start(), instead of the default
 	 * of 0.

@@ -788,6 +788,20 @@ the channel's context menu.</string>
     <string>This will toggle minimal mode, where the log window and menu is hidden.</string>
    </property>
   </action>
+  <action name="qaConfigHideOthersVideo">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Hide &amp;Others' Video</string>
+   </property>
+   <property name="toolTip">
+    <string>Never show other people's cameras or screen shares</string>
+   </property>
+   <property name="whatsThis">
+    <string>Hides every other person's camera and screen share, including the &quot;click to watch&quot; placeholders, and keeps the video panel shut unless you are sharing something yourself. Your own camera and screen share still appear to you. Remembered between sessions.</string>
+   </property>
+  </action>
   <action name="qaConfigHideFrame">
    <property name="checkable">
     <bool>true</bool>

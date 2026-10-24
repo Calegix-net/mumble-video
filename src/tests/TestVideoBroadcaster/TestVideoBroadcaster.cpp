@@ -40,6 +40,7 @@ private slots:
 	void threadedEncodingDeliversInOrderWithoutGaps();
 	void stoppingWhileEncodingIsSafe();
 	void aDroppedFrameLeavesNoGap();
+	void tinyFramesAreRaisedToTheEncodersFloor();
 };
 
 // A frame the encoder had to drop - here a keyframe of noise too large for one transport unit - must not use
@@ -527,6 +528,42 @@ void TestVideoBroadcaster::aMockScreenKeepsMovingWithoutRepaintingEverything() {
 	broadcaster.configure(1, 2000, 15, 70, 64);
 	QVERIFY(broadcaster.start(std::make_unique< SyntheticVideoSource >(320, 180)));
 	broadcaster.stop();
+}
+
+
+// A hardware H.264 encoder refuses to open below roughly 145x49, and H264Encoder treats that refusal as
+// final: it marks the size failed and returns no units from then on, so the stream carries nothing at
+// all and every viewer sits asking for a keyframe. Unreachable while a share was a whole display or a
+// whole window; a region can be a 138x46 sliver of a toolbar.
+void TestVideoBroadcaster::tinyFramesAreRaisedToTheEncodersFloor() {
+	// encodeSizeFor() rather than a configured broadcaster: setCodec() substitutes VP8 for H.264 in a
+	// build without USE_H264, and this test target is one, so going through it would have checked the
+	// wrong codec's floor and passed while saying nothing.
+	const auto sizeFor = [](const QSize &source, int codec) {
+		return VideoBroadcaster::encodeSizeFor(source, codec);
+	};
+
+	constexpr int h264 = VideoBroadcaster::CODEC_H264;
+	constexpr int vp9  = VideoBroadcaster::CODEC_VP9;
+
+	// Only the dimension that is short gets raised, so the picture keeps the proportions it was given
+	// and the frame is centred on black rather than stretched - see fitToEncodeSize().
+	QCOMPARE(sizeFor(QSize(190, 40), h264), QSize(190, 64));
+	QCOMPARE(sizeFor(QSize(138, 46), h264), QSize(160, 64));
+
+	// A wide strip keeps its width. Scaling it up until its height cleared the floor would have made it
+	// 6400 wide and sent it back through the maximum.
+	QCOMPARE(sizeFor(QSize(1000, 10), h264), QSize(1000, 64));
+
+	// Anything already big enough is left exactly alone.
+	QCOMPARE(sizeFor(QSize(496, 298), h264), QSize(496, 298));
+
+	// libvpx has no comparable floor, so a strip this size goes to the encoder as it is.
+	QCOMPARE(sizeFor(QSize(190, 40), vp9), QSize(190, 40));
+	QCOMPARE(sizeFor(QSize(10, 10), vp9), QSize(32, 32));
+
+	// And the maximum still does its job on the way past.
+	QCOMPARE(sizeFor(QSize(5120, 1440), vp9), QSize(2560, 720));
 }
 
 QTEST_MAIN(TestVideoBroadcaster)

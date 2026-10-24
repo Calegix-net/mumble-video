@@ -11,6 +11,7 @@
 // the client's settings singleton. Pulling it out into VideoBandwidthProbe made it ordinary domain logic
 // that runs against a synthetic camera with no UI at all - which is the only reason these tests exist.
 
+#include "CroppedVideoSource.h"
 #include "VideoBandwidthProbe.h"
 #include "VideoSource.h"
 
@@ -48,6 +49,33 @@ std::unique_ptr< SyntheticVideoSource > movingSource(int w = 320, int h = 240) {
 
 } // namespace
 
+
+namespace {
+/// A source whose frames the test chooses, which SyntheticVideoSource cannot do - it renders its own
+/// pattern. Cropping has to be checked against known pixels at known positions, or a crop of the right
+/// size taken from the wrong place would pass.
+class ScriptedVideoSource : public VideoSource {
+	Q_OBJECT
+public:
+	explicit ScriptedVideoSource(QObject *parent = nullptr) : VideoSource(parent) {}
+
+	bool start() override {
+		m_running = true;
+		return true;
+	}
+	void stop() override { m_running = false; }
+	bool isRunning() const override { return m_running; }
+	QString describe() const override { return QStringLiteral("Scripted"); }
+
+	void deliver(const QImage &frame, std::uint64_t captureTimestampUsec) {
+		emit frameReady(frame, captureTimestampUsec);
+	}
+
+private:
+	bool m_running = false;
+};
+} // namespace
+
 class TestVideoUi : public QObject {
 	Q_OBJECT
 private slots:
@@ -59,6 +87,11 @@ private slots:
 	void aRefusedSourceIsReportedRatherThanHanging();
 	void emptyCandidatesAreRejected();
 	void stoppingEarlyLeavesItIdle();
+
+	void aSelectionIsConvertedToTheDisplaysOwnPixels();
+	void aRegionIsClampedToTheFrameAndNeverWidened();
+	void croppingEmitsOnlyTheSelectedRectangle();
+	void aRegionThatLeavesTheScreenReportsOnceInsteadOfSharingEverything();
 };
 
 void TestVideoUi::aSweepProducesOneResultPerCandidate() {
@@ -171,6 +204,124 @@ void TestVideoUi::stoppingEarlyLeavesItIdle() {
 	// changes without tracking whether it was running.
 	probe.stop();
 	QVERIFY(!probe.isRunning());
+}
+
+
+// A selection is drawn in Qt's device-independent pixels; the capture backend hands back the display's
+// real ones. On a scaled display those differ, and using the drawn numbers unconverted shares the wrong
+// part of the screen - a box around the right-hand half of a 150% display would describe its middle.
+void TestVideoUi::aSelectionIsConvertedToTheDisplaysOwnPixels() {
+	// Unscaled: the numbers are already the display's own.
+	QCOMPARE(CroppedVideoSource::toCapturePixels(QRect(10, 20, 300, 200), 1.0), QRect(10, 20, 300, 200));
+
+	// 200%: every edge doubles.
+	QCOMPARE(CroppedVideoSource::toCapturePixels(QRect(10, 20, 300, 200), 2.0), QRect(20, 40, 600, 400));
+
+	// 150%, where the arithmetic stops being exact. Edges are converted, not the origin and the size
+	// separately, so the right edge lands at round(410 * 1.5) = 615 and the width follows from it.
+	const QRect scaled = CroppedVideoSource::toCapturePixels(QRect(10, 20, 400, 200), 1.5);
+	QCOMPARE(scaled.left(), 15);
+	QCOMPARE(scaled.top(), 30);
+	QCOMPARE(scaled.right() + 1, 615);
+	QCOMPARE(scaled.width(), 600);
+
+	// Two boxes that share an edge still share it afterwards: no seam, no overlap.
+	const QRect leftHalf  = CroppedVideoSource::toCapturePixels(QRect(0, 0, 101, 50), 1.5);
+	const QRect rightHalf = CroppedVideoSource::toCapturePixels(QRect(101, 0, 99, 50), 1.5);
+	QCOMPARE(leftHalf.right() + 1, rightHalf.left());
+
+	// A drag is symmetric: dragging bottom-right to top-left selects what dragging the other way would.
+	// Built through rectFromDragPoints() rather than QRect's own two-point constructor, which treats its
+	// second point as an inclusive bottom-right and so loses a pixel per axis when handed them reversed.
+	const QRect forward  = CroppedVideoSource::rectFromDragPoints(QPoint(10, 20), QPoint(310, 220));
+	const QRect backward = CroppedVideoSource::rectFromDragPoints(QPoint(310, 220), QPoint(10, 20));
+	QCOMPARE(forward, backward);
+	QCOMPARE(forward, QRect(10, 20, 301, 201));
+	QCOMPARE(CroppedVideoSource::toCapturePixels(forward, 1.0), CroppedVideoSource::toCapturePixels(backward, 1.0));
+
+	QVERIFY(CroppedVideoSource::toCapturePixels(QRect(), 1.0).isNull());
+	QVERIFY(CroppedVideoSource::toCapturePixels(QRect(0, 0, 10, 10), 0.0).isNull());
+}
+
+// The frame can turn out smaller than the region - the display's resolution dropped, or it was replaced
+// by a smaller one. The region shrinks to what is left; it must never grow to cover more of the screen
+// than was selected, which is the one way this feature could leak something.
+void TestVideoUi::aRegionIsClampedToTheFrameAndNeverWidened() {
+	// Wholly inside: unchanged.
+	QCOMPARE(CroppedVideoSource::clampToFrame(QRect(10, 10, 100, 80), QSize(640, 480)), QRect(10, 10, 100, 80));
+
+	// Hanging off the right and bottom: trimmed to the frame, not moved back inside it.
+	QCOMPARE(CroppedVideoSource::clampToFrame(QRect(600, 440, 100, 80), QSize(640, 480)), QRect(600, 440, 40, 40));
+
+	// Odd dimensions come back even, because 4:2:0 needs them to be - matching VpxCodec's rounding so
+	// the frame handed on is already the size that will be encoded.
+	QCOMPARE(CroppedVideoSource::clampToFrame(QRect(0, 0, 101, 83), QSize(640, 480)), QRect(0, 0, 100, 82));
+
+	// Entirely outside, or too small to survive rounding: nothing.
+	QVERIFY(CroppedVideoSource::clampToFrame(QRect(700, 500, 100, 80), QSize(640, 480)).isNull());
+	QVERIFY(CroppedVideoSource::clampToFrame(QRect(639, 0, 1, 50), QSize(640, 480)).isNull());
+	QVERIFY(CroppedVideoSource::clampToFrame(QRect(0, 0, 100, 80), QSize()).isNull());
+}
+
+// The whole point: what goes out is the selected rectangle's pixels, not the screen's.
+void TestVideoUi::croppingEmitsOnlyTheSelectedRectangle() {
+	QImage screen(200, 100, QImage::Format_RGB32);
+	screen.fill(Qt::black);
+
+	// A red patch exactly where the region will be, so a crop of the right size taken from the wrong
+	// place fails on colour rather than passing on size.
+	for (int y = 20; y < 60; ++y) {
+		for (int x = 40; x < 120; ++x) {
+			screen.setPixel(x, y, qRgb(255, 0, 0));
+		}
+	}
+
+	auto inner     = std::make_unique< ScriptedVideoSource >();
+	auto *innerPtr = inner.get();
+
+	CroppedVideoSource cropped(std::move(inner), QRect(40, 20, 80, 40));
+
+	QSignalSpy frames(&cropped, &VideoSource::frameReady);
+	QVERIFY(cropped.start());
+	QVERIFY(cropped.isRunning());
+
+	innerPtr->deliver(screen, 1234);
+
+	QCOMPARE(frames.count(), 1);
+
+	const QList< QVariant > emitted = frames.takeFirst();
+	const QImage out                = emitted.at(0).value< QImage >();
+
+	QCOMPARE(out.size(), QSize(80, 40));
+	QCOMPARE(out.pixel(0, 0), qRgb(255, 0, 0));
+	QCOMPARE(out.pixel(79, 39), qRgb(255, 0, 0));
+
+	// The capture timestamp is passed through untouched: it is the only timing anchor the protocol has.
+	QCOMPARE(emitted.at(1).value< std::uint64_t >(), static_cast< std::uint64_t >(1234));
+}
+
+// If the region falls off the screen entirely, say so once. Sending the whole frame instead would share
+// more than the user chose, and sending nothing silently looks like the share froze.
+void TestVideoUi::aRegionThatLeavesTheScreenReportsOnceInsteadOfSharingEverything() {
+	auto inner     = std::make_unique< ScriptedVideoSource >();
+	auto *innerPtr = inner.get();
+
+	CroppedVideoSource cropped(std::move(inner), QRect(400, 300, 80, 40));
+
+	QSignalSpy frames(&cropped, &VideoSource::frameReady);
+	QSignalSpy failures(&cropped, &VideoSource::failed);
+
+	QVERIFY(cropped.start());
+
+	QImage screen(200, 100, QImage::Format_RGB32);
+	screen.fill(Qt::black);
+
+	innerPtr->deliver(screen, 1);
+	innerPtr->deliver(screen, 2);
+	innerPtr->deliver(screen, 3);
+
+	QCOMPARE(frames.count(), 0);
+	QCOMPARE(failures.count(), 1);
 }
 
 QTEST_MAIN(TestVideoUi)

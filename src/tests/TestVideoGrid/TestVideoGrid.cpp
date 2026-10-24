@@ -151,6 +151,9 @@ private slots:
 	void severalTilesCanBePoppedOutAtOnce();
 	void aPoppedOutWindowFollowsARotatedStream();
 	void fullscreenFollowsARotatedStream();
+	void aReplacedStreamKeepsShowingTheOutgoingPicture();
+	void aWholeFrameStreamCanChangeShapeWithoutANewStreamId();
+	void hidingOtherPeoplesVideoKeepsItToPutBack();
 };
 
 namespace {
@@ -1898,6 +1901,159 @@ void TestVideoGrid::fullscreenFollowsARotatedStream() {
 
 	grid.clearFocusedTile();
 	QVERIFY(!grid.hasFocusedTile());
+
+	QTest::qWait(50);
+}
+
+// Subscribing to the replacement costs a round trip, and then the sender's next keyframe has to arrive,
+// so there is a real gap in which the new surface has no picture. Painting black through it is what made
+// a turned phone look like the share had dropped and come back. The outgoing frame is held instead -
+// which is also what this client already does when a VP8 reference goes missing: freeze, do not blank.
+void TestVideoGrid::aReplacedStreamKeepsShowingTheOutgoingPicture() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+
+	QImage landscape(48, 24, QImage::Format_RGB32);
+	landscape.fill(Qt::green);
+
+	QByteArray wide;
+	QBuffer wideBuffer(&wide);
+	wideBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(landscape.save(&wideBuffer, "JPEG", 90));
+	wideBuffer.close();
+
+	announce(grid, SENDER, 1, MumbleProto::VideoState_Codec_TiledImage, MumbleProto::VideoState_SourceKind_Display);
+	grid.onVideoUnitReceived(SENDER, 1, 0, true, 0, 0, wide);
+	waitForAsyncDecode();
+	QCOMPARE(grid.displayedImageForTesting(SENDER, 1).size(), QSize(48, 24));
+
+	// The phone turns.
+	grid.setStreamCodec(SENDER, 2, MumbleProto::VideoState_SourceKind_Display,
+						MumbleProto::VideoState_Codec_TiledImage);
+
+	// The replacement's own picture is empty - its decoder state is clean, as it must be - but what the
+	// viewer sees is still the last frame of the share rather than black.
+	QVERIFY2(grid.surfaceFor(SENDER, 2).isNull(), "the replacement started with a picture it never decoded");
+	QCOMPARE(grid.displayedImageForTesting(SENDER, 2).size(), QSize(48, 24));
+
+	QImage portrait(24, 48, QImage::Format_RGB32);
+	portrait.fill(Qt::blue);
+
+	QByteArray tall;
+	QBuffer tallBuffer(&tall);
+	tallBuffer.open(QIODevice::WriteOnly);
+	QVERIFY(portrait.save(&tallBuffer, "JPEG", 90));
+	tallBuffer.close();
+
+	grid.onVideoUnitReceived(SENDER, 2, 0, true, 0, 0, tall);
+	waitForAsyncDecode();
+
+	// And the held frame is dropped the moment there is a real one, rather than lingering at the wrong
+	// shape behind the new picture.
+	QCOMPARE(grid.displayedImageForTesting(SENDER, 2).size(), QSize(24, 48));
+	QCOMPARE(grid.surfaceFor(SENDER, 2).size(), QSize(24, 48));
+}
+
+// VP8, VP9 and H.264 carry their dimensions on every keyframe, and libvpx reinitialises on one, so a
+// whole-frame stream can change shape without taking a new stream id at all - which is what would let a
+// phone being turned cost the viewer nothing. The receiver has to absorb it: the decoded frame replaces
+// the picture outright, where growToFit() would only ever have grown the canvas to the union of the two
+// shapes and left a strip of the old landscape picture beside the new portrait one.
+void TestVideoGrid::aWholeFrameStreamCanChangeShapeWithoutANewStreamId() {
+	VpxEncoder landscapeEncoder;
+	landscapeEncoder.setBitrate(600);
+	landscapeEncoder.setFramerate(30);
+
+	SyntheticVideoSource landscapeSource(64, 32);
+	landscapeSource.setChangeRatio(100);
+
+	const auto wide = landscapeEncoder.encode(landscapeSource.render(0), STREAM, 0, 0, true);
+	QVERIFY(!wide.empty());
+
+	VideoGrid grid;
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8, MumbleProto::VideoState_SourceKind_Display);
+	deliverFrame(grid, wide, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(64, 32));
+
+	// A real sender rebuilds its encoder to change shape - libvpx's is fixed at its first frame's size -
+	// but keeps the same stream id, so nothing here is re-announced and no surface is replaced.
+	VpxEncoder portraitEncoder;
+	portraitEncoder.setBitrate(600);
+	portraitEncoder.setFramerate(30);
+
+	SyntheticVideoSource portraitSource(32, 64);
+	portraitSource.setChangeRatio(100);
+
+	const auto tall = portraitEncoder.encode(portraitSource.render(0), STREAM, 1, 1, true);
+	QVERIFY(!tall.empty());
+
+	deliverFrame(grid, tall, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	// Exactly the new shape. 64x64 here would be the union growToFit() used to produce, with a column of
+	// the old picture still in it.
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(32, 64));
+	QCOMPARE(grid.senderCount(), 1);
+}
+
+// "Hide other people's video" has to be reversible, and the first attempt was not: it dropped the
+// surfaces, so turning it off showed nothing at all until somebody happened to start a new share. The
+// surfaces stay and simply hold no cell, which is what lets them come straight back.
+void TestVideoGrid::hidingOtherPeoplesVideoKeepsItToPutBack() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::magenta);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
+
+	QCOMPARE(grid.senderCount(), 1);
+	QVERIFY(!grid.remoteVideoHidden());
+
+	QSignalSpy watching(&grid, &VideoGrid::watchToggled);
+
+	grid.setRemoteVideoHidden(true);
+
+	// Nothing on screen, and nothing being received either - hiding unwatches, which is what stops the
+	// stream arriving and withdraws any share audio that followed it.
+	QVERIFY(grid.remoteVideoHidden());
+	QCOMPARE(grid.senderCount(), 0);
+	QVERIFY(!watching.isEmpty());
+	QCOMPARE(watching.last().at(2).toBool(), false);
+
+	// The picture is kept rather than thrown away: that is the whole difference.
+	QVERIFY2(!grid.surfaceFor(SENDER, STREAM).isNull(), "the surface was dropped instead of hidden");
+
+	// A share starting while hidden does not flash into view. Announced rather than announce()d: a real
+	// one arrives unwatched, as a placeholder would, and nobody clicks the eyeball on a tile they cannot
+	// see.
+	grid.setStreamCodec(SENDER + 1, STREAM, MumbleProto::VideoState_SourceKind_Camera,
+						MumbleProto::VideoState_Codec_TiledImage);
+	QCOMPARE(grid.senderCount(), 0);
+
+	watching.clear();
+	grid.setRemoteVideoHidden(false);
+
+	// Both of them back - the one that was there before and the one that started meanwhile.
+	QVERIFY(!grid.remoteVideoHidden());
+	QCOMPARE(grid.senderCount(), 2);
+
+	// And what was being watched is being watched again.
+	bool resumed = false;
+	for (int i = 0; i < watching.count(); ++i) {
+		if (watching.at(i).at(0).toUInt() == SENDER && watching.at(i).at(2).toBool()) {
+			resumed = true;
+		}
+	}
+	QVERIFY2(resumed, "watching was not resumed for the stream that had been watched");
 
 	QTest::qWait(50);
 }

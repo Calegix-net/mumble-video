@@ -1400,6 +1400,9 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		m_videoGrid->removeSender(msg.session(), msg.stream_id());
 	}
 
+	// Announcements are taken whatever the "hide other people's video" preference says: VideoGrid keeps
+	// the surface and holds it out of the layout, so turning the preference off shows whoever is sharing
+	// at that moment. Refusing them here instead meant the grid had nothing to put back.
 	if (m_videoGrid && msg.codec() != MumbleProto::VideoState_Codec_OpusAudio) {
 		m_videoGrid->setStreamCodec(msg.session(), msg.stream_id(), static_cast< int >(msg.source_kind()),
 									static_cast< int >(msg.codec()));

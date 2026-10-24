@@ -808,6 +808,20 @@ std::vector< unsigned int > VideoGrid::senderSessions() const {
 	return sessions;
 }
 
+/// Whether one unit of this codec carries a whole picture rather than a tile of one.
+///
+/// It decides whether a decoded unit replaces the canvas or is painted into it, which is what makes a
+/// resolution change mid-stream safe for some codecs and not others: a whole frame simply becomes the new
+/// picture, whatever its shape, while a tile is positioned within a picture whose extent the receiver is
+/// inferring - so a tiled sender must still take a new stream id when its dimensions change.
+///
+/// Not in the header with occupiesCell(): Surface::codec is a plain int there precisely so that the
+/// header need not pull in the generated protocol definitions.
+static bool isWholeFrameCodec(int codec) {
+	return codec == MumbleProto::VideoState_Codec_VP8 || codec == MumbleProto::VideoState_Codec_VP9
+		   || codec == MumbleProto::VideoState_Codec_H264;
+}
+
 bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
 	if (width <= 0 || height <= 0) {
 		return false;
@@ -1100,6 +1114,8 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	std::vector< unsigned int > replacedWatchedStreams;
 	// And their keys, to hand any presentation of them over to the replacement.
 	std::vector< std::uint64_t > replacedKeys;
+	// The outgoing picture, to keep on screen until the replacement has one of its own.
+	QImage heldFromReplaced;
 
 	if (isNewSurface) {
 		bool senderAlreadyPresent = false;
@@ -1114,6 +1130,10 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 					resumeWatching = true;
 					replacedWatchedStreams.push_back(it->second.streamID);
 					replacedKeys.push_back(it->first);
+
+					if (heldFromReplaced.isNull()) {
+						heldFromReplaced = it->second.canvas;
+					}
 				}
 
 				it                   = m_surfaces.erase(it);
@@ -1190,6 +1210,9 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 	surface.codec         = codec;
 	surface.sourceKind    = sourceKind;
 
+	// A share that starts while the preference is on is hidden from the outset.
+	surface.hiddenByPreference = m_remoteVideoHidden;
+
 	if (isNewSurface && resumeWatching && !replacedKeys.empty()) {
 		// The viewer was watching the stream this one replaces, and may well have been watching it
 		// somewhere other than the grid. Both presentations are bound to a surface key, and a key is a
@@ -1198,6 +1221,7 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		// window closed on each turn, putting the viewer back in front of the main window. The
 		// presentation follows the stream instead.
 		surface.awaitingReplacementPicture = true;
+		surface.heldPicture                = heldFromReplaced;
 
 		for (const std::uint64_t oldKey : replacedKeys) {
 			repointPresentations(oldKey, key);
@@ -1245,6 +1269,7 @@ void VideoGrid::setWatching(unsigned int senderSession, unsigned int streamID, b
 		// Nothing is going to arrive to end the transition, and the surface holds a cell as an ordinary
 		// unwatched placeholder from here on.
 		it->second.awaitingReplacementPicture = false;
+		it->second.heldPicture                = QImage();
 		++it->second.decodeEpoch;
 		resetPlayout(it->second);
 	}
@@ -1858,10 +1883,18 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 	const bool wasBlank    = surface.canvas.isNull();
 	const QSize sizeBefore = surface.canvas.size();
 
-	if (!wasBlank && x == 0 && y == 0 && tile.size() == sizeBefore && tile.format() == surface.canvas.format()) {
-		// A whole frame (VP8, VP9, H.264) replacing a picture of the same size: taken as it is, sharing the
-		// decoded image's pixels, instead of painted over the old one - which copied every pixel of every frame
-		// on the GUI thread, about 8 MB a frame at 1080p.
+	if (x == 0 && y == 0
+		&& (isWholeFrameCodec(surface.codec)
+			|| (!wasBlank && tile.size() == sizeBefore && tile.format() == surface.canvas.format()))) {
+		// A whole frame (VP8, VP9, H.264) is the picture, so it is taken as it is, sharing the decoded
+		// image's pixels, instead of painted over the old one - which copied every pixel of every frame on
+		// the GUI thread, about 8 MB a frame at 1080p.
+		//
+		// Including when its shape changes, which is what a sender turning a phone does: these codecs
+		// carry their own dimensions on every keyframe and libvpx reinitialises on one, so the frame that
+		// comes out is simply the new picture. Taking it through growToFit() instead - which only ever
+		// grows - left a strip of the old, wider picture alongside the new one for the rest of the share.
+		// A tile of a larger picture is a different matter, and still goes below.
 		surface.canvas = tile;
 	} else {
 		if (!growToFit(surface.canvas, static_cast< int >(x), static_cast< int >(y), tile.width(), tile.height())) {
@@ -1884,8 +1917,10 @@ void VideoGrid::applyDecodedTile(std::uint64_t key, Surface &surface, unsigned i
 	// paint into one repaint, unlike relayoutControls()'s immediate, uncoalesced widget work.
 
 	// Whatever this surface replaced has been superseded by a frame of its own, so it is no longer in
-	// the transition repointPresentations() held its presentation open for.
+	// the transition repointPresentations() held its presentation open for, and the outgoing picture it
+	// was standing in with is not needed - nor wanted, at the wrong shape.
 	surface.awaitingReplacementPicture = false;
+	surface.heldPicture                = QImage();
 
 	if (wasBlank) {
 		emit senderCountChanged(tileCount());
@@ -2662,7 +2697,7 @@ void VideoGrid::updateFullscreenWindow() {
 					const auto it = m_surfaces.find(m_focusedSurfaceKey);
 
 					if (it != m_surfaces.end()) {
-						image = it->second.canvas;
+						image = displayImage(it->second);
 						label = labelForSurface(it->second);
 					}
 				}
@@ -2761,7 +2796,7 @@ void VideoGrid::popOutSurface(unsigned int senderSession, unsigned int streamID)
 			const auto it = m_surfaces.find(*keyHolder);
 
 			if (it != m_surfaces.end()) {
-				image = it->second.canvas;
+				image = displayImage(it->second);
 				label = labelForSurface(it->second);
 			}
 		},
@@ -2835,6 +2870,12 @@ void VideoGrid::popInSurfaceByKey(std::uint64_t key) {
 	relayout();
 }
 
+QImage VideoGrid::displayedImageForTesting(unsigned int senderSession, unsigned int streamID) const {
+	const auto it = m_surfaces.find(surfaceKey(senderSession, streamID));
+
+	return it == m_surfaces.end() ? QImage() : displayImage(it->second);
+}
+
 void VideoGrid::repointPresentations(std::uint64_t oldKey, std::uint64_t newKey) {
 	if (oldKey == newKey) {
 		return;
@@ -2878,6 +2919,60 @@ void VideoGrid::repointPresentations(std::uint64_t oldKey, std::uint64_t newKey)
 			static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
 		}
 	}
+}
+
+void VideoGrid::setRemoteVideoHidden(bool hidden) {
+	if (m_remoteVideoHidden == hidden) {
+		return;
+	}
+
+	m_remoteVideoHidden = hidden;
+
+	if (hidden) {
+		// Remembered before unwatching, since unwatching is what clears the flag being read.
+		m_watchedBeforeHidden.clear();
+
+		for (const auto &entry : m_surfaces) {
+			if (entry.second.watching) {
+				m_watchedBeforeHidden.push_back(entry.first);
+			}
+		}
+
+		// Unwatched, not merely hidden: a stream nobody can see should not still be arriving, and
+		// unwatching is also what withdraws the subscription for any share audio that follows it.
+		setWatchingAll(false);
+
+		for (auto &entry : m_surfaces) {
+			entry.second.hiddenByPreference = true;
+
+			// A picture-in-picture window is a window on someone else's video, which is the thing being
+			// hidden. It goes with the rest.
+			destroyPipWindow(entry.first);
+		}
+
+		if (m_focus == FocusTarget::Surface) {
+			m_focus = FocusTarget::None;
+		}
+	} else {
+		for (auto &entry : m_surfaces) {
+			entry.second.hiddenByPreference = false;
+		}
+
+		// Back to what was being watched, where that stream is still there. Someone whose share ended
+		// while this was on is simply gone, which is the truth of it.
+		for (const std::uint64_t key : m_watchedBeforeHidden) {
+			const auto it = m_surfaces.find(key);
+
+			if (it != m_surfaces.end()) {
+				setWatching(it->second.senderSession, it->second.streamID, true);
+			}
+		}
+
+		m_watchedBeforeHidden.clear();
+	}
+
+	emit senderCountChanged(tileCount());
+	relayout();
 }
 
 void VideoGrid::setOwnViewers(bool screen, const std::vector< Viewer > &viewers) {
@@ -3151,7 +3246,7 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		const QRect cell = cellRect(layout, index++);
 
 		if (surface.watching) {
-			drawInto(surface.canvas, cell, labelForSurface(surface));
+			drawInto(displayImage(surface), cell, labelForSurface(surface));
 		} else {
 			drawPlaceholder(cell, labelForSurface(surface));
 		}

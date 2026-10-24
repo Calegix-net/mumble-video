@@ -506,6 +506,7 @@ public slots:
 	void on_qaConfigHideFrame_triggered();
 	void on_qmConfig_aboutToShow();
 	void on_qaConfigMinimal_triggered();
+	void on_qaConfigHideOthersVideo_triggered();
 	void on_qaConfigCert_triggered();
 	void on_qaAudioWizard_triggered();
 	void on_qaDeveloperConsole_triggered();

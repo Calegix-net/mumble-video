@@ -7,6 +7,8 @@
 #include "Cert.h"
 #include "SettingsMacros.h"
 
+#include <QtCore/QDebug>
+
 
 template< typename T, bool isEnum > struct SaveValueConverter {
 	static const T &getValue(const T &value) { return value; }
@@ -31,7 +33,23 @@ template< typename T > struct SaveValueConverter< T, true > {
 	}
 
 	static void loadValue(const nlohmann::json &json, T &variable) {
-		variable = stringToEnum< T >(json.get< std::string >());
+		const std::string name = json.get< std::string >();
+
+		try {
+			variable = stringToEnum< T >(name);
+		} catch (...) {
+			// stringToEnum() throws for any spelling it does not recognise, and nothing above this caught
+			// it: the throw escaped Settings::load() and took the whole client with it, before a window ever
+			// appeared and without saying why. One unreadable value is not a reason to refuse to start - the
+			// caller has already put the default in `variable`, which is exactly what should survive this - so
+			// it is kept, loudly.
+			//
+			// Not hypothetical: Mumble and Mumble Video share one settings file, so a value written by a build
+			// that knows an enum spelling the other does not is enough to stop the other starting at all. So
+			// is anyone who edits the file by hand.
+			qWarning() << "Settings: ignoring unrecognised value" << QString::fromStdString(name)
+				   << "- keeping the default for this setting";
+		}
 	}
 };
 

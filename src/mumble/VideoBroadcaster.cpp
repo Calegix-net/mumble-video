@@ -5,6 +5,8 @@
 
 #include "VideoBroadcaster.h"
 
+#include <QtGui/QPainter>
+
 #include "VideoSource.h"
 
 #include <QPointer>
@@ -62,17 +64,47 @@ void VideoEncodeCore::reset(bool reopenHardware) {
 	m_lastEncodeTimestamp = 0;
 }
 
+/// The frame on a canvas of exactly the size the encoder is configured for.
+///
+/// Two reasons it is not the frame itself. Receivers refuse frames beyond their surface bound
+/// (VideoGrid::MAX_SURFACE_WIDTH/HEIGHT), so anything larger is scaled down here, once, on the sending
+/// side - a dual-monitor share at 5120x1440 would otherwise be encoded and sent only to be discarded.
+/// And anything smaller than the encoder's floor is centred on black rather than stretched to fill it:
+/// a 138x46 region is shared because someone wanted those pixels, and stretching them to 160x64 would
+/// hand the viewer a distorted picture of them. See VideoBroadcaster::targetSizeFor().
+static QImage fitToEncodeSize(const QImage &frame, const QSize &target) {
+	if (frame.size() == target || target.isEmpty()) {
+		return frame;
+	}
+
+	QImage fitted = frame;
+
+	if (fitted.width() > target.width() || fitted.height() > target.height()) {
+		// KeepAspectRatio: the target normally carries the source's own proportions, and where it does
+		// not - a frame below the floor in one dimension - distorting it is exactly what to avoid.
+		fitted = fitted.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+	}
+
+	if (fitted.size() == target) {
+		return fitted;
+	}
+
+	QImage canvas(target, QImage::Format_RGB32);
+	canvas.fill(Qt::black);
+
+	QPainter painter(&canvas);
+	painter.drawImage((target.width() - fitted.width()) / 2, (target.height() - fitted.height()) / 2, fitted);
+	painter.end();
+
+	return canvas;
+}
+
 VideoEncodeCore::Result VideoEncodeCore::process(const Job &job) {
 	Result result;
 	result.captureTimestampUsec = job.captureTimestampUsec;
 	result.keyframeRequested    = job.forceKeyframe;
 
-	// Receivers refuse frames beyond their surface bound (VideoGrid::MAX_SURFACE_WIDTH/HEIGHT), so a frame
-	// larger than that must never reach the encoder - a dual-monitor screen share at 5120x1440 would
-	// otherwise be encoded and sent only to be discarded. Scaled here, once, on the sending side.
-	const QImage frame = job.frame.size() == job.targetSize
-							 ? job.frame
-							 : job.frame.scaled(job.targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+	const QImage frame = fitToEncodeSize(job.frame, job.targetSize);
 
 	// A screen that has stopped changing. Under constant bitrate the encoder keeps spending its whole budget
 	// on an unchanged picture, refining it frame after frame - measured for VP9 at about 10 KB a frame, the
@@ -345,15 +377,29 @@ void VideoBroadcaster::onFrameReady(const QImage &sourceFrame, std::uint64_t cap
 }
 
 QSize VideoBroadcaster::targetSizeFor(const QSize &source) const {
-	const int maxWidth  = m_codec == CODEC_VP9 ? MAX_VP9_WIDTH : MAX_ENCODED_WIDTH;
-	const int maxHeight = m_codec == CODEC_VP9 ? MAX_VP9_HEIGHT : MAX_ENCODED_HEIGHT;
+	return encodeSizeFor(source, m_codec);
+}
 
-	if (source.width() <= maxWidth && source.height() <= maxHeight) {
-		return source;
+QSize VideoBroadcaster::encodeSizeFor(const QSize &source, int codec) {
+	const int maxWidth  = codec == CODEC_VP9 ? MAX_VP9_WIDTH : MAX_ENCODED_WIDTH;
+	const int maxHeight = codec == CODEC_VP9 ? MAX_VP9_HEIGHT : MAX_ENCODED_HEIGHT;
+
+	QSize size = source;
+
+	if (size.width() > maxWidth || size.height() > maxHeight) {
+		// The size QImage::scaled() with Qt::KeepAspectRatio would produce, worked out without scaling.
+		size = size.scaled(maxWidth, maxHeight, Qt::KeepAspectRatio);
 	}
 
-	// The size QImage::scaled() with Qt::KeepAspectRatio would produce, worked out without scaling.
-	return source.scaled(maxWidth, maxHeight, Qt::KeepAspectRatio);
+	const int minWidth  = codec == CODEC_H264 ? MIN_H264_WIDTH : MIN_ENCODED_WIDTH;
+	const int minHeight = codec == CODEC_H264 ? MIN_H264_HEIGHT : MIN_ENCODED_HEIGHT;
+
+	// expandedTo() rather than scaling up to the floor: it raises only the dimension that is short, so a
+	// wide strip keeps its width and a tall one its height. Scaling a 1000x10 strip up until its height
+	// cleared the floor would have made it 6400 wide, back through the maximum above and round again.
+	// The frame itself is centred on a canvas of this size rather than stretched into it - see
+	// fitToEncodeSize().
+	return size.expandedTo(QSize(minWidth, minHeight));
 }
 
 void VideoBroadcaster::encodeFrame(const QImage &frame, std::uint64_t captureTimestampUsec) {

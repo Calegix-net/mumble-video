@@ -48,6 +48,11 @@ public:
 	PortalScreenCast::SourceType sourceType() const;
 	/// The screen to capture with directCapture; nullptr without it, or if that screen has gone since.
 	QScreen *captureScreen() const;
+
+	/// Whether only part of that screen should be shared, chosen by dragging a box over it once this
+	/// dialog closes. Only ever true with directCapture - see the constructor for why the portal cannot
+	/// offer this yet.
+	bool regionRequested() const;
 	bool includeAudio() const;
 	/// The application whose sound to share (a PulseLoopbackSource::Application key); empty for every
 	/// application except Mumble. Meaningful only when includeAudio().
@@ -66,6 +71,7 @@ protected:
 	QComboBox *m_screenChoice = nullptr;
 
 	QRadioButton *m_screen          = nullptr;
+	QRadioButton *m_region          = nullptr;
 	QRadioButton *m_window          = nullptr;
 	QCheckBox *m_includeAudio       = nullptr;
 	QLabel *m_audioFromLabel        = nullptr;

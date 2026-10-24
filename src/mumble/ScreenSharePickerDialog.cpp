@@ -5,6 +5,8 @@
 
 #include "ScreenSharePickerDialog.h"
 
+#include <QtCore/QVarLengthArray>
+
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
 #include <QtCore/QRegularExpression>
@@ -208,8 +210,10 @@ ScreenSharePickerDialog::ScreenSharePickerDialog(QWidget *parent)
 	m_tabs        = new QTabWidget(this);
 	m_displayList = makeThumbnailGrid(m_tabs);
 	m_windowList  = makeThumbnailGrid(m_tabs);
+	m_regionList  = makeThumbnailGrid(m_tabs);
 	m_tabs->addTab(m_displayList, tr("Screens"));
 	m_tabs->addTab(m_windowList, tr("Applications"));
+	m_tabs->addTab(m_regionList, tr("Region"));
 	layout->addWidget(m_tabs, 1);
 
 	m_includeAudio = new QCheckBox(tr("Include audio"), this);
@@ -237,9 +241,11 @@ ScreenSharePickerDialog::ScreenSharePickerDialog(QWidget *parent)
 	});
 	connect(m_displayList, &QListWidget::currentRowChanged, this, &ScreenSharePickerDialog::updateControls);
 	connect(m_windowList, &QListWidget::currentRowChanged, this, &ScreenSharePickerDialog::updateControls);
+	connect(m_regionList, &QListWidget::currentRowChanged, this, &ScreenSharePickerDialog::updateControls);
 	// Double-clicking a thumbnail shares it, the way it works in Discord.
 	connect(m_displayList, &QListWidget::itemActivated, this, &ScreenSharePickerDialog::onAccepted);
 	connect(m_windowList, &QListWidget::itemActivated, this, &ScreenSharePickerDialog::onAccepted);
+	connect(m_regionList, &QListWidget::itemActivated, this, &ScreenSharePickerDialog::onAccepted);
 
 	// windowAudioOnly's availability also depends on whether audio is being included at all.
 	connect(m_includeAudio, &QCheckBox::toggled, this, &ScreenSharePickerDialog::updateControls);
@@ -263,12 +269,20 @@ ScreenSharePickerDialog::~ScreenSharePickerDialog() {
 void ScreenSharePickerDialog::populateLists() {
 	m_displayList->clear();
 	m_windowList->clear();
+	m_regionList->clear();
 
 	for (int i = 0; i < m_displays.size(); ++i) {
 		auto *item = new QListWidgetItem(tileIcon(QImage(), tr("Loading...")), displayLabel(m_displays.at(i), i),
 										 m_displayList);
 		item->setData(IndexRole, i);
 		item->setToolTip(item->text());
+
+		// The same displays again, as the thing to draw a box on. Listed rather than assumed, because
+		// which display the box is drawn on decides which output gets duplicated behind it.
+		auto *regionItem = new QListWidgetItem(tileIcon(QImage(), tr("Loading...")),
+											   displayLabel(m_displays.at(i), i), m_regionList);
+		regionItem->setData(IndexRole, i);
+		regionItem->setToolTip(tr("Share part of this screen"));
 	}
 
 	for (int i = 0; i < m_windows.size(); ++i) {
@@ -280,6 +294,9 @@ void ScreenSharePickerDialog::populateLists() {
 	// Opens with a usable choice already made, so Share works without a click first.
 	if (m_displayList->count() > 0) {
 		m_displayList->setCurrentRow(0);
+	}
+	if (m_regionList->count() > 0) {
+		m_regionList->setCurrentRow(0);
 	}
 	if (m_windowList->count() > 0) {
 		m_windowList->setCurrentRow(0);
@@ -339,25 +356,46 @@ void ScreenSharePickerDialog::applyThumbnails(const std::vector< Thumbnail > &th
 	m_refreshInFlight = false;
 
 	for (const Thumbnail &thumbnail : thumbnails) {
-		QListWidget *list     = thumbnail.isWindow ? m_windowList : m_displayList;
-		QListWidgetItem *item = list->item(thumbnail.index);
-		if (!item) {
-			continue;
+		// A display's picture belongs in both lists that show displays: the Screens tab and the Region
+		// tab are the same monitors, listed at the same indices, so one capture serves both and whichever
+		// tab the user opens next already has its thumbnails.
+		QVarLengthArray< QListWidget *, 2 > lists;
+
+		if (thumbnail.isWindow) {
+			lists.append(m_windowList);
+		} else {
+			lists.append(m_displayList);
+			lists.append(m_regionList);
 		}
 
-		if (!thumbnail.image.isNull()) {
-			item->setIcon(tileIcon(thumbnail.image, QString()));
-		} else if (thumbnail.isWindow) {
-			// A minimised window cannot draw itself. It can still be picked; its picture appears once it is
-			// restored.
-			item->setIcon(tileIcon(QImage(), tr("No preview (minimized?)")));
+		for (QListWidget *list : lists) {
+			QListWidgetItem *item = list->item(thumbnail.index);
+			if (!item) {
+				continue;
+			}
+
+			if (!thumbnail.image.isNull()) {
+				item->setIcon(tileIcon(thumbnail.image, QString()));
+			} else if (thumbnail.isWindow) {
+				// A minimised window cannot draw itself. It can still be picked; its picture appears once it
+				// is restored.
+				item->setIcon(tileIcon(QImage(), tr("No preview (minimized?)")));
+			}
 		}
 	}
 }
 
 QListWidgetItem *ScreenSharePickerDialog::currentTargetItem() const {
-	const QListWidget *list = m_tabs->currentWidget() == m_windowList ? m_windowList : m_displayList;
-	return list->currentItem();
+	const QWidget *current = m_tabs->currentWidget();
+
+	if (current == m_windowList) {
+		return m_windowList->currentItem();
+	}
+	if (current == m_regionList) {
+		return m_regionList->currentItem();
+	}
+
+	return m_displayList->currentItem();
 }
 
 void ScreenSharePickerDialog::updateControls() {
@@ -365,6 +403,11 @@ void ScreenSharePickerDialog::updateControls() {
 	const bool isWindow   = item && m_tabs->currentWidget() == m_windowList;
 
 	m_buttonBox->button(QDialogButtonBox::Ok)->setEnabled(item != nullptr);
+
+	// "Share" promises something different for a region: the share does not start when this closes, it
+	// asks for a box first.
+	m_buttonBox->button(QDialogButtonBox::Ok)
+		->setText(m_tabs->currentWidget() == m_regionList ? tr("Choose area...") : tr("Share"));
 
 	// Disabled outright, not merely left unchecked, when the selection can't actually honour them - see
 	// the class comment.
@@ -391,7 +434,10 @@ void ScreenSharePickerDialog::onAccepted() {
 		if (index < 0 || index >= m_displays.size()) {
 			return;
 		}
-		m_targetKind    = ScreenShareTargetKind::Display;
+		// A region reports the display it will be taken from; the box itself is dragged by the caller
+		// once this dialog is off the screen.
+		m_targetKind    = m_tabs->currentWidget() == m_regionList ? ScreenShareTargetKind::Region
+																  : ScreenShareTargetKind::Display;
 		m_chosenDisplay = m_displays.at(index);
 	}
 

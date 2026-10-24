@@ -961,6 +961,16 @@ int main(int argc, char **argv) {
 	if (!Global::get().bQuit)
 		res = a.exec();
 
+	// Taken down first, before any of the teardown below. The notification area only drops an icon when
+	// its owner asks it to - which for a QSystemTrayIcon happens in its destructor, and that destructor is
+	// the MainWindow's child, several hundred lines of shutdown away: stopping audio, joining the
+	// ServerHandler thread, tearing down plugins. Until then Windows keeps drawing the icon, and because
+	// the shell only notices a dead owner when it next has reason to ask, a hover is what finally clears
+	// it. Hiding here closes that window, and leaves nothing behind if the shutdown itself fails part way.
+	if (Global::get().trayIcon) {
+		Global::get().trayIcon->hide();
+	}
+
 	// Indicate that this was a regular shutdown
 	Global::get().s.mumbleQuitNormally = true;
 	Global::get().s.save();

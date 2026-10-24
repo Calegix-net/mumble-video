@@ -172,6 +172,7 @@
 	PROCESS(ui, LOCK_LAYOUT_KEY, bLockLayout)                                    \
 	PROCESS(ui, MINIMAL_VIEW_KEY, bMinimalView)                                  \
 	PROCESS(ui, HIDE_FRAME_KEY, bHideFrame)                                      \
+	PROCESS(ui, HIDE_OTHERS_VIDEO_KEY, bHideOthersVideo)                         \
 	PROCESS(ui, DISPLAY_USERS_BEFORE_CHANNELS, bUserTop)                         \
 	PROCESS(ui, WINDOW_GEOMETRY_KEY, qbaMainWindowGeometry)                      \
 	PROCESS(ui, WINDOW_GEOMETRY_MINIMAL_VIEW_KEY, qbaMinimalViewGeometry)        \

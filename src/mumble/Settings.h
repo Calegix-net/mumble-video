@@ -460,6 +460,14 @@ struct Settings {
 	ChannelDrag ceUserDrag               = Move;
 	bool bMinimalView                    = false;
 	bool bHideFrame                      = false;
+
+	/// Never show anyone else's camera or screen share: no tiles, no "click to watch" placeholders, and
+	/// the video panel stays shut unless this client is sharing something itself.
+	///
+	/// For people who want the rest of this client and none of the video. Off on a fresh install, and
+	/// deliberately not a per-server setting - someone who does not want to be shown video does not want
+	/// it anywhere.
+	bool bHideOthersVideo                = false;
 	AlwaysOnTopBehaviour aotbAlwaysOnTop = OnTopNever;
 	QuitBehavior quitBehavior            = QuitBehavior::ALWAYS_ASK;
 	bool bEnableDeveloperMenu            = false;
