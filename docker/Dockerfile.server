@@ -15,6 +15,9 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     && dnf clean all
 
 COPY bin/mumble-server /usr/local/bin/mumble-server
+# ZeroC Ice for the Ice RPC interface (empty when the server was built without it).
+COPY lib/ /usr/local/lib64/
+RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/mumble-server.conf && ldconfig
 
 EXPOSE 64738/tcp 64738/udp
 
