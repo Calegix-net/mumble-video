@@ -72,7 +72,7 @@ jobs:
           # update.mumble.info, which knows nothing of this fork's releases.
           docker run --rm -v "$PWD":/src -v "$PWD/build":/build -e RELEASE_VERSION mumble-build bash -c '
             set -e
-            cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=OFF -Doverlay-xcompile=OFF \
+            cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -Dtests=ON -Dice=ON -Doverlay-xcompile=OFF \
               -Dupdate=OFF -Drelease-version="${RELEASE_VERSION}"
             cmake --build /build -j"$(nproc)"
             cd /build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure'
@@ -104,7 +104,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src -v "$PWD/build":/build -v "$PWD/out":/out mumble-build \
             bash /src/scripts/bundle-server.sh /build /out/server
-          tar -C out/server -czf out/mumble-video-server-linux-x86_64.tar.gz bin/mumble-server
+          tar -C out/server -czf out/mumble-video-server-linux-x86_64.tar.gz bin lib
 
       - uses: actions/upload-artifact@v4
         with:

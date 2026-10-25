@@ -41,7 +41,9 @@ The `,z` mount option relabels the volume for SELinux and is needed on Fedora, R
 It is harmless elsewhere, but you can drop it if your platform does not use SELinux.
 
 `-Dice=OFF` skips the ZeroC Ice RPC interface and `-Doverlay-xcompile=OFF` skips cross-compiling the
-32-bit overlay, neither of which is needed for a normal build or for the tests. See
+32-bit overlay, neither of which is needed for a normal build or for the tests. The image does include
+Ice (built by `build-ice.sh`, as Fedora does not package it), so `-Dice=ON` works too; CI builds the
+server that way so bots that drive a server over Ice (mumo, MuMo modules) keep working. See
 [cmake_options.md](../docs/dev/build-instructions/cmake_options.md) for the full set of options.
 
 ## Running the tests

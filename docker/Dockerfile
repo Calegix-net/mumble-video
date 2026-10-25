@@ -28,6 +28,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         mariadb-connector-c-devel libpq-devel sqlite-devel \
         libvpx-devel \
         nasm libva-devel libdrm-devel \
+        bzip2-devel glibc-static libstdc++-static python3 \
     && dnf clean all
 
 # A minimal FFmpeg for H.264 screen sharing (build-ffmpeg.sh). Fedora's own leaves the H.264 decoder out.
@@ -35,5 +36,10 @@ COPY build-ffmpeg.sh /usr/local/bin/
 RUN build-ffmpeg.sh linux /usr/local \
     && echo /usr/local/lib > /etc/ld.so.conf.d/ffmpeg.conf && ldconfig
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+
+# ZeroC Ice for the server's Ice RPC interface (build-ice.sh), which Fedora does not package.
+COPY build-ice.sh /usr/local/bin/
+RUN build-ice.sh /usr/local \
+    && echo /usr/local/lib64 > /etc/ld.so.conf.d/ice.conf && ldconfig
 
 WORKDIR /build
