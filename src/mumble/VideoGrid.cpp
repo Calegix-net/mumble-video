@@ -85,10 +85,11 @@ public:
 	using VolumeProvider = std::function< VolumeState() >;
 	using VolumeSetter   = std::function< void(int percent) >;
 
-	/// About 30 repaints a second at most. Screen shares are rarely sent faster than that, and a paint
-	/// here is a real, CPU-side scale of the sender's whole desktop onto the whole monitor when everything
-	/// is dirty - not something worth doing more often than the eye can tell apart.
-	static constexpr int REPAINT_INTERVAL_MSEC = 33;
+	/// About 60 repaints a second at most, so a share sent at 60 fps is shown at 60 - at 33 ms this window
+	/// was the cap, at 30 fps (21 on Windows, before the timer was made precise). A paint here is a real,
+	/// CPU-side scale of the sender's whole desktop onto the whole monitor when everything is dirty, so it
+	/// happens once per frame received and no more often than this; a 30 fps share still costs 30.
+	static constexpr int REPAINT_INTERVAL_MSEC = 16;
 	/// The control bar hides after the mouse has been still this long, like a video player's.
 	static constexpr int CONTROLS_HIDE_MSEC = 3000;
 	static constexpr int CONTROLS_HEIGHT    = 44;
@@ -122,6 +123,7 @@ public:
 
 		m_repaintTimer = new QTimer(this);
 		m_repaintTimer->setSingleShot(true);
+		m_repaintTimer->setTimerType(Qt::PreciseTimer);
 		m_repaintTimer->setInterval(REPAINT_INTERVAL_MSEC);
 		connect(m_repaintTimer, &QTimer::timeout, this, &FullscreenVideoWindow::flushRepaint);
 
@@ -640,6 +642,7 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 
 	m_gridRepaintTimer = new QTimer(this);
 	m_gridRepaintTimer->setSingleShot(true);
+	m_gridRepaintTimer->setTimerType(Qt::PreciseTimer);
 	m_gridRepaintTimer->setInterval(GRID_REPAINT_INTERVAL_MSEC);
 	connect(m_gridRepaintTimer, &QTimer::timeout, this, &VideoGrid::flushGridRepaint);
 

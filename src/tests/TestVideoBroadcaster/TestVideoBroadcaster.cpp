@@ -41,6 +41,7 @@ private slots:
 	void stoppingWhileEncodingIsSafe();
 	void aDroppedFrameLeavesNoGap();
 	void tinyFramesAreRaisedToTheEncodersFloor();
+	void theSourceIsToldTheFrameRate();
 };
 
 // A frame the encoder had to drop - here a keyframe of noise too large for one transport unit - must not use
@@ -165,6 +166,26 @@ void TestVideoBroadcaster::vp9StopsSendingAStillScreenAfterASecond() {
 	const qsizetype before = spy.count();
 	source->pump(static_cast< std::uint64_t >(31) * FRAME_USEC + 2000000 + FRAME_USEC + 1);
 	QCOMPARE(spy.count(), before + 1);
+}
+
+// The share's frame rate reaches the capture backend. The Windows backends used to poll at a fixed 30 a
+// second whatever the setting said, so a share set to 60 never sent more than 30 frames.
+void TestVideoBroadcaster::theSourceIsToldTheFrameRate() {
+	VideoBroadcaster broadcaster;
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 60, 50, 64);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(160, 120);
+	SyntheticVideoSource *source = owned.get();
+	QCOMPARE(source->maxFramerate(), 0u);
+
+	QVERIFY(broadcaster.start(std::move(owned)));
+	QCOMPARE(source->maxFramerate(), 60u);
+
+	// And the polling interval a backend derives from it: never later than a frame is due.
+	QCOMPARE(VideoSource::pollIntervalMsec(60), 16);
+	QCOMPARE(VideoSource::pollIntervalMsec(30), 33);
+	QCOMPARE(VideoSource::pollIntervalMsec(0), VideoSource::pollIntervalMsec(VideoSource::DEFAULT_FRAMERATE));
+	QCOMPARE(VideoSource::pollIntervalMsec(5000), 1);
 }
 
 void TestVideoBroadcaster::startingAndStoppingReportsItself() {

@@ -236,9 +236,12 @@ bool DxgiDisplayVideoSource::start() {
 	m_running = true;
 	m_clock.restart();
 
-	// 30fps ceiling on how often AcquireNextFrame is polled. It blocks internally until something
-	// changes or this interval elapses, so this is a floor on responsiveness, not a fixed frame rate.
-	m_pollTimer.start(1000 / 30);
+	// How often AcquireNextFrame is polled, which is the ceiling on the frame rate: it is called with no
+	// timeout, so each poll returns at once with either the latest frame or nothing new. The share's frame
+	// rate setting, not a fixed 30 as before, and a precise timer: Windows rounds an ordinary Qt timer up
+	// to its 15.6 ms tick, which turned the 33 ms poll into 47 and capped every share near 21 fps.
+	m_pollTimer.setTimerType(Qt::PreciseTimer);
+	m_pollTimer.start(pollIntervalMsec(m_maxFramerate));
 
 	return true;
 }

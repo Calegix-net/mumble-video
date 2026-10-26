@@ -224,9 +224,13 @@ bool PipeWireScreenVideoSource::start() {
 		const spa_rectangle preferredSize = SPA_RECTANGLE(1920, 1080);
 		const spa_rectangle minSize       = SPA_RECTANGLE(1, 1);
 		const spa_rectangle maxSize       = SPA_RECTANGLE(MAX_DIMENSION, MAX_DIMENSION);
-		const spa_fraction preferredRate  = SPA_FRACTION(30, 1);
+		// The share's frame rate setting, both as the rate asked for and as the ceiling: the compositor
+		// otherwise sends up to its refresh rate, which is encoder work for frames the setting says not to
+		// send - or, asked for a fixed 30 as before, holds a share set to 60 at 30.
+		const std::uint32_t framerate     = m_maxFramerate > 0 ? m_maxFramerate : DEFAULT_FRAMERATE;
+		const spa_fraction preferredRate  = SPA_FRACTION(framerate, 1);
 		const spa_fraction minRate        = SPA_FRACTION(0, 1);
-		const spa_fraction maxRate        = SPA_FRACTION(120, 1);
+		const spa_fraction maxRate        = SPA_FRACTION(framerate, 1);
 
 		const spa_pod *params[1];
 		params[0] = static_cast< const spa_pod * >(spa_pod_builder_add_object(

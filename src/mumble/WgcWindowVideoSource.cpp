@@ -359,9 +359,11 @@ bool WgcWindowVideoSource::start() {
 	m_running = true;
 	m_clock.restart();
 
-	// Same 30fps polling ceiling as DxgiDisplayVideoSource, for the same reason: TryGetNextFrame returns
-	// promptly either way, so this bounds how often it is asked rather than how fast frames can arrive.
-	m_pollTimer.start(1000 / 30);
+	// Polled at the share's frame rate on a precise timer, as DxgiDisplayVideoSource is and for the same
+	// reasons: TryGetNextFrame returns promptly either way, so this bounds how often it is asked, and an
+	// ordinary timer on Windows rounds up to 15.6 ms ticks.
+	m_pollTimer.setTimerType(Qt::PreciseTimer);
+	m_pollTimer.start(pollIntervalMsec(m_maxFramerate));
 
 	return true;
 }

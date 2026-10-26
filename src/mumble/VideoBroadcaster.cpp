@@ -271,6 +271,10 @@ bool VideoBroadcaster::start(std::unique_ptr< VideoSource > source) {
 		},
 		Qt::QueuedConnection);
 
+	// Before start(): a polling backend picks its polling rate when it starts. Without it the Windows
+	// backends polled at a fixed 30 a second whatever the share was set to.
+	m_source->setMaxFramerate(m_framerate);
+
 	if (!m_source->start()) {
 		m_source.reset();
 
@@ -359,6 +363,7 @@ void VideoBroadcaster::setCodec(int codec) {
 void VideoBroadcaster::configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality,
 								 int tileSize) {
 	setCodec(codec);
+	m_framerate = framerate;
 
 	const int effective = m_codec;
 	withCore([effective, bitrateKbps, framerate, tileQuality, tileSize](VideoEncodeCore &core) {

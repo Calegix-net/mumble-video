@@ -698,8 +698,11 @@ protected:
 
 	/// Repaints of the grid are coalesced to at most one per GRID_REPAINT_INTERVAL_MSEC. Qt's own update()
 	/// coalescing only collapses requests made within one turn of the event loop, and each incoming tile is
-	/// its own turn, so without this a screen share repainted the grid at the display's refresh rate.
-	static constexpr int GRID_REPAINT_INTERVAL_MSEC = 33;
+	/// its own turn, so without this a screen share repainted the grid once per tile. 16 ms, so that a share
+	/// sent at 60 fps is also shown at 60: at 33 ms the grid itself was the cap, at 30 fps - and at 21 fps
+	/// on Windows, which rounds an ordinary timer up to its 15.6 ms tick (hence a precise timer). A stream
+	/// sent at 30 fps still costs 30 repaints a second; the interval only bounds how close two can be.
+	static constexpr int GRID_REPAINT_INTERVAL_MSEC = 16;
 
 	/// Queues the given widget rect for the next coalesced repaint.
 	void scheduleGridRepaint(const QRect &dirty);
