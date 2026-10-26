@@ -613,6 +613,9 @@ QString Log::imageToImg(QImage img, int maxSize) {
 	constexpr int MAX_WIDTH  = 1600;
 	constexpr int MAX_HEIGHT = 1000;
 
+	// Never send more than the other clients accept, even when the server sets no limit.
+	maxSize = ChatImage::maxSendLength(maxSize);
+
 	if ((img.width() > MAX_WIDTH) || (img.height() > MAX_HEIGHT)) {
 		img = img.scaled(MAX_WIDTH, MAX_HEIGHT, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 	}
@@ -631,7 +634,7 @@ QString Log::imageToImg(QImage img, int maxSize) {
 		imgwrite.setQuality(quality);
 		imgwrite.write(img);
 		result = imageToImg(format, qba);
-		if (result.length() < maxSize || maxSize == 0) {
+		if (result.length() < maxSize) {
 			return result;
 		}
 		quality -= 10;
@@ -673,6 +676,8 @@ QString Log::validHtml(const QString &html, QTextCursor *tc) {
 			}
 		}
 	}
+
+	qtd.sanitizeImages();
 
 	qtd.adjustSize();
 	QSizeF s = qtd.size();
@@ -989,28 +994,6 @@ void Log::processDeferredLogs() {
 LogMessage::LogMessage(Log::MsgType mt, const QString &console, const QString &terse, bool ownMessage,
 					   const QString &overrideTTS, bool ignoreTTS)
 	: mt(mt), console(console), terse(terse), ownMessage(ownMessage), overrideTTS(overrideTTS), ignoreTTS(ignoreTTS) {
-}
-
-LogDocument::LogDocument(QObject *p) : QTextDocument(p) {
-}
-
-QVariant LogDocument::loadResource(int type, const QUrl &url) {
-	// Ignore requests for all external resources
-	// that aren't images. We don't support any of them.
-	if (type != QTextDocument::ImageResource) {
-		addResource(type, url, QByteArray());
-		return QByteArray();
-	}
-
-	// Only accept data URLs, not external resources
-	if (url.isValid() && url.scheme() == QLatin1String("data")) {
-		return QTextDocument::loadResource(type, url);
-	}
-
-	QImage qi(1, 1, QImage::Format_Mono);
-	addResource(type, url, qi);
-
-	return qi;
 }
 
 std::set< Log::MsgType > NotificationSoundBlocker::s_blockedNotificationSounds;
