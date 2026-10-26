@@ -315,6 +315,10 @@ struct Settings {
 	/// screen share is a separate question from whether it belongs on top of a game.
 	bool bVideoOverlay = false;
 
+	/// When the screen saver and display sleep are held off: ScreenAwake::Mode (0 never, 1 while video is
+	/// shared or watched, 2 whenever the client runs).
+	int iKeepScreenAwake = 1;
+
 	int iFramesPerPacket                = 2;
 	QString qsAudioInput                = {};
 	QString qsAudioOutput               = {};

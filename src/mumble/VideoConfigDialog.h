@@ -68,6 +68,8 @@ protected:
 	QSpinBox *m_screenVp9Bitrate = nullptr;
 	QSpinBox *m_screenFramerate  = nullptr;
 
+	QComboBox *m_keepAwake = nullptr;
+
 	QPushButton *m_previewButton = nullptr;
 	VideoPreview *m_preview      = nullptr;
 	QLabel *m_stats              = nullptr;
