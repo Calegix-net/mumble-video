@@ -21,6 +21,7 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QWindow>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QGraphicsItem>
 #include <QtWidgets/QGraphicsScene>
@@ -392,9 +393,64 @@ protected:
 		setOverlayEnabled(m_owner->videoOverlayEnabled());
 	}
 
+	/// In the windowed presentation the picture itself is a handle to move the window by, like a video
+	/// player's. Needed on Wayland in particular: there a client cannot place its own window, and whether
+	/// it gets a title bar to drag at all depends on the compositor and on Qt's decoration plugin, so a
+	/// pop-out could end up with nothing to move it by. Armed on the press and started only once the mouse
+	/// has travelled the drag distance, so a double-click (pop back in) still arrives as one.
+	void mousePressEvent(QMouseEvent *event) override {
+		if (m_windowed && event->button() == Qt::LeftButton) {
+			m_dragArmed       = true;
+			m_dragSystemMove  = false;
+			m_dragPressGlobal = event->globalPosition().toPoint();
+			m_dragWindowStart = pos();
+			event->accept();
+
+			return;
+		}
+
+		QWidget::mousePressEvent(event);
+	}
+
 	void mouseMoveEvent(QMouseEvent *event) override {
 		showControls();
+
+		if (m_dragArmed && (event->buttons() & Qt::LeftButton)) {
+			const QPoint travelled = event->globalPosition().toPoint() - m_dragPressGlobal;
+
+			if (!m_dragSystemMove && !m_dragManual
+				&& travelled.manhattanLength() >= QApplication::startDragDistance()) {
+				// The compositor's own move, which is the only kind Wayland allows and is also what X11 and
+				// Windows do best (snapping, edge resistance). Where the platform has none - the offscreen
+				// platform the tests run on, an old X11 window manager - the window is moved by hand.
+				QWindow *handle  = windowHandle();
+				m_dragSystemMove = handle && handle->startSystemMove();
+				m_dragManual     = !m_dragSystemMove;
+			}
+
+			if (m_dragSystemMove) {
+				// The compositor has the pointer until the button is released.
+				m_dragArmed = false;
+			} else if (m_dragManual) {
+				move(m_dragWindowStart + travelled);
+			}
+
+			event->accept();
+
+			return;
+		}
+
 		QWidget::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override {
+		if (event->button() == Qt::LeftButton) {
+			m_dragArmed      = false;
+			m_dragManual     = false;
+			m_dragSystemMove = false;
+		}
+
+		QWidget::mouseReleaseEvent(event);
 	}
 
 	/// Asked to go away: Esc, a double-click, the close button, or the title bar's own close.
@@ -606,6 +662,13 @@ private:
 
 	/// Whether this is a picture-in-picture window rather than the focus-driven fullscreen one.
 	bool m_detached = false;
+
+	/// A drag of the picture moving the windowed presentation - see mousePressEvent().
+	bool m_dragArmed      = false;
+	bool m_dragSystemMove = false;
+	bool m_dragManual     = false;
+	QPoint m_dragPressGlobal;
+	QPoint m_dragWindowStart;
 
 	/// What closing means. See CloseHandler.
 	CloseHandler m_onClose;
