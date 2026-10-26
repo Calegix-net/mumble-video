@@ -9,6 +9,7 @@
 #include <set>
 
 #include <QSystemTrayIcon>
+
 #include <QtCore/QDate>
 #include <QtCore/QMutex>
 #include <QtCore/QVector>
@@ -16,6 +17,7 @@
 #include <QtGui/QTextDocument>
 
 #include "ConfigDialog.h"
+#include "LogDocument.h"
 #include "ui_Log.h"
 
 #ifndef USE_NO_TTS
@@ -180,15 +182,6 @@ public:
 	LogMessage() = default;
 	LogMessage(Log::MsgType mt, const QString &console, const QString &terse, bool ownMessage,
 			   const QString &overrideTTS, bool ignoreTTS);
-};
-
-class LogDocument : public QTextDocument {
-private:
-	Q_OBJECT
-	Q_DISABLE_COPY(LogDocument)
-public:
-	LogDocument(QObject *p = nullptr);
-	QVariant loadResource(int, const QUrl &) Q_DECL_OVERRIDE;
 };
 
 class NotificationSoundBlocker {
