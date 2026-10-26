@@ -154,6 +154,9 @@ private slots:
 	void aReplacedStreamKeepsShowingTheOutgoingPicture();
 	void aWholeFrameStreamCanChangeShapeWithoutANewStreamId();
 	void hidingOtherPeoplesVideoKeepsItToPutBack();
+	void doubleClickingYourOwnTileFullscreensIt();
+	void yourOwnTileShowsWhoIsWatchingWithoutHovering();
+	void aPoppedOutWindowCanBeDraggedByItsPicture();
 };
 
 namespace {
@@ -2056,6 +2059,161 @@ void TestVideoGrid::hidingOtherPeoplesVideoKeepsItToPutBack() {
 	QVERIFY2(resumed, "watching was not resumed for the stream that had been watched");
 
 	QTest::qWait(50);
+}
+
+// Your own tiles fullscreen on a double-click exactly as everybody else's do: own camera first, own screen
+// after it, whichever of them is clicked.
+void TestVideoGrid::doubleClickingYourOwnTileFullscreensIt() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage screen(64, 36, QImage::Format_RGB32);
+	screen.fill(Qt::green);
+	grid.setSelfScreenFrame(screen);
+
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(grid.hasFocusedTile());
+
+	// And it is really up, and stays up while the preview keeps updating, as a live share's does.
+	const auto fullscreenWindow = [&grid]() -> QWidget * {
+		for (QWidget *candidate : QApplication::topLevelWidgets()) {
+			if (candidate != &grid && candidate->isVisible()) {
+				return candidate;
+			}
+		}
+		return nullptr;
+	};
+	QTRY_VERIFY(fullscreenWindow());
+	for (int i = 0; i < 5; ++i) {
+		screen.fill(i % 2 ? Qt::green : Qt::darkGreen);
+		grid.setSelfScreenFrame(screen);
+		QTest::qWait(20);
+	}
+	QVERIFY(grid.hasFocusedTile());
+	QVERIFY(fullscreenWindow());
+
+	// The same double-click again goes back to the grid.
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, grid.rect().center());
+	QVERIFY(!grid.hasFocusedTile());
+
+	// With the camera on as well, the screen is the second cell; the first is the camera.
+	QImage camera(64, 36, QImage::Format_RGB32);
+	camera.fill(Qt::blue);
+	grid.setSelfCameraFrame(camera);
+	QCOMPARE(grid.tileCount(), 2);
+
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, QPoint(grid.width() * 3 / 4, grid.height() / 2));
+	QVERIFY(grid.hasFocusedTile());
+	QTest::keyClick(&grid, Qt::Key_Escape);
+	QVERIFY(!grid.hasFocusedTile());
+
+	QTest::mouseDClick(&grid, Qt::LeftButton, Qt::NoModifier, QPoint(grid.width() / 4, grid.height() / 2));
+	QVERIFY(grid.hasFocusedTile());
+	grid.clearFocusedTile();
+}
+
+// The count of people watching you is painted on your own tile at all times, not only in the control bar
+// that appears while the mouse is over it.
+void TestVideoGrid::yourOwnTileShowsWhoIsWatchingWithoutHovering() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+	grid.show();
+	QVERIFY(QTest::qWaitForWindowExposed(&grid));
+
+	QImage screen(320, 180, QImage::Format_RGB32);
+	screen.fill(Qt::green);
+	grid.setSelfScreenFrame(screen);
+
+	// The mouse is not over the grid, so no hover bar is up to show the count instead.
+	QEvent leave(QEvent::Leave);
+	QApplication::sendEvent(&grid, &leave);
+	QTRY_VERIFY(grid.hoveredSlotForTesting() < 0);
+
+	// The badge's corner: top right of the picture. Something other than the plain picture is drawn there.
+	const QRect corner(grid.width() - 40, 0, 40, 24);
+	const auto cornerOf = [&]() { return grid.grab().toImage().copy(corner); };
+
+	QImage plain(corner.size(), QImage::Format_RGB32);
+	plain.fill(Qt::green);
+
+	const QImage nobody = cornerOf().convertToFormat(QImage::Format_RGB32);
+	QVERIFY(nobody != plain);
+
+	// And it is the count: someone starting to watch changes it, still without any hover.
+	grid.setOwnViewers(true, { VideoGrid::Viewer{ QStringLiteral("Alice"), 150 } });
+	QTRY_VERIFY(cornerOf().convertToFormat(QImage::Format_RGB32) != nobody);
+}
+
+// A popped-out window is moved by dragging its picture. On Wayland that is the compositor's move, started
+// through QWindow::startSystemMove(); the offscreen platform the tests run on has none, which exercises the
+// fallback that moves the window itself. Either way, a double-click still pops the stream back in.
+void TestVideoGrid::aPoppedOutWindowCanBeDraggedByItsPicture() {
+	VideoGrid grid;
+	grid.resize(320, 180);
+
+	QImage tile(32, 32, QImage::Format_RGB32);
+	tile.fill(Qt::blue);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	buffer.open(QIODevice::WriteOnly);
+	QVERIFY(tile.save(&buffer, "JPEG", 90));
+	buffer.close();
+
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_TiledImage,
+			 MumbleProto::VideoState_SourceKind_Display);
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 0, 0, encoded);
+	waitForAsyncDecode();
+
+	grid.popOutSurface(SENDER, STREAM);
+	QVERIFY(grid.isPoppedOut(SENDER, STREAM));
+
+	QWidget *window = nullptr;
+	for (QWidget *candidate : QApplication::topLevelWidgets()) {
+		if (candidate != &grid && candidate->isVisible() && candidate->isWindow()) {
+			window = candidate;
+		}
+	}
+	QVERIFY(window);
+	QVERIFY(QTest::qWaitForWindowExposed(window));
+
+	const QPoint start   = window->pos();
+	const QPoint press   = window->rect().center();
+	const QPoint offset  = QPoint(60, 40);
+	const auto sendMouse = [window](QEvent::Type type, const QPoint &local, Qt::MouseButton button,
+									Qt::MouseButtons buttons) {
+		QMouseEvent event(type, QPointF(local), QPointF(window->mapToGlobal(local)), button, buttons,
+						  Qt::NoModifier);
+		QApplication::sendEvent(window, &event);
+	};
+
+	sendMouse(QEvent::MouseButtonPress, press, Qt::LeftButton, Qt::LeftButton);
+	// Under the drag distance: a click, which must not move anything.
+	sendMouse(QEvent::MouseMove, press + QPoint(1, 0), Qt::NoButton, Qt::LeftButton);
+	QCOMPARE(window->pos(), start);
+
+	// The window moves with the pointer. Positions are global, so they are worked out from where the press
+	// was rather than from the window, which is itself moving.
+	const QPoint pressGlobal = window->mapToGlobal(press);
+	for (int step = 1; step <= 4; ++step) {
+		const QPoint global = pressGlobal + offset * step / 4;
+		QMouseEvent move(QEvent::MouseMove, QPointF(window->mapFromGlobal(global)), QPointF(global), Qt::NoButton,
+						 Qt::LeftButton, Qt::NoModifier);
+		QApplication::sendEvent(window, &move);
+	}
+	QTRY_COMPARE(window->pos(), start + offset);
+
+	sendMouse(QEvent::MouseButtonRelease, window->mapFromGlobal(pressGlobal + offset), Qt::LeftButton,
+			  Qt::NoButton);
+
+	// Moving the mouse with no button held does nothing to the window.
+	sendMouse(QEvent::MouseMove, window->rect().center() + QPoint(30, 0), Qt::NoButton, Qt::NoButton);
+	QCOMPARE(window->pos(), start + offset);
+
+	QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, window->rect().center());
+	QTRY_VERIFY(!grid.isPoppedOut(SENDER, STREAM));
 }
 
 QTEST_MAIN(TestVideoGrid)
