@@ -13,6 +13,8 @@
 #include "QtUtils.h"
 #include "Timer.h"
 
+class Channel;
+
 class UserDelegate : public QStyledItemDelegate {
 private:
 	Q_OBJECT
@@ -40,6 +42,8 @@ private:
 	int m_iconTotalDimension;
 	qt_unique_ptr< UserDelegate > m_userDelegate;
 	void adjustIcons();
+	/// Asks before a double-click joins c; true to go ahead.
+	bool confirmJoin(const Channel *c);
 
 protected:
 	void mouseReleaseEvent(QMouseEvent *) Q_DECL_OVERRIDE;
@@ -53,7 +57,9 @@ public:
 					 const QVector< int > &roles = QVector< int >()) Q_DECL_OVERRIDE;
 
 public slots:
-	void nodeActivated(const QModelIndex &idx);
+	/// Opens a chat with a user, or joins a channel. byDoubleClick applies the "Double-click on a channel"
+	/// setting; keyboard activation joins in every mode.
+	void nodeActivated(const QModelIndex &idx, bool byDoubleClick = false);
 	void updateChannel(const QModelIndex &index);
 };
 

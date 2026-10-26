@@ -166,6 +166,7 @@
 	PROCESS(ui, CHANNEL_EXPANSION_MODE_KEY, ceExpand)                            \
 	PROCESS(ui, CHANNEL_DRAG_MODE_KEY, ceChannelDrag)                            \
 	PROCESS(ui, USER_DRAG_MODE_KEY, ceUserDrag)                                  \
+	PROCESS(ui, CHANNEL_DOUBLE_CLICK_KEY, ceChannelDoubleClick)                  \
 	PROCESS(ui, ALWAYS_ON_TOP_KEY, aotbAlwaysOnTop)                              \
 	PROCESS(ui, QUIT_BEHAVIOR_KEY, quitBehavior)                                 \
 	PROCESS(ui, SHOW_DEVELOPER_MENU_KEY, bEnableDeveloperMenu)                   \

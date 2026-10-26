@@ -192,6 +192,7 @@ const SettingsKey THEME_METHOD_KEY                     = { "theme_method" };
 const SettingsKey CHANNEL_EXPANSION_MODE_KEY           = { "channel_expansion_mode" };
 const SettingsKey CHANNEL_DRAG_MODE_KEY                = { "channel_drag_mode" };
 const SettingsKey USER_DRAG_MODE_KEY                   = { "user_drag_mode" };
+const SettingsKey CHANNEL_DOUBLE_CLICK_KEY             = { "channel_double_click" };
 const SettingsKey ALWAYS_ON_TOP_KEY                    = { "always_on_top" };
 const SettingsKey QUIT_BEHAVIOR_KEY                    = { "quit_behavior" };
 const SettingsKey SHOW_DEVELOPER_MENU_KEY              = { "show_developer_menu" };

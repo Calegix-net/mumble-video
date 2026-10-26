@@ -194,6 +194,7 @@ struct Settings {
 	enum LoopMode { None, Local, Server };
 	enum ChannelExpand { NoChannels, ChannelsWithUsers, AllChannels };
 	enum ChannelDrag { Ask, DoNothing, Move };
+	enum ChannelDoubleClick { ChannelDoubleClickAsk, ChannelDoubleClickJoin, ChannelDoubleClickNothing };
 	enum ServerShow { ShowPopulated, ShowReachable, ShowAll };
 	enum TalkState { Passive, Talking, Whispering, Shouting, MutedTalking };
 	enum IdleAction { Nothing, Deafen, Mute };
@@ -458,6 +459,12 @@ struct Settings {
 	ChannelExpand ceExpand               = ChannelsWithUsers;
 	ChannelDrag ceChannelDrag            = Ask;
 	ChannelDrag ceUserDrag               = Move;
+
+	/// What a double-click on a channel in the tree does. Stock Mumble joins straight away, and a
+	/// mis-aimed double-click then moves you out of the conversation you were in, so this asks first
+	/// unless told otherwise. Enter on a selected channel still joins it in every mode.
+	ChannelDoubleClick ceChannelDoubleClick = ChannelDoubleClickAsk;
+
 	bool bMinimalView                    = false;
 	bool bHideFrame                      = false;
 
