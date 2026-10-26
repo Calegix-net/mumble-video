@@ -45,6 +45,12 @@ finish-args:
   # (audio.input_system/output_system = PipeWire), which then has nothing to connect to and gives
   # silence in both directions. Exposing the PipeWire socket is what makes that backend work.
   - --filesystem=xdg-run/pipewire-0
+  # Read-only, and only Mumble's own settings directories: a regular Mumble's certificate is the user's
+  # identity on every server they registered with, and the flatpak's first run takes it from there
+  # instead of making a new one that those servers then refuse (see adoptInstalledMumbleIdentity() in
+  # main.cpp). The first is a distribution install's, the second the Flathub info.mumble.Mumble one's.
+  - --filesystem=xdg-config/Mumble:ro
+  - --filesystem=~/.var/app/info.mumble.Mumble/config/Mumble:ro
   # The client implements the net.sourceforge.mumble.mumble RPC interface (startTalking, setSelfMuted,
   # setTransmitMode, ...) but cannot claim the name without an own-name grant, so external push-to-talk
   # clients get "The name is not activatable" on every call. In-app global shortcuts on Wayland go

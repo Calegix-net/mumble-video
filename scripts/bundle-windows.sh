@@ -42,6 +42,15 @@ done
 mkdir -p "${OUT_DIR}/sqldrivers"
 cp "${SYSROOT}/lib/qt6/plugins/sqldrivers/qsqlite.dll" "${OUT_DIR}/sqldrivers/" 2>/dev/null || true
 
+# OpenSSL's legacy provider, loaded by the client only to read a certificate a Mumble built against
+# OpenSSL 1.x saved (RC2-encrypted PKCS12; see loadLegacyProvider() in Cert.cpp). libcrypto was built to
+# look for it in the cross-sysroot, a path no Windows machine has, so it goes in ossl-modules\ beside the
+# executable, where the client looks next. Placed before the walk so libcrypto is pulled in for it too.
+if [ -f "${SYSROOT}/lib/ossl-modules/legacy.dll" ]; then
+    mkdir -p "${OUT_DIR}/ossl-modules"
+    cp "${SYSROOT}/lib/ossl-modules/legacy.dll" "${OUT_DIR}/ossl-modules/"
+fi
+
 # Walk imports breadth-first over everything placed so far, including the Qt plugins, since a plugin can
 # pull in libraries the executable itself never references.
 declare -A seen

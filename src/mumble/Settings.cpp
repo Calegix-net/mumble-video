@@ -217,6 +217,20 @@ void Settings::save() const {
 	}
 }
 
+/// The certificate alone from a settings document whose full decode failed. Empty if it has none or that
+/// entry is unreadable as well.
+static Settings::KeyPair loadCertificate(const nlohmann::json &settingsJSON) {
+	try {
+		if (settingsJSON.is_object() && settingsJSON.contains(static_cast< const char * >(SettingsKeys::CERTIFICATE_KEY))) {
+			return CertWizard::importCert(settingsJSON.at(SettingsKeys::CERTIFICATE_KEY).get< QByteArray >());
+		}
+	} catch (const nlohmann::json::exception &e) {
+		qWarning() << "Settings: the certificate entry could not be read either:" << e.what();
+	}
+
+	return {};
+}
+
 void Settings::load(const QString &path, bool skipSettingsBackupPrompt) {
 	if (path.endsWith(QLatin1String(BACKUP_FILE_EXTENSION))) {
 		// Trim away the backup extension
@@ -281,9 +295,23 @@ void Settings::load(const QString &path, bool skipSettingsBackupPrompt) {
 	} catch (const nlohmann::json::exception &e) {
 		qWarning() << "Failed to load settings from" << path << "due to invalid format: " << e.what();
 
+		// The decode above is all or nothing, so one value this build cannot read discards the certificate
+		// along with everything else. That is the one setting that cannot simply be set again: it is the
+		// user's identity, the thing a server's registrations and admin rights are tied to. Without it the
+		// client falls back to an old automatic backup or a brand new certificate, a registered name is
+		// then refused as "wrong certificate", and the next save writes the replacement into this file -
+		// which Mumble Video shares with Mumble, so Mumble loses the identity too. Read it on its own.
+		const Settings::KeyPair identity = loadCertificate(settingsJSON);
+
 		if (!path.endsWith(QLatin1String(BACKUP_FILE_EXTENSION)) && QFileInfo(path + BACKUP_FILE_EXTENSION).exists()) {
 			qWarning() << "Falling back to backup" << path + BACKUP_FILE_EXTENSION;
 			load(path + BACKUP_FILE_EXTENSION, skipSettingsBackupPrompt);
+		}
+
+		// Preferred over the backup's: this file is the newer of the two.
+		if (CertWizard::validateCert(identity)) {
+			qWarning() << "Kept the certificate from" << path << "although its other settings could not be read";
+			kpCertificate = identity;
 		}
 	}
 

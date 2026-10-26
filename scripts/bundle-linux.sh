@@ -36,6 +36,16 @@ for category in platforms multimedia tls imageformats iconengines platformthemes
     fi
 done
 
+# OpenSSL's legacy provider, which the client loads only to read a certificate a Mumble built against
+# OpenSSL 1.x saved (RC2-encrypted PKCS12; see loadLegacyProvider() in Cert.cpp). The bundled libcrypto
+# looks for it where this build machine keeps it, which another distribution may not have, so it travels
+# in lib/ossl-modules, the second place the client looks.
+OSSL_MODULES_DIR="$(pkg-config --variable=modulesdir libcrypto 2>/dev/null || echo /usr/lib64/ossl-modules)"
+if [ -f "${OSSL_MODULES_DIR}/legacy.so" ]; then
+    mkdir -p "${OUT_DIR}/lib/ossl-modules"
+    cp "${OSSL_MODULES_DIR}/legacy.so" "${OUT_DIR}/lib/ossl-modules/"
+fi
+
 # Resolve dependencies over everything placed above, Qt plugins included, since a plugin can need
 # libraries the executable never references. Repeated until nothing new turns up, because each library
 # copied in can itself pull in more.
