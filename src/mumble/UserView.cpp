@@ -6,6 +6,7 @@
 #include "UserView.h"
 
 #include "Channel.h"
+#include "ChannelDoubleClickGuard.h"
 #include "ClientUser.h"
 #include "Log.h"
 #include "MainWindow.h"
@@ -16,6 +17,9 @@
 #include <QtGui/QDesktopServices>
 #include <QtGui/QHelpEvent>
 #include <QtGui/QPainter>
+#include <QtWidgets/QCheckBox>
+#include <QtWidgets/QMessageBox>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QWhatsThis>
 
 UserDelegate::UserDelegate(QObject *p) : QStyledItemDelegate(p) {
@@ -120,7 +124,11 @@ UserView::UserView(QWidget *p) : QTreeView(p), m_userDelegate(make_qt_unique< Us
 	// the actual font details).
 	QTimer::singleShot(0, [this]() { adjustIcons(); });
 
-	connect(this, SIGNAL(doubleClicked(const QModelIndex &)), this, SLOT(nodeActivated(const QModelIndex &)));
+	// Double-clicks reach nodeActivated() only through the guard, which drops the ones that were not aimed
+	// (see ChannelDoubleClickGuard). Enter still goes straight there from keyPressEvent().
+	auto *doubleClickGuard = new ChannelDoubleClickGuard(this);
+	connect(doubleClickGuard, &ChannelDoubleClickGuard::doubleClicked, this,
+			[this](const QModelIndex &idx) { nodeActivated(idx, true); });
 }
 
 void UserView::adjustIcons() {
@@ -242,7 +250,7 @@ void UserView::keyPressEvent(QKeyEvent *ev) {
 	QTreeView::keyPressEvent(ev);
 }
 
-void UserView::nodeActivated(const QModelIndex &idx) {
+void UserView::nodeActivated(const QModelIndex &idx, bool byDoubleClick) {
 	UserModel *um = static_cast< UserModel * >(model());
 	ClientUser *p = um->getUser(idx);
 	if (p) {
@@ -251,10 +259,60 @@ void UserView::nodeActivated(const QModelIndex &idx) {
 	}
 
 	Channel *c = um->getChannel(idx);
-	if (c) {
-		// if a channel is activated join it
-		Global::get().sh->joinChannel(Global::get().uiSession, c->iId);
+	if (!c || !Global::get().sh) {
+		return;
 	}
+
+	const ClientUser *self  = ClientUser::get(Global::get().uiSession);
+	const bool isOwnChannel = self && self->cChannel == c;
+
+	// Enter on a selected channel is deliberate by nature and joins in every mode; a double-click does
+	// what the "Double-click on a channel" setting says.
+	const ChannelDoubleClickAction action =
+		byDoubleClick ? channelDoubleClickAction(Global::get().s.ceChannelDoubleClick, isOwnChannel)
+					  : (isOwnChannel ? ChannelDoubleClickAction::Ignore : ChannelDoubleClickAction::Join);
+
+	switch (action) {
+		case ChannelDoubleClickAction::Ignore:
+			return;
+		case ChannelDoubleClickAction::Ask:
+			if (!confirmJoin(c)) {
+				return;
+			}
+			break;
+		case ChannelDoubleClickAction::Join:
+			break;
+	}
+
+	Global::get().sh->joinChannel(Global::get().uiSession, c->iId);
+}
+
+bool UserView::confirmJoin(const Channel *c) {
+	const unsigned int channelId = c->iId;
+
+	QMessageBox mb(QMessageBox::Question, QLatin1String("Mumble"), tr("Join channel \"%1\"?").arg(c->qsName),
+				   QMessageBox::NoButton, this);
+	// A channel name is not markup.
+	mb.setTextFormat(Qt::PlainText);
+	QCheckBox *qcbDontAsk  = new QCheckBox(tr("Don't ask again"));
+	QPushButton *qpbJoin   = mb.addButton(tr("Join"), QMessageBox::AcceptRole);
+	QPushButton *qpbCancel = mb.addButton(QMessageBox::Cancel);
+	mb.setDefaultButton(qpbJoin);
+	mb.setEscapeButton(qpbCancel);
+	mb.setCheckBox(qcbDontAsk);
+	mb.exec();
+
+	if (mb.clickedButton() != qpbJoin) {
+		return false;
+	}
+
+	if (qcbDontAsk->isChecked()) {
+		// Settings > User Interface > "Double-click on a channel" turns this back on.
+		Global::get().s.ceChannelDoubleClick = Settings::ChannelDoubleClickJoin;
+	}
+
+	// The dialog ran an event loop: the channel may have been removed, or the server dropped, meanwhile.
+	return Global::get().sh && Channel::get(channelId);
 }
 
 void UserView::keyboardSearch(const QString &) {

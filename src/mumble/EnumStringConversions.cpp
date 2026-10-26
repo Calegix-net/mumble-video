@@ -29,6 +29,11 @@
 	PROCESS(Settings::ChannelDrag, DoNothing, "DoNothing") \
 	PROCESS(Settings::ChannelDrag, Move, "Move")
 
+#define CHANNEL_DOUBLE_CLICK_VALUES                                                 \
+	PROCESS(Settings::ChannelDoubleClick, ChannelDoubleClickAsk, "Ask")             \
+	PROCESS(Settings::ChannelDoubleClick, ChannelDoubleClickJoin, "Join")           \
+	PROCESS(Settings::ChannelDoubleClick, ChannelDoubleClickNothing, "DoNothing")
+
 #define SERVER_SHOW_VALUES                                        \
 	PROCESS(Settings::ServerShow, ShowPopulated, "ShowPopulated") \
 	PROCESS(Settings::ServerShow, ShowReachable, "ShowReachable") \
@@ -171,6 +176,9 @@
 	BEFORE_CODE(Settings::ChannelDrag)                 \
 	CHANNEL_DRAG_VALUES                                \
 	AFTER_CODE                                         \
+	BEFORE_CODE(Settings::ChannelDoubleClick)          \
+	CHANNEL_DOUBLE_CLICK_VALUES                        \
+	AFTER_CODE                                         \
 	BEFORE_CODE(Settings::ServerShow)                  \
 	SERVER_SHOW_VALUES                                 \
 	AFTER_CODE                                         \
@@ -281,6 +289,7 @@ PROCESS_ALL_ENUMS
 #undef IDLE_ACTION_VALUES
 #undef TALK_STATE_VALUES
 #undef SERVER_SHOW_VALUES
+#undef CHANNEL_DOUBLE_CLICK_VALUES
 #undef CHANNEL_DRAG_VALUES
 #undef CHANNEL_EXPAND_VALUES
 #undef LOOP_MODE_VALUES

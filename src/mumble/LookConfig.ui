@@ -919,6 +919,29 @@
         </property>
        </widget>
       </item>
+      <item row="9" column="0">
+       <widget class="QLabel" name="qliChannelDoubleClick">
+        <property name="text">
+         <string>Double-click on a channel</string>
+        </property>
+        <property name="buddy">
+         <cstring>qcbChannelDoubleClick</cstring>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="1">
+       <widget class="MUComboBox" name="qcbChannelDoubleClick">
+        <property name="toolTip">
+         <string>What double-clicking a channel in the channel tree does.</string>
+        </property>
+        <property name="whatsThis">
+         <string>This sets what a double-click on a channel does; it can be used to prevent joining a channel by accident. &lt;i&gt;Ask before joining&lt;/i&gt; asks you to confirm first. &lt;i&gt;Join immediately&lt;/i&gt; joins without asking. &lt;i&gt;Do nothing&lt;/i&gt; ignores double-clicks; join with the channel's context menu, by dragging yourself onto it, or by selecting it and pressing Enter.</string>
+        </property>
+        <property name="accessibleName">
+         <string>Channel double-click action</string>
+        </property>
+       </widget>
+      </item>
       <item row="2" column="1">
        <widget class="MUComboBox" name="qcbExpand">
         <property name="toolTip">
@@ -1312,6 +1335,7 @@
   <tabstop>qcbShowNicknamesOnly</tabstop>
   <tabstop>qcbChatBarUseSelection</tabstop>
   <tabstop>qcbFilterHidesEmptyChannels</tabstop>
+  <tabstop>qcbChannelDoubleClick</tabstop>
   <tabstop>qcbUsersAlwaysVisible</tabstop>
   <tabstop>qcbLocalUserVisible</tabstop>
   <tabstop>qcbAbbreviateChannelNames</tabstop>

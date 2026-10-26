@@ -161,6 +161,8 @@ set(MUMBLE_SOURCES
 	"Cert.cpp"
 	"Cert.h"
 	"Cert.ui"
+	"ChannelDoubleClickGuard.cpp"
+	"ChannelDoubleClickGuard.h"
 	"ChannelFilterMode.h"
 	"ClientUser.cpp"
 	"ClientUser.h"

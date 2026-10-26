@@ -136,6 +136,8 @@ def getDefaultValueForType(dataType):
         return "Settings::AllChannels"
     elif dataType in ["ChannelDrag"]:
         return "Settings::DoNothing"
+    elif dataType in ["ChannelDoubleClick"]:
+        return "Settings::ChannelDoubleClickNothing"
     elif dataType in ["ServerShow"]:
         return "Settings::ShowPopulated"
     elif dataType in ["IdleAction"]:

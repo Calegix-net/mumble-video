@@ -72,6 +72,13 @@ LookConfig::LookConfig(Settings &st) : ConfigWidget(st) {
 	qcbUserDrag->insertItem(Settings::DoNothing, tr("Do Nothing"), Settings::DoNothing);
 	qcbUserDrag->insertItem(Settings::Move, tr("Move"), Settings::Move);
 
+	qcbChannelDoubleClick->insertItem(Settings::ChannelDoubleClickAsk, tr("Ask before joining"),
+									  Settings::ChannelDoubleClickAsk);
+	qcbChannelDoubleClick->insertItem(Settings::ChannelDoubleClickJoin, tr("Join immediately"),
+									  Settings::ChannelDoubleClickJoin);
+	qcbChannelDoubleClick->insertItem(Settings::ChannelDoubleClickNothing, tr("Do nothing"),
+									  Settings::ChannelDoubleClickNothing);
+
 	connect(qrbLCustom, SIGNAL(toggled(bool)), qcbLockLayout, SLOT(setEnabled(bool)));
 	connect(qbClearBackgroundColor, &QPushButton::clicked, this, &LookConfig::talkinguiBackgroundCleared);
 	connect(qbBackgroundColor, &QPushButton::clicked, this, &LookConfig::qbBackgroundColor_clicked);
@@ -194,6 +201,7 @@ void LookConfig::load(const Settings &r) {
 	loadComboBox(qcbLanguage, 0);
 	loadComboBox(qcbChannelDrag, 0);
 	loadComboBox(qcbUserDrag, 0);
+	loadComboBox(qcbChannelDoubleClick, 0);
 
 	setStyleType(r.styleType);
 	// Load Layout checkbox state
@@ -228,6 +236,7 @@ void LookConfig::load(const Settings &r) {
 	loadComboBox(qcbExpand, r.ceExpand);
 	loadComboBox(qcbChannelDrag, r.ceChannelDrag);
 	loadComboBox(qcbUserDrag, r.ceUserDrag);
+	loadComboBox(qcbChannelDoubleClick, r.ceChannelDoubleClick);
 	loadCheckBox(qcbUsersTop, r.bUserTop);
 
 	loadComboBox(qcbQuitBehavior, static_cast< int >(r.quitBehavior));
@@ -300,6 +309,8 @@ void LookConfig::save() const {
 	s.ceExpand      = static_cast< Settings::ChannelExpand >(qcbExpand->currentIndex());
 	s.ceChannelDrag = static_cast< Settings::ChannelDrag >(qcbChannelDrag->currentIndex());
 	s.ceUserDrag    = static_cast< Settings::ChannelDrag >(qcbUserDrag->currentIndex());
+	s.ceChannelDoubleClick =
+		static_cast< Settings::ChannelDoubleClick >(qcbChannelDoubleClick->currentIndex());
 
 	if (qcbUsersTop->isChecked() != s.bUserTop) {
 		s.bUserTop              = qcbUsersTop->isChecked();
