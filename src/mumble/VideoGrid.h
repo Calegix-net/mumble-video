@@ -869,8 +869,11 @@ protected:
 	std::vector< Viewer > m_ownScreenViewers;
 	/// Brings an own tile's eye button in line with its viewer list.
 	void refreshViewersButton(TileControlBar *controls, const std::vector< Viewer > &viewers);
-	/// "You (screen)", plus how many are watching when anyone is.
+	/// "You (screen)", plus how many are watching when anyone is. What the fullscreen window shows; the
+	/// grid shows the plain name and ownWatcherBadge() instead.
 	QString ownTileLabel(bool screen) const;
+	/// "👁 N": how many are watching an own tile, painted on it at all times - not only in its hover bar.
+	QString ownWatcherBadge(bool screen) const;
 
 	/// Whether the cursor is currently over this widget at all, and where - see updateHoveredBar(). A
 	/// plain QWidget*, not a smart pointer to a locally-defined type: FullscreenVideoWindow is declared in

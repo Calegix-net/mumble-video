@@ -3019,6 +3019,10 @@ void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector
 														: tr("Watching:\n%1").arg(lines.join(QLatin1Char('\n'))));
 }
 
+QString VideoGrid::ownWatcherBadge(bool screen) const {
+	return QStringLiteral("👁 %1").arg((screen ? m_ownScreenViewers : m_ownCameraViewers).size());
+}
+
 QString VideoGrid::ownTileLabel(bool screen) const {
 	const QString base           = screen ? tr("You (screen)") : tr("You");
 	const std::size_t watching = (screen ? m_ownScreenViewers : m_ownCameraViewers).size();
@@ -3229,14 +3233,34 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		return;
 	}
 
+	// How many are watching an own tile, top right of its picture, always - the same count as the eye in
+	// its control bar, which only shows while the mouse is over the tile. Whether anyone is watching is
+	// the first thing a sharer wants to know, and having to hover to find out read as the count being
+	// missing. Shown at zero too: "nobody yet" is an answer as well.
+	const auto drawWatcherBadge = [&](const QImage &image, const QRect &cell, const QString &badge) {
+		const QRect target = pictureRect(cell, image.size()).adjusted(4, 4, -4, -4);
+
+		QRect backdrop = painter.fontMetrics().boundingRect(target, Qt::AlignTop | Qt::AlignRight, badge);
+		backdrop.adjust(-4, -1, 4, 1);
+
+		painter.fillRect(backdrop, QColor(0, 0, 0, 160));
+
+		painter.setPen(Qt::white);
+		painter.drawText(target, Qt::AlignTop | Qt::AlignRight, badge);
+	};
+
 	int index = 0;
 
 	if (!m_selfCameraFrame.isNull()) {
-		drawInto(m_selfCameraFrame, cellRect(layout, index++), ownTileLabel(false));
+		const QRect cell = cellRect(layout, index++);
+		drawInto(m_selfCameraFrame, cell, tr("You"));
+		drawWatcherBadge(m_selfCameraFrame, cell, ownWatcherBadge(false));
 	}
 
 	if (!m_selfScreenFrame.isNull()) {
-		drawInto(m_selfScreenFrame, cellRect(layout, index++), ownTileLabel(true));
+		const QRect cell = cellRect(layout, index++);
+		drawInto(m_selfScreenFrame, cell, tr("You (screen)"));
+		drawWatcherBadge(m_selfScreenFrame, cell, ownWatcherBadge(true));
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
