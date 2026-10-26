@@ -1023,6 +1023,8 @@ if(dbus AND (NOT WIN32 AND NOT APPLE))
 		PRIVATE
 			"DBus.cpp"
 			"DBus.h"
+			"GlobalShortcutPortal.cpp"
+			"GlobalShortcutPortal.h"
 	)
 	
 	target_compile_definitions(mumble_client_object_lib PUBLIC "USE_DBUS")

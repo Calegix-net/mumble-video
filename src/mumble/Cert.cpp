@@ -18,16 +18,26 @@
 #include "Utils.h"
 #include "Global.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QTimer>
+#include <QtCore/QCoreApplication>
+#include <QtCore/QDir>
+#include <QtCore/QFileInfo>
 #include <QtCore/QUrl>
 #include <QtGui/QDesktopServices>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QToolTip>
 
 #include <openssl/evp.h>
+#include <openssl/opensslv.h>
 #include <openssl/pkcs12.h>
 #include <openssl/x509.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#	include <openssl/err.h>
+#	include <openssl/provider.h>
+#endif
 
 #define SSL_STRING(x) QString::fromLatin1(x).toUtf8().data()
 
@@ -350,7 +360,9 @@ void CertWizard::on_qleExportFile_textChanged(const QString &text) {
 void CertWizard::on_qpbImportFile_clicked() {
 	QString fname =
 		QFileDialog::getOpenFileName(this, tr("Select file to import certificate from"), qleImportFile->text(),
-									 QLatin1String("PKCS12 (*.p12 *.pfx *.pkcs12);;All (*)"));
+									 QLatin1String("PKCS12 (*.p12 *.pfx *.pkcs12);;")
+										 + tr("Mumble settings (mumble_settings.json)")
+										 + QLatin1String(";;All (*)"));
 	if (!fname.isNull()) {
 		qleImportFile->setText(QDir::toNativeSeparators(fname));
 	}
@@ -428,7 +440,90 @@ Settings::KeyPair CertWizard::generateNewCert(QString qsname, const QString &qse
 	return Settings::KeyPair(qlCert, qskKey);
 }
 
+/**
+ * Makes OpenSSL's legacy algorithms available, for reading a PKCS12 file that needs them.
+ *
+ * An identity saved or exported by a Mumble built against OpenSSL 1.x - every Mumble up to 1.4, and any
+ * later build still on 1.1 - is a PKCS12 whose certificate is encrypted with RC2-40 (OpenSSL 1.x's
+ * default for PKCS12_create). OpenSSL 3, which every build of this client uses, keeps RC2 in its legacy
+ * provider and does not load that by default, so PKCS12_parse fails on such a file with "unsupported"
+ * and no certificate comes out. That was the whole of "my certificate from Mumble cannot be imported":
+ * the export was fine, this side could not decrypt it, and the client went on to make a new identity
+ * that the servers the old one was registered on refused.
+ *
+ * Loaded on demand, only once a PKCS12 has failed to parse, and with the default provider kept, so
+ * nothing else changes. The module is looked for where OpenSSL was built to look first (a distribution's
+ * or the flatpak runtime's libcrypto), then beside the executable, where the Windows and portable Linux
+ * bundles carry it.
+ */
+static bool loadLegacyProvider() {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	static OSSL_PROVIDER *legacy = nullptr;
+	static bool tried            = false;
+	if (tried) {
+		return legacy != nullptr;
+	}
+	tried = true;
+
+	legacy = OSSL_PROVIDER_try_load(nullptr, "legacy", 1);
+	if (!legacy && QCoreApplication::instance()) {
+		const QDir appDir(QCoreApplication::applicationDirPath());
+		for (const QString &dir : { appDir.filePath(QLatin1String("ossl-modules")),
+									appDir.filePath(QLatin1String("../lib/ossl-modules")) }) {
+			if (!QFileInfo(dir).isDir()) {
+				continue;
+			}
+			OSSL_PROVIDER_set_default_search_path(nullptr, QDir::toNativeSeparators(dir).toUtf8().constData());
+			legacy = OSSL_PROVIDER_try_load(nullptr, "legacy", 1);
+			if (legacy) {
+				break;
+			}
+		}
+		// Back to OpenSSL's own idea of where modules live, for anything loaded later.
+		OSSL_PROVIDER_set_default_search_path(nullptr, nullptr);
+	}
+	ERR_clear_error();
+
+	if (!legacy) {
+		qWarning("CertWizard: the OpenSSL legacy provider is not available, so a certificate saved by a Mumble "
+				 "built with OpenSSL 1.x cannot be read");
+	}
+	return legacy != nullptr;
+#else
+	return false;
+#endif
+}
+
+/// PKCS12_parse with no password, then with \p pw if that gave nothing. Returns PKCS12_parse's result.
+static int parsePkcs12(PKCS12 *pkcs, const QString &pw, EVP_PKEY **pkey, X509 **x509, STACK_OF(X509) **certs) {
+	int ret = PKCS12_parse(pkcs, nullptr, pkey, x509, certs);
+	if (!*pkey && !*x509 && !pw.isEmpty()) {
+		if (*certs) {
+			if (ret)
+				sk_X509_free(*certs);
+			*certs = nullptr;
+		}
+		ret = PKCS12_parse(pkcs, pw.toUtf8().constData(), pkey, x509, certs);
+	}
+	return ret;
+}
+
 Settings::KeyPair CertWizard::importCert(QByteArray data, const QString &pw) {
+	// A Mumble settings file is accepted as well as a PKCS12 export: its "certificate" entry is that same
+	// PKCS12 export, base64-encoded. This is the way to bring an existing identity over when exporting it
+	// is not an option or did not work - pointing the import page at the other client's
+	// mumble_settings.json - and it is how a flatpak picks up the identity of a Mumble installed beside it.
+	if (data.startsWith('{')) {
+		const QJsonDocument document = QJsonDocument::fromJson(data);
+		if (document.isObject()) {
+			const QJsonValue certificate = document.object().value(QLatin1String("certificate"));
+			if (certificate.isString()) {
+				return importCert(QByteArray::fromBase64(certificate.toString().toLatin1()), pw);
+			}
+		}
+		return {};
+	}
+
 	X509 *x509            = nullptr;
 	EVP_PKEY *pkey        = nullptr;
 	PKCS12 *pkcs          = nullptr;
@@ -440,14 +535,22 @@ Settings::KeyPair CertWizard::importCert(QByteArray data, const QString &pw) {
 	mem  = BIO_new_mem_buf(data.data(), static_cast< int >(data.size()));
 	pkcs = d2i_PKCS12_bio(mem, nullptr);
 	if (pkcs) {
-		ret = PKCS12_parse(pkcs, nullptr, &pkey, &x509, &certs);
-		if (pkcs && !pkey && !x509 && !pw.isEmpty()) {
-			if (certs) {
-				if (ret)
+		ret = parsePkcs12(pkcs, pw, &pkey, &x509, &certs);
+		if ((!pkey || !x509) && loadLegacyProvider()) {
+			// Nothing usable came out, and that is what an RC2-encrypted bag looks like. Try once more
+			// with the legacy algorithms available (see loadLegacyProvider()).
+			if (ret) {
+				if (pkey)
+					EVP_PKEY_free(pkey);
+				if (x509)
+					X509_free(x509);
+				if (certs)
 					sk_X509_free(certs);
-				certs = nullptr;
 			}
-			ret = PKCS12_parse(pkcs, pw.toUtf8().constData(), &pkey, &x509, &certs);
+			pkey  = nullptr;
+			x509  = nullptr;
+			certs = nullptr;
+			ret   = parsePkcs12(pkcs, pw, &pkey, &x509, &certs);
 		}
 		if (pkey && x509 && X509_check_private_key(x509, pkey)) {
 			unsigned char *dptr;

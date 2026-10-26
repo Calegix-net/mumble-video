@@ -2857,6 +2857,14 @@ static void recreateServerHandler() {
 }
 
 void MainWindow::openUrl(const QUrl &url) {
+	if (Global::get().bQuit) {
+		// A link that arrives while quitting (SocketRPC and D-Bus post them as events, and main() keeps
+		// processing events while it waits for the connection to close) must not start a connection:
+		// recreateServerHandler() waits for every other reference to the old handler to go, and main()
+		// holds one for the whole of shutdown, so the client spun in that wait instead of exiting.
+		return;
+	}
+
 	Global::get().l->log(Log::Information,
 						 tr("Opening URL %1").arg(url.toString(QUrl::RemovePassword).toHtmlEscaped()));
 	if (url.scheme() == QLatin1String("file")) {

@@ -99,6 +99,44 @@ extern char *os_lang;
 
 using QtLogSink = spdlog::sinks::qt_color_sink_st;
 
+/**
+ * Takes the certificate of a regular Mumble on the same machine, for a client that has none yet.
+ *
+ * On Windows and in a plain Linux install, Mumble Video and Mumble read the same settings file, so an
+ * identity made in one is already the other's. The flatpak has a settings directory of its own, so its
+ * first run made a brand new identity even with a Mumble identity sitting beside it - and a name that
+ * identity had registered, admin rights and all, was then refused as the wrong certificate. The
+ * manifest grants read-only access to where Mumble keeps its settings, both a distribution install and
+ * the Flathub one, and the first one holding a usable certificate is taken.
+ */
+static void adoptInstalledMumbleIdentity() {
+#ifdef Q_OS_LINUX
+	if (qEnvironmentVariableIsEmpty("FLATPAK_ID")) {
+		return;
+	}
+
+	const QStringList candidates = {
+		QDir::home().filePath(QLatin1String(".config/Mumble/Mumble/mumble_settings.json")),
+		QDir::home().filePath(QLatin1String(".var/app/info.mumble.Mumble/config/Mumble/Mumble/mumble_settings.json")),
+	};
+
+	for (const QString &candidate : candidates) {
+		QFile file(candidate);
+		if (!file.open(QIODevice::ReadOnly)) {
+			continue;
+		}
+
+		const Settings::KeyPair identity = CertWizard::importCert(file.readAll());
+		if (CertWizard::validateCert(identity)) {
+			qInfo("Using the certificate of the Mumble installation whose settings are at %s",
+				  qUtf8Printable(candidate));
+			Global::get().s.kpCertificate = identity;
+			return;
+		}
+	}
+#endif
+}
+
 void initLog(QTextBrowser *textBox = nullptr) {
 	// TODO: Ideally we should add a user option, perhaps along with a launch parameter, to set the log level.
 	// However, the messages across the codebase are very inconsistent in terms of right now.
@@ -894,6 +932,10 @@ int main(int argc, char **argv) {
 		}
 
 		Global::get().s.videoWizardShown = true;
+	}
+
+	if (!CertWizard::validateCert(Global::get().s.kpCertificate)) {
+		adoptInstalledMumbleIdentity();
 	}
 
 	if (!CertWizard::validateCert(Global::get().s.kpCertificate)) {

@@ -20,6 +20,7 @@ typedef _XDisplay Display;
 
 class QFileSystemWatcher;
 class QSocketNotifier;
+class GlobalShortcutPortal;
 
 class GlobalShortcutX : public GlobalShortcutEngine {
 private:
@@ -45,6 +46,9 @@ public:
 	bool canDisable() override;
 	bool enabled() override;
 	void setEnabled(bool enabled) override;
+	bool usesDesktopPortal() const override;
+	void configureDesktopShortcuts() override;
+	void needRemap() override;
 public slots:
 	void displayReadyRead(int);
 	void inputReadyRead(int);
@@ -54,8 +58,16 @@ protected:
 	bool m_enabled                = true;
 	QFileSystemWatcher *m_watcher = nullptr;
 	QSocketNotifier *m_notifier   = nullptr;
+	/// The desktop's GlobalShortcuts portal, on a Wayland session. Null elsewhere, and null again once
+	/// the portal has turned out not to exist.
+	GlobalShortcutPortal *m_portal = nullptr;
+	bool m_portalUnavailable       = false;
 
 	bool init();
+	/// Whether the portal path is (still) worth trying on this session.
+	bool portalApplies() const;
+	void startPortal();
+	void portalShortcutChanged(const QString &id, bool down);
 	void stop();
 	void closeInputDevices();
 };

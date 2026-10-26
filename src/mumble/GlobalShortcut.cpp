@@ -20,7 +20,9 @@
 #include <QtCore/QProcess>
 #include <QtCore/QSortFilterProxyModel>
 #include <QtGui/QHelpEvent>
+#include <QtWidgets/QBoxLayout>
 #include <QtWidgets/QItemEditorFactory>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QToolTip>
 
 #ifdef Q_OS_MAC
@@ -634,7 +636,24 @@ GlobalShortcutConfig::GlobalShortcutConfig(Settings &st) : ConfigWidget(st) {
 
 	qlWaylandNote->setVisible(false);
 #ifdef Q_OS_LINUX
-	if (EnvUtils::waylandIsUsed()) {
+	if (GlobalShortcutEngine::engine->usesDesktopPortal()) {
+		// Keys are not recorded here on this path: the desktop owns them. Say where they are set, and
+		// offer the way there, instead of the note that global shortcuts do not work at all.
+		qlWaylandNote->setText(
+			tr("<p>Global shortcuts are provided by your desktop. Push-to-Talk, Mute Self and Mumble's other "
+			   "actions are listed in the desktop's keyboard shortcut settings under this application; a key "
+			   "assigned there works while Mumble is not focused. Rows added below are used for their "
+			   "whisper or channel targets, not their keys.</p>"));
+		qlWaylandNote->setVisible(true);
+
+		auto *configureButton = new QPushButton(tr("Assign keys in desktop settings..."), this);
+		configureButton->setObjectName(QLatin1String("qpbConfigureDesktopShortcuts"));
+		connect(configureButton, &QPushButton::clicked, this,
+				[]() { GlobalShortcutEngine::engine->configureDesktopShortcuts(); });
+		if (auto *box = qobject_cast< QBoxLayout * >(layout())) {
+			box->insertWidget(box->indexOf(qlWaylandNote) + 1, configureButton, 0, Qt::AlignLeft);
+		}
+	} else if (EnvUtils::waylandIsUsed()) {
 		// Our global shortcut system doesn't work properly with Wayland
 		qlWaylandNote->setVisible(true);
 	}
@@ -970,6 +989,35 @@ bool GlobalShortcutEngine::enabled() {
 
 bool GlobalShortcutEngine::canDisable() {
 	return false;
+}
+
+bool GlobalShortcutEngine::usesDesktopPortal() const {
+	return false;
+}
+
+void GlobalShortcutEngine::configureDesktopShortcuts() {
+}
+
+void GlobalShortcutEngine::setShortcutDown(GlobalShortcut *shortcut, const QVariant &data, bool down) {
+	if (down) {
+		// As in handleButton(): a key going down is activity, whichever backend reported it.
+		AudioInputPtr ai = Global::get().ai;
+		if (ai.get()) {
+			if (ai->activityState == AudioInput::ActivityStateIdle) {
+				ai->activityState = AudioInput::ActivityStateReturnedFromIdle;
+			}
+			ai->tIdle.restart();
+		}
+
+		if (!shortcut->qlActive.contains(data)) {
+			shortcut->qlActive << data;
+			emit shortcut->triggered(true, data);
+			emit shortcut->down(data);
+		}
+	} else if (shortcut->qlActive.contains(data)) {
+		shortcut->qlActive.removeAll(data);
+		emit shortcut->triggered(false, data);
+	}
 }
 
 void GlobalShortcutEngine::resetMap() {
