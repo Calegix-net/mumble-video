@@ -336,7 +336,22 @@ jobs:
           if gh release view dev-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit dev-latest --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
               --title "Development build" --notes "$notes"
-            gh release upload dev-latest --repo "$GITHUB_REPOSITORY" --clobber $assets
+            # gh's --clobber deletes the old asset before uploading the new one, so each download link
+            # was dead for the length of its upload, and for good if a newer push cancelled the run
+            # meanwhile. Upload everything beside the old files first, then swap each name in a rename.
+            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/dev-latest" --jq .id)
+            asset_id() {
+              gh api "repos/$GITHUB_REPOSITORY/releases/$release/assets" --paginate \
+                --jq ".[] | select(.name == \"$1\") | .id"
+            }
+            for name in $assets; do ln -f "$name" "next-$name"; done
+            gh release upload dev-latest --repo "$GITHUB_REPOSITORY" --clobber $(printf 'next-%s ' $assets)
+            for name in $assets; do
+              new=$(asset_id "next-$name")
+              old=$(asset_id "$name")
+              [ -z "$old" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$new" -f name="$name" > /dev/null
+            done
           else
             gh release create dev-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
               --title "Development build" --notes "$notes" $assets
