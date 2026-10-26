@@ -78,6 +78,7 @@ public:
 
 
 class ScreenAudioBroadcaster;
+class ScreenAwake;
 class VideoBroadcaster;
 class VideoGrid;
 class VideoStreamDispatcher;
@@ -295,6 +296,11 @@ protected:
 
 	/// Creates the share-screen action and its wiring.
 	void setupScreenShare();
+
+	/// Holds off the screen saver per the "Keep the screen awake" video setting.
+	ScreenAwake *m_screenAwake = nullptr;
+	void setupScreenAwake();
+	void updateScreenAwake();
 
 	/// The volume each sender's screen-share audio should play at, as last set from that sender's tile.
 	/// Handed to AudioOutput with every packet, because AudioOutput owns the buffers and creates them on the

@@ -258,6 +258,8 @@ set(MUMBLE_SOURCES
 	"RichTextEditorLink.ui"
 	"RichTextEditor.ui"
 	"Screen.cpp"
+	"ScreenAwake.cpp"
+	"ScreenAwake.h"
 	"Screen.h"
 	"SearchDialog.cpp"
 	"SearchDialog.h"

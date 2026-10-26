@@ -6,6 +6,7 @@
 #include "VideoConfigDialog.h"
 
 #include "CameraVideoSource.h"
+#include "ScreenAwake.h"
 #ifdef USE_H264
 #	include "H264Codec.h"
 #endif
@@ -164,6 +165,19 @@ void VideoConfigDialog::buildUi() {
 	screenLayout->addRow(new QLabel(tr("Changes take effect the next time you start sharing."), screenBox));
 
 	outer->addWidget(screenBox);
+
+	auto *displayBox    = new QGroupBox(tr("Display"), this);
+	auto *displayLayout = new QFormLayout(displayBox);
+
+	m_keepAwake = new QComboBox(displayBox);
+	m_keepAwake->addItem(tr("Off"), ScreenAwake::Off);
+	m_keepAwake->addItem(tr("While video is streaming"), ScreenAwake::WhileVideo);
+	m_keepAwake->addItem(tr("Whenever Mumble Video is running"), ScreenAwake::WhileRunning);
+	m_keepAwake->setToolTip(tr("Stops the screen saver and display sleep. While video is streaming means while "
+							   "you share a camera or screen, or watch someone's video."));
+	displayLayout->addRow(tr("Keep the screen &awake"), m_keepAwake);
+
+	outer->addWidget(displayBox);
 
 	auto *previewBox    = new QGroupBox(tr("Preview"), this);
 	auto *previewLayout = new QVBoxLayout(previewBox);
@@ -335,6 +349,9 @@ void VideoConfigDialog::load(const Settings &r) {
 	m_screenBitrate->setValue(r.iScreenShareBitrate);
 	m_screenVp9Bitrate->setValue(r.iScreenShareVp9Bitrate);
 	m_screenFramerate->setValue(r.iScreenShareFramerate);
+
+	const int keepAwakeIndex = m_keepAwake->findData(r.iKeepScreenAwake);
+	m_keepAwake->setCurrentIndex(keepAwakeIndex >= 0 ? keepAwakeIndex : 1);
 }
 
 void VideoConfigDialog::save() const {
@@ -354,4 +371,5 @@ void VideoConfigDialog::save() const {
 	s.iScreenShareBitrate    = m_screenBitrate->value();
 	s.iScreenShareVp9Bitrate = m_screenVp9Bitrate->value();
 	s.iScreenShareFramerate  = m_screenFramerate->value();
+	s.iKeepScreenAwake       = m_keepAwake->currentData().toInt();
 }

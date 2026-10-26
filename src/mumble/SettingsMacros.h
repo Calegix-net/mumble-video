@@ -83,6 +83,7 @@
 	PROCESS(video, SCREEN_SHARE_VP9_BITRATE_KEY, iScreenShareVp9Bitrate) \
 	PROCESS(video, SCREEN_SHARE_FRAMERATE_KEY, iScreenShareFramerate)    \
 	PROCESS(video, VIDEO_OVERLAY_KEY, bVideoOverlay)                     \
+	PROCESS(video, KEEP_SCREEN_AWAKE_KEY, iKeepScreenAwake)              \
 	PROCESS(video, VIDEO_WIZARD_SHOWN_KEY, videoWizardShown)
 
 #define POSITIONAL_AUDIO_SETTINGS                                                  \

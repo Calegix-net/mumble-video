@@ -45,6 +45,7 @@
 #include "RichTextEditor.h"
 #include "Screen.h"
 #include "ScreenAudioBroadcaster.h"
+#include "ScreenAwake.h"
 #include "SearchDialog.h"
 #include "ServerHandler.h"
 #include "ServerInformation.h"
@@ -937,6 +938,35 @@ void MainWindow::remoteWatchAll(bool watching) {
 	if (m_videoGrid) {
 		m_videoGrid->setWatchingAll(watching);
 	}
+}
+
+void MainWindow::setupScreenAwake() {
+	m_screenAwake = new ScreenAwake(this);
+
+	// Polled rather than driven from every place a share starts or stops or a stream is watched or not: the
+	// screen saver is minutes away, and polling cannot miss one of them.
+	auto *timer = new QTimer(this);
+	timer->setInterval(2000);
+	connect(timer, &QTimer::timeout, this, &MainWindow::updateScreenAwake);
+	timer->start();
+	updateScreenAwake();
+
+	// Released while the event loop still runs, rather than whenever this window happens to be destroyed.
+	connect(qApp, &QCoreApplication::aboutToQuit, this, [this, timer]() {
+		timer->stop();
+		delete m_screenAwake;
+		m_screenAwake = nullptr;
+	});
+}
+
+void MainWindow::updateScreenAwake() {
+	if (!m_screenAwake) {
+		return;
+	}
+	const bool sending = (m_videoBroadcaster && m_videoBroadcaster->isActive())
+						 || (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive());
+	const bool watching = m_videoGrid && !m_videoGrid->watchedStreams().empty();
+	m_screenAwake->setInhibited(ScreenAwake::wanted(Global::get().s.iKeepScreenAwake, sending, watching));
 }
 
 void MainWindow::setupScreenShare() {
@@ -2030,6 +2060,7 @@ void MainWindow::setupGui() {
 	m_sizeGrip->raise();
 	setupVideoBroadcast();
 	setupScreenShare();
+	setupScreenAwake();
 
 #ifdef Q_OS_MAC
 	QMenu *qmWindow = new QMenu(tr("&Window"), this);
