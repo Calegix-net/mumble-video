@@ -4,7 +4,7 @@
 # --privileged. See scripts/build-flatpak.sh.
 #
 # This is deliberately not the upstream flatpak-github-actions image: that image only publishes KDE
-# runtimes up to 6.7, and the manifest targets 6.9. Pinning the runtime to whatever a CI image happens
+# runtimes up to 6.7, and the manifest targets a newer one. Pinning the runtime to whatever a CI image happens
 # to offer is the wrong way round.
 FROM fedora:42
 

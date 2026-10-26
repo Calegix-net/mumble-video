@@ -9,7 +9,11 @@
 
 app-id: com.calegix.MumbleVideo
 runtime: org.kde.Platform
-runtime-version: "6.9"
+# Flathub keeps only the two newest KDE runtimes supported; older branches are marked end-of-life,
+# stop receiving fixes, and every install or update of an app on one prints an EOL warning. 6.9 went
+# EOL this way. Move this forward when `flatpak remote-info flathub org.kde.Platform//<version>`
+# prints an End-of-life line, and check the Qt version that runtime ships still builds the client.
+runtime-version: "6.11"
 sdk: org.kde.Sdk
 command: mumble
 
