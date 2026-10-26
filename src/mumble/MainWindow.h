@@ -253,6 +253,23 @@ protected:
 	/// Creates the share-camera action and its wiring.
 	void setupVideoBroadcast();
 
+	/// The camera settings the running camera share was started with. A share reads them once, when it
+	/// starts, so a change made in Settings or the Video Wizard while it runs is compared against these.
+	struct CameraShareSettings {
+		QString device;
+		int width     = 0;
+		int height    = 0;
+		int framerate = 0;
+		int bitrate   = 0;
+
+		static CameraShareSettings from(const Settings &settings);
+		bool operator==(const CameraShareSettings &other) const = default;
+	};
+	CameraShareSettings m_cameraShareSettings;
+	/// Restarts a running camera share whose settings have changed since it started, so that choosing a
+	/// different camera takes effect straight away rather than the next time the camera is turned on.
+	void applyCameraSettings();
+
 	/// Hands out non-colliding starting stream ids across every broadcaster this session runs at once
 	/// (camera, screen video, screen audio). See VideoBroadcaster::setNextStreamID for why this has to be
 	/// centralised rather than left to each broadcaster to pick its own.

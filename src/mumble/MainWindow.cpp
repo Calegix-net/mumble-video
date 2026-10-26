@@ -1243,7 +1243,37 @@ void MainWindow::toggleCameraShare(bool share) {
 
 	Global::get().sh->sendMessage(mpvs);
 
+	m_cameraShareSettings = CameraShareSettings::from(settings);
+
 	Global::get().l->log(Log::Information, tr("Sharing camera: %1").arg(m_videoBroadcaster->describe()));
+}
+
+MainWindow::CameraShareSettings MainWindow::CameraShareSettings::from(const Settings &settings) {
+	CameraShareSettings result;
+	result.device    = settings.qsVideoDevice;
+	result.width     = settings.iVideoWidth;
+	result.height    = settings.iVideoHeight;
+	result.framerate = settings.iVideoFramerate;
+	result.bitrate   = settings.iVideoBitrate;
+
+	return result;
+}
+
+void MainWindow::applyCameraSettings() {
+	// Not while waiting to reconnect: starting again needs the server, and stopping alone would turn off a
+	// camera the user left on.
+	if (!m_videoBroadcaster || !m_videoBroadcaster->isActive() || !Global::get().sh || !Global::get().sh->isRunning()
+		|| CameraShareSettings::from(Global::get().s) == m_cameraShareSettings) {
+		return;
+	}
+
+	// Stopped and started again exactly as turning the camera off and on does, which is what people had
+	// to do by hand: the new camera is a new stream, announced as one, and viewers who were watching the
+	// old one carry on watching the new one (VideoGrid's resume-watching window for a restarted share).
+	Global::get().l->log(Log::Information, tr("Camera settings changed, restarting the camera."));
+
+	toggleCameraShare(false);
+	toggleCameraShare(true);
 }
 
 void MainWindow::toggleScreenShare(bool share) {
@@ -6074,6 +6104,8 @@ void MainWindow::openConfigDialog() {
 			Themes::apply();
 		}
 	});
+	// On Apply as well as OK, so a camera chosen while sharing shows up while the dialog is still open.
+	QObject::connect(dlg, &ConfigDialog::settingsAccepted, this, &MainWindow::applyCameraSettings);
 
 	if (dlg->exec() == QDialog::Accepted) {
 		setupView(false);
@@ -6109,6 +6141,7 @@ void MainWindow::openVideoWizardDialog() {
 	// on every launch would be the wrong reading of that.
 	if (wizard.exec() == QDialog::Accepted) {
 		wizard.applyTo(Global::get().s);
+		applyCameraSettings();
 	}
 
 	Global::get().s.videoWizardShown = true;
