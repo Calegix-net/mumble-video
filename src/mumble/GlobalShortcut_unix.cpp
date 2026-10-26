@@ -10,6 +10,11 @@
 
 #include <QtCore/QFileSystemWatcher>
 #include <QtCore/QSocketNotifier>
+#include <QtCore/QTimer>
+
+#ifdef USE_DBUS
+#	include "GlobalShortcutPortal.h"
+#endif
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -18,6 +23,8 @@
 #	include <X11/extensions/XI2.h>
 #	include <X11/extensions/XInput2.h>
 #endif
+
+#include <algorithm>
 
 #ifdef Q_OS_LINUX
 #	include <fcntl.h>
@@ -92,9 +99,135 @@ void GlobalShortcutX::closeInputDevices() {
 #endif
 }
 
+#ifdef USE_DBUS
+namespace {
+/// The id a shortcut function is offered to the portal under. The desktop stores the user's key
+/// against it, so it has to stay the same from one run to the next: the object name where there is
+/// one, else the function's GlobalShortcutType number.
+QString portalId(const GlobalShortcut *shortcut) {
+	return shortcut->objectName().isEmpty() ? QStringLiteral("shortcut%1").arg(shortcut->idx)
+											: shortcut->objectName();
+}
+
+PortalShortcutList portalShortcuts(const QHash< int, GlobalShortcut * > &shortcuts) {
+	QList< int > indices = shortcuts.keys();
+	std::sort(indices.begin(), indices.end());
+
+	PortalShortcutList list;
+	for (int index : indices) {
+		const GlobalShortcut *shortcut = shortcuts.value(index);
+		QVariantMap properties;
+		properties.insert(QStringLiteral("description"), shortcut->name);
+		list << PortalShortcut{ portalId(shortcut), properties };
+	}
+
+	return list;
+}
+} // namespace
+#endif
+
+bool GlobalShortcutX::portalApplies() const {
+#ifdef USE_DBUS
+	return !m_portalUnavailable && GlobalShortcutPortal::appliesToThisSession();
+#else
+	return false;
+#endif
+}
+
+void GlobalShortcutX::startPortal() {
+#ifdef USE_DBUS
+	if (!m_portal) {
+		m_portal = new GlobalShortcutPortal(this);
+		connect(m_portal, &GlobalShortcutPortal::activated, this,
+				[this](const QString &id) { portalShortcutChanged(id, true); });
+		connect(m_portal, &GlobalShortcutPortal::deactivated, this,
+				[this](const QString &id) { portalShortcutChanged(id, false); });
+		connect(m_portal, &GlobalShortcutPortal::unavailable, this, [this](const QString &) {
+			// No GlobalShortcuts portal on this desktop. Not retried: it will not appear mid-session, and
+			// the settings page then shows the plain Wayland note again.
+			m_portalUnavailable = true;
+			if (m_portal) {
+				m_portal->deleteLater();
+				m_portal = nullptr;
+			}
+		});
+	}
+
+	// Deferred to the event loop: the engine is created by the first GlobalShortcut constructed, and the
+	// rest are constructed straight after it, so offering qmShortcuts now would offer one function.
+	QTimer::singleShot(0, m_portal, [this]() {
+		if (m_portal && m_enabled) {
+			m_portal->start(portalShortcuts(qmShortcuts));
+		}
+	});
+#endif
+}
+
+void GlobalShortcutX::portalShortcutChanged(const QString &id, bool down) {
+#ifdef USE_DBUS
+	if (!m_enabled) {
+		return;
+	}
+
+	for (GlobalShortcut *shortcut : qmShortcuts) {
+		if (portalId(shortcut) != id) {
+			continue;
+		}
+
+		// The portal knows actions, not targets. A whisper or shout row configured for this function in
+		// the shortcut table supplies its target; otherwise the function's default applies.
+		QVariant data = shortcut->qvDefault;
+		for (const Shortcut &configured : Global::get().s.qlShortcuts) {
+			if (configured.iIndex == shortcut->idx) {
+				data = configured.qvData;
+				break;
+			}
+		}
+
+		setShortcutDown(shortcut, data, down);
+		return;
+	}
+#else
+	Q_UNUSED(id);
+	Q_UNUSED(down);
+#endif
+}
+
+bool GlobalShortcutX::usesDesktopPortal() const {
+	return m_portal != nullptr;
+}
+
+void GlobalShortcutX::configureDesktopShortcuts() {
+#ifdef USE_DBUS
+	if (m_portal) {
+		m_portal->configure();
+	}
+#endif
+}
+
+void GlobalShortcutX::needRemap() {
+#ifdef USE_DBUS
+	// A shortcut function was added or removed (a plugin's, say): offer the new set. Deferred and
+	// coalesced, since a window's worth of them arrive one at a time.
+	if (m_portal) {
+		QTimer::singleShot(0, m_portal, [this]() {
+			if (m_portal && m_enabled) {
+				m_portal->setShortcuts(portalShortcuts(qmShortcuts));
+			}
+		});
+	}
+#endif
+}
+
 void GlobalShortcutX::stop() {
 	bRunning = false;
 	wait();
+
+#ifdef USE_DBUS
+	if (m_portal) {
+		m_portal->stop();
+	}
+#endif
 
 	// Evdev devices are part of what init() started, so stopping has to close them too. Leaving them
 	// open meant disabling global shortcuts stopped none of the evdev ones: the notifiers stayed live
@@ -118,6 +251,14 @@ bool GlobalShortcutX::init() {
 	// connected (duplicate directoryChanged deliveries), and called start() on an already running
 	// polling thread. A no-op on the constructor's call, where there is nothing to stop yet.
 	stop();
+
+	// On Wayland the desktop's GlobalShortcuts portal is the only thing that reports a key pressed over
+	// another window - and inside the flatpak there is no X display to fall back to at all. It runs
+	// beside whichever backend below still works (evdev, for someone in the input group), not instead.
+	const bool portal = portalApplies();
+	if (portal) {
+		startPortal();
+	}
 
 #ifdef Q_OS_LINUX
 	if (Global::get().s.bEnableEvdev) {
@@ -146,6 +287,11 @@ bool GlobalShortcutX::init() {
 	// Everything past this point needs the display connection, so without one
 	// there is nothing left to fall back to (ScreenCount() would dereference it).
 	if (!display) {
+		if (portal) {
+			qWarning("GlobalShortcutX: No display connection and no usable evdev device, global shortcuts come "
+					 "from the desktop portal only.");
+			return true;
+		}
 		qWarning("GlobalShortcutX: No display connection and no usable evdev device, global shortcuts are disabled.");
 		return false;
 	}

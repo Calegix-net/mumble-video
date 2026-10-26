@@ -274,9 +274,20 @@ public:
 	virtual bool enabled();
 	virtual void setEnabled(bool b);
 
+	/// Whether shortcuts are (also) delivered by the desktop's GlobalShortcuts portal, where keys are
+	/// assigned in the desktop's settings rather than recorded in Mumble's shortcut table.
+	virtual bool usesDesktopPortal() const;
+	/// Asks the desktop to show where this application's shortcuts are assigned.
+	virtual void configureDesktopShortcuts();
+
 	virtual ButtonInfo buttonInfo(const QVariant &) = 0;
 signals:
 	void buttonPressed(bool last);
+
+protected:
+	/// Presses or releases a shortcut as a whole, for a backend that is told about actions rather than
+	/// keys. Keeps the same bookkeeping as handleButton(), so a second press without a release is ignored.
+	void setShortcutDown(GlobalShortcut *shortcut, const QVariant &data, bool down);
 };
 
 #endif
