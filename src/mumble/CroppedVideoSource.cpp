@@ -38,6 +38,14 @@ void CroppedVideoSource::stop() {
 	}
 }
 
+void CroppedVideoSource::setMaxFramerate(unsigned int framerate) {
+	VideoSource::setMaxFramerate(framerate);
+
+	if (m_inner) {
+		m_inner->setMaxFramerate(framerate);
+	}
+}
+
 bool CroppedVideoSource::isRunning() const {
 	return m_inner && m_inner->isRunning();
 }

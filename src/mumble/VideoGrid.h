@@ -698,8 +698,11 @@ protected:
 
 	/// Repaints of the grid are coalesced to at most one per GRID_REPAINT_INTERVAL_MSEC. Qt's own update()
 	/// coalescing only collapses requests made within one turn of the event loop, and each incoming tile is
-	/// its own turn, so without this a screen share repainted the grid at the display's refresh rate.
-	static constexpr int GRID_REPAINT_INTERVAL_MSEC = 33;
+	/// its own turn, so without this a screen share repainted the grid once per tile. 16 ms, so that a share
+	/// sent at 60 fps is also shown at 60: at 33 ms the grid itself was the cap, at 30 fps - and at 21 fps
+	/// on Windows, which rounds an ordinary timer up to its 15.6 ms tick (hence a precise timer). A stream
+	/// sent at 30 fps still costs 30 repaints a second; the interval only bounds how close two can be.
+	static constexpr int GRID_REPAINT_INTERVAL_MSEC = 16;
 
 	/// Queues the given widget rect for the next coalesced repaint.
 	void scheduleGridRepaint(const QRect &dirty);
@@ -866,8 +869,11 @@ protected:
 	std::vector< Viewer > m_ownScreenViewers;
 	/// Brings an own tile's eye button in line with its viewer list.
 	void refreshViewersButton(TileControlBar *controls, const std::vector< Viewer > &viewers);
-	/// "You (screen)", plus how many are watching when anyone is.
+	/// "You (screen)", plus how many are watching when anyone is. What the fullscreen window shows; the
+	/// grid shows the plain name and ownWatcherBadge() instead.
 	QString ownTileLabel(bool screen) const;
+	/// "👁 N": how many are watching an own tile, painted on it at all times - not only in its hover bar.
+	QString ownWatcherBadge(bool screen) const;
 
 	/// Whether the cursor is currently over this widget at all, and where - see updateHoveredBar(). A
 	/// plain QWidget*, not a smart pointer to a locally-defined type: FullscreenVideoWindow is declared in

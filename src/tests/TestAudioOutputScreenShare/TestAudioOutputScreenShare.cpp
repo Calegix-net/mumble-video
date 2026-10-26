@@ -65,6 +65,30 @@ public:
 
 	/// What happens to every buffer when the mixer is reset, as the Audio Wizard does.
 	void dropEverything() { wipe(); }
+
+	/// One mixer period, and the RMS of what the screen-share buffer contributed to it: what the listener
+	/// hears from it, before the mixer's own master volume.
+	double pullRms(unsigned int frameCount) {
+		QReadLocker lock(&qrwlOutputs);
+
+		QList< AudioOutputBuffer * > mix;
+		QList< AudioOutputBuffer * > del;
+		prepareOutputBuffers(frameCount, mix, del);
+
+		for (AudioOutputBuffer *buffer : mix) {
+			if (qobject_cast< AudioOutputScreenShare * >(buffer)) {
+				double sum = 0.0;
+				for (unsigned int i = 0; i < frameCount * 2; ++i) {
+					sum += static_cast< double >(buffer->pfBuffer[i]) * buffer->pfBuffer[i];
+				}
+
+				// The mixer multiplies by this too; unity for every buffer today, but part of the level.
+				return std::sqrt(sum / (frameCount * 2)) * buffer->volumeMultiplier();
+			}
+		}
+
+		return -1.0;
+	}
 };
 
 /// Real Opus packets, as ScreenAudioBroadcaster sends them: 48 kHz stereo, 20 ms each.
@@ -187,6 +211,43 @@ private slots:
 		QVERIFY(output->addScreenShareUnit(&sender, 7, 2, packet(2), 1.0f));
 		QVERIFY(!output->addScreenShareUnit(&sender, 7, 3, packet(3), 1.0f));
 		QCOMPARE(output->screenShareCount(), 1);
+	}
+
+	void theVolumeChangesWhatIsPlayed() {
+		// The tile's slider reaches a playing buffer two ways: setScreenShareVolume() straight away, and the
+		// level carried with every packet (MainWindow passes the slider's level to addScreenShareUnit). Both
+		// have to change what the mixer gets, by the factor asked for.
+		TestOutput output(MIXER_FREQ);
+		ClientUser sender;
+
+		std::uint64_t sequence = 0;
+		const auto feed        = [&](int packets, float volume) {
+			for (int i = 0; i < packets; ++i, ++sequence) {
+				output.addScreenShareUnit(&sender, 7, sequence, packet(sequence), volume);
+			}
+		};
+
+		feed(20, 1.0f);
+
+		// Past the prebuffer and Opus's start-up, into the steady tone.
+		for (int i = 0; i < 4; ++i) {
+			QVERIFY(output.pullRms(480) >= 0.0);
+		}
+
+		const double unity = output.pullRms(480);
+		QVERIFY2(unity > 0.1, qPrintable(QString::number(unity)));
+
+		output.setScreenShareVolume(&sender, 0.25f);
+		const double quarter = output.pullRms(480);
+		QVERIFY2(std::abs(quarter / unity - 0.25) < 0.03, qPrintable(QString::number(quarter / unity)));
+
+		output.setScreenShareVolume(&sender, 0.0f);
+		QCOMPARE(output.pullRms(480), 0.0);
+
+		// The next packet carries the slider's level; 0.3 at 180% stays under the limiter's knee, so linear.
+		feed(1, 1.8f);
+		const double boosted = output.pullRms(480);
+		QVERIFY2(std::abs(boosted / unity - 1.8) < 0.1, qPrintable(QString::number(boosted / unity)));
 	}
 
 	void feedsWhileTheMixerPullsAndBuffersGoAway() {

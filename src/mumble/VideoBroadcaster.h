@@ -271,6 +271,8 @@ protected:
 	// CODEC_VP8 for a camera; CODEC_H264 or CODEC_VP9 for a screen. See VpxCodec.h for the measurements
 	// behind VP9 and H264Codec.h for the hardware encoders.
 	int m_codec = CODEC_VP8;
+	/// From configure(): handed to each source as its maximum rate, see VideoSource::setMaxFramerate().
+	unsigned int m_framerate = 0;
 
 	// 0 is a valid stream id, so the first stream uses it and each subsequent start increments.
 	std::uint32_t m_streamID = 0;

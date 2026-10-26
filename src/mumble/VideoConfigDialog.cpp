@@ -135,11 +135,16 @@ void VideoConfigDialog::buildUi() {
 	screenLayout->addRow(tr("VP&9 bitrate"), m_screenVp9Bitrate);
 
 	m_screenFramerate = new QSpinBox(screenBox);
+	// 60 at most because that is as fast as the rest of the pipeline goes: viewers repaint at most 60 times
+	// a second (VideoGrid), and offering more would be a number the share never reaches.
 	m_screenFramerate->setRange(5, 60);
 	m_screenFramerate->setSuffix(tr(" fps"));
-	m_screenFramerate->setToolTip(tr("Frames per second for screen sharing. Lower spends the same bitrate on "
-									 "fewer, sharper frames - good for text and slides; higher is smoother "
-									 "for video and games."));
+	m_screenFramerate->setToolTip(tr("The most frames per second a screen share sends. Lower spends the same "
+									 "bitrate on fewer, sharper frames - good for text and slides; higher is "
+									 "smoother for video and games. It is a ceiling, not a promise: a frame is "
+									 "only sent when the screen changes, so a film sends its own frame rate and "
+									 "a still screen almost nothing, and without a graphics card encoder (VP9) "
+									 "a large screen may not reach 60."));
 	screenLayout->addRow(tr("Fra&me rate"), m_screenFramerate);
 
 #ifdef USE_H264

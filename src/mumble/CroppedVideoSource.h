@@ -41,6 +41,8 @@ public:
 	void stop() override;
 	bool isRunning() const override;
 	QString describe() const override;
+	/// Handed on to the source being cropped, which is the one that captures.
+	void setMaxFramerate(unsigned int framerate) override;
 
 	/**
 	 * Maps a selection made in a widget's coordinates onto the pixels the capture backend produces.

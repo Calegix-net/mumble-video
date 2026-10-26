@@ -21,6 +21,7 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QWindow>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QGraphicsItem>
 #include <QtWidgets/QGraphicsScene>
@@ -85,10 +86,11 @@ public:
 	using VolumeProvider = std::function< VolumeState() >;
 	using VolumeSetter   = std::function< void(int percent) >;
 
-	/// About 30 repaints a second at most. Screen shares are rarely sent faster than that, and a paint
-	/// here is a real, CPU-side scale of the sender's whole desktop onto the whole monitor when everything
-	/// is dirty - not something worth doing more often than the eye can tell apart.
-	static constexpr int REPAINT_INTERVAL_MSEC = 33;
+	/// About 60 repaints a second at most, so a share sent at 60 fps is shown at 60 - at 33 ms this window
+	/// was the cap, at 30 fps (21 on Windows, before the timer was made precise). A paint here is a real,
+	/// CPU-side scale of the sender's whole desktop onto the whole monitor when everything is dirty, so it
+	/// happens once per frame received and no more often than this; a 30 fps share still costs 30.
+	static constexpr int REPAINT_INTERVAL_MSEC = 16;
 	/// The control bar hides after the mouse has been still this long, like a video player's.
 	static constexpr int CONTROLS_HIDE_MSEC = 3000;
 	static constexpr int CONTROLS_HEIGHT    = 44;
@@ -122,6 +124,7 @@ public:
 
 		m_repaintTimer = new QTimer(this);
 		m_repaintTimer->setSingleShot(true);
+		m_repaintTimer->setTimerType(Qt::PreciseTimer);
 		m_repaintTimer->setInterval(REPAINT_INTERVAL_MSEC);
 		connect(m_repaintTimer, &QTimer::timeout, this, &FullscreenVideoWindow::flushRepaint);
 
@@ -390,9 +393,64 @@ protected:
 		setOverlayEnabled(m_owner->videoOverlayEnabled());
 	}
 
+	/// In the windowed presentation the picture itself is a handle to move the window by, like a video
+	/// player's. Needed on Wayland in particular: there a client cannot place its own window, and whether
+	/// it gets a title bar to drag at all depends on the compositor and on Qt's decoration plugin, so a
+	/// pop-out could end up with nothing to move it by. Armed on the press and started only once the mouse
+	/// has travelled the drag distance, so a double-click (pop back in) still arrives as one.
+	void mousePressEvent(QMouseEvent *event) override {
+		if (m_windowed && event->button() == Qt::LeftButton) {
+			m_dragArmed       = true;
+			m_dragSystemMove  = false;
+			m_dragPressGlobal = event->globalPosition().toPoint();
+			m_dragWindowStart = pos();
+			event->accept();
+
+			return;
+		}
+
+		QWidget::mousePressEvent(event);
+	}
+
 	void mouseMoveEvent(QMouseEvent *event) override {
 		showControls();
+
+		if (m_dragArmed && (event->buttons() & Qt::LeftButton)) {
+			const QPoint travelled = event->globalPosition().toPoint() - m_dragPressGlobal;
+
+			if (!m_dragSystemMove && !m_dragManual
+				&& travelled.manhattanLength() >= QApplication::startDragDistance()) {
+				// The compositor's own move, which is the only kind Wayland allows and is also what X11 and
+				// Windows do best (snapping, edge resistance). Where the platform has none - the offscreen
+				// platform the tests run on, an old X11 window manager - the window is moved by hand.
+				QWindow *handle  = windowHandle();
+				m_dragSystemMove = handle && handle->startSystemMove();
+				m_dragManual     = !m_dragSystemMove;
+			}
+
+			if (m_dragSystemMove) {
+				// The compositor has the pointer until the button is released.
+				m_dragArmed = false;
+			} else if (m_dragManual) {
+				move(m_dragWindowStart + travelled);
+			}
+
+			event->accept();
+
+			return;
+		}
+
 		QWidget::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override {
+		if (event->button() == Qt::LeftButton) {
+			m_dragArmed      = false;
+			m_dragManual     = false;
+			m_dragSystemMove = false;
+		}
+
+		QWidget::mouseReleaseEvent(event);
 	}
 
 	/// Asked to go away: Esc, a double-click, the close button, or the title bar's own close.
@@ -605,6 +663,13 @@ private:
 	/// Whether this is a picture-in-picture window rather than the focus-driven fullscreen one.
 	bool m_detached = false;
 
+	/// A drag of the picture moving the windowed presentation - see mousePressEvent().
+	bool m_dragArmed      = false;
+	bool m_dragSystemMove = false;
+	bool m_dragManual     = false;
+	QPoint m_dragPressGlobal;
+	QPoint m_dragWindowStart;
+
 	/// What closing means. See CloseHandler.
 	CloseHandler m_onClose;
 
@@ -640,6 +705,7 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 
 	m_gridRepaintTimer = new QTimer(this);
 	m_gridRepaintTimer->setSingleShot(true);
+	m_gridRepaintTimer->setTimerType(Qt::PreciseTimer);
 	m_gridRepaintTimer->setInterval(GRID_REPAINT_INTERVAL_MSEC);
 	connect(m_gridRepaintTimer, &QTimer::timeout, this, &VideoGrid::flushGridRepaint);
 
@@ -3016,6 +3082,10 @@ void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector
 														: tr("Watching:\n%1").arg(lines.join(QLatin1Char('\n'))));
 }
 
+QString VideoGrid::ownWatcherBadge(bool screen) const {
+	return QStringLiteral("👁 %1").arg((screen ? m_ownScreenViewers : m_ownCameraViewers).size());
+}
+
 QString VideoGrid::ownTileLabel(bool screen) const {
 	const QString base           = screen ? tr("You (screen)") : tr("You");
 	const std::size_t watching = (screen ? m_ownScreenViewers : m_ownCameraViewers).size();
@@ -3226,14 +3296,34 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 		return;
 	}
 
+	// How many are watching an own tile, top right of its picture, always - the same count as the eye in
+	// its control bar, which only shows while the mouse is over the tile. Whether anyone is watching is
+	// the first thing a sharer wants to know, and having to hover to find out read as the count being
+	// missing. Shown at zero too: "nobody yet" is an answer as well.
+	const auto drawWatcherBadge = [&](const QImage &image, const QRect &cell, const QString &badge) {
+		const QRect target = pictureRect(cell, image.size()).adjusted(4, 4, -4, -4);
+
+		QRect backdrop = painter.fontMetrics().boundingRect(target, Qt::AlignTop | Qt::AlignRight, badge);
+		backdrop.adjust(-4, -1, 4, 1);
+
+		painter.fillRect(backdrop, QColor(0, 0, 0, 160));
+
+		painter.setPen(Qt::white);
+		painter.drawText(target, Qt::AlignTop | Qt::AlignRight, badge);
+	};
+
 	int index = 0;
 
 	if (!m_selfCameraFrame.isNull()) {
-		drawInto(m_selfCameraFrame, cellRect(layout, index++), ownTileLabel(false));
+		const QRect cell = cellRect(layout, index++);
+		drawInto(m_selfCameraFrame, cell, tr("You"));
+		drawWatcherBadge(m_selfCameraFrame, cell, ownWatcherBadge(false));
 	}
 
 	if (!m_selfScreenFrame.isNull()) {
-		drawInto(m_selfScreenFrame, cellRect(layout, index++), ownTileLabel(true));
+		const QRect cell = cellRect(layout, index++);
+		drawInto(m_selfScreenFrame, cell, tr("You (screen)"));
+		drawWatcherBadge(m_selfScreenFrame, cell, ownWatcherBadge(true));
 	}
 
 	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {

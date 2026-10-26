@@ -13,6 +13,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QImage>
 
+#include <algorithm>
 #include <cstdint>
 
 /**
@@ -49,6 +50,24 @@ public:
 	 */
 	virtual QString describe() const = 0;
 
+	/**
+	 * The most frames a second the consumer will use - the share's frame rate setting. Set before
+	 * start(). A source that polls for frames polls at this rate, and one fed by the system asks it for
+	 * this rate; a source that has no say in its rate ignores it. 0 means the source's own default.
+	 */
+	virtual void setMaxFramerate(unsigned int framerate) { m_maxFramerate = framerate; }
+	unsigned int maxFramerate() const { return m_maxFramerate; }
+
+	/// The frame rate a source uses when it was not given one.
+	static constexpr unsigned int DEFAULT_FRAMERATE = 30;
+
+	/// The timer interval for polling at @p framerate (DEFAULT_FRAMERATE for 0), rounded down so that a
+	/// poll is never later than a frame is due: 16 ms for 60 fps, never less than 1 ms.
+	static int pollIntervalMsec(unsigned int framerate) {
+		const unsigned int fps = framerate > 0 ? framerate : DEFAULT_FRAMERATE;
+		return static_cast< int >(std::max(1u, 1000u / fps));
+	}
+
 signals:
 	/// A successful capture poll found no changed pixels. Errors must emit failed() instead.
 	void captureIdle(std::uint64_t captureTimestampUsec);
@@ -65,6 +84,10 @@ signals:
 	 * permission was revoked, or the backend failed.
 	 */
 	void failed(const QString &reason);
+
+protected:
+	/// See setMaxFramerate().
+	unsigned int m_maxFramerate = 0;
 };
 
 /**
