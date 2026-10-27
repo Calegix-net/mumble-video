@@ -1,0 +1,117 @@
+# The performance guardrail: builds the client and server, runs one benchmark scenario, and fails if
+# any budget in scripts/benchmark/budgets.json is exceeded.
+#
+# Why this is a separate workflow from build.yml, and not a step in it. build.yml builds inside the
+# maintainers' own Fedora container on purpose, so that CI green means "the documented environment
+# works". That image has no Xvfb, no sqlite3 command and no iproute2, and extending it would put a
+# benchmark's dependencies into the image every release is built with. So this job builds the same
+# source on a plain Ubuntu runner with the dependencies docs/dev/build-instructions/build_linux.md
+# lists. It is measuring relative behaviour against absolute budgets with real headroom, not comparing
+# two runners, so it does not need to be the release build.
+#
+# IMPORTANT, and the honest part: this file has never run. The budget checker itself is tested - both
+# its pass and its fail paths, against real benchmark output - and so is every script it drives, on a
+# developer machine and in WSL. What is unproven is this YAML and this runner. The three things most
+# likely to need a second attempt:
+#
+#   1. `unshare -r --net`, which the harness needs so that tc can shape loopback without root. It
+#      wants unprivileged user namespaces, which Ubuntu runners normally allow. If it is refused, the
+#      harness cannot shape the link; the `clean` scenario needs no shaping, so dropping the tc calls
+#      for it is the fallback.
+#   2. The apt list, which is build_linux.md's plus the harness's own tools. A missing one is a clear
+#      error and a one-line fix.
+#   3. Wall time. A cold Mumble build on a two-core runner is slow; ccache is there to make the second
+#      run cheap. If it is still too slow for a pull request, this becomes a nightly schedule and the
+#      budgets still do their job, one day later.
+#
+# It is deliberately not in the required set until it has gone green once.
+
+name: benchmark
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/benchmark/**"
+      - ".github/workflows/benchmark.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # build_linux.md's list, plus what the harness itself needs: Xvfb for the two displays, ffmpeg
+      # and imagemagick for the quality pass, sqlite3 and openssl to write the certificate trust row,
+      # iproute2 for tc and util-linux for unshare.
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkgconf ccache \
+            qt6-base-dev qt6-tools-dev qt6-tools-dev-tools libqt6svg6-dev qt6-l10n-tools \
+            libgl-dev libboost-dev libssl-dev \
+            libprotobuf-dev protobuf-compiler libprotoc-dev \
+            libcap-dev libxi-dev libasound2-dev libogg-dev libsndfile1-dev libopus-dev \
+            libspeechd-dev libavahi-compat-libdnssd-dev libxcb-xinerama0 \
+            libvpx-dev libavcodec-dev libavutil-dev libswscale-dev \
+            xvfb ffmpeg imagemagick sqlite3 openssl iproute2 util-linux python3-venv
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: benchmark-${{ runner.os }}
+
+      # No Ice, no overlay, no installer: this job needs a client, a server and the video code, and
+      # everything else is build time it pays for on every pull request.
+      - name: Build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -Dtests=OFF -Dice=OFF -Doverlay=OFF -Dserver=ON -Dclient=ON
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Check that the network namespace works
+        run: |
+          # Said plainly here rather than discovered as a confusing failure three steps later.
+          unshare -r --net ip link set lo up \
+            && echo "user namespaces and CAP_NET_ADMIN are available" \
+            || { echo "::error::unshare -r --net was refused; the harness cannot shape loopback"; exit 1; }
+
+      - name: Build the rig
+        run: scripts/benchmark/setup-rig.sh
+
+      # Two scenarios, twenty seconds each. `clean` is where a regression shows with the least noise.
+      # `drop` takes the link away for five seconds and gives it back, which is the one reliability
+      # question worth a pull request's time: a picture that never comes back is the failure people
+      # actually report, and no steady impairment tests it.
+      #
+      # The other three impaired scenarios are a developer's tool. They take four times as long and
+      # what they mostly measure is the network stack, which is not what the pull request changed.
+      - name: Measure
+        run: scripts/benchmark/bench.sh ci 20 auto clean drop
+
+      - name: Budgets
+        run: scripts/benchmark/budget.py ci
+
+      # Kept whatever the verdict: a failure is only actionable with the logs and the per-second
+      # samples behind it.
+      - name: Keep the measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-ci
+          path: ~/.cache/mumble-video-bench/out/ci
+          retention-days: 14

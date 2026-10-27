@@ -7,6 +7,8 @@
 
 #include "AudioOutputScreenShare.h"
 #include "Mumble.pb.h"
+#include "StreamVolumeSlider.h"
+#include "VideoFrameDump.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
@@ -17,6 +19,7 @@
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
+#include <QtGui/QIcon>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
@@ -36,10 +39,26 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 static QWidget *makeTileControlStrip(QWidget *parent);
+
+/// The two speaker icons a stream's level can be drawn with, loud first.
+///
+/// Built once per control bar and held by it, rather than asked for on every value the slider passes
+/// through. QStyle::standardIcon() is not a lookup - it builds a QIcon and on some styles rasterises it -
+/// and the level is refreshed on every few pixels of a drag, on the GUI thread that is also decoding and
+/// painting video.
+///
+/// Deliberately not a function-local static pair. A static QIcon is destroyed after QApplication, and
+/// destroying the pixmaps inside one at that point is the classic Qt shutdown crash; this class has
+/// already produced two crashes of that family and does not need a third. QIcon is refcounted, so a copy
+/// per bar costs a pointer.
+static std::pair< QIcon, QIcon > volumeIcons(QStyle *style) {
+	return { style->standardIcon(QStyle::SP_MediaVolume), style->standardIcon(QStyle::SP_MediaVolumeMuted) };
+}
 
 namespace {
 
@@ -499,15 +518,18 @@ private:
 		m_muteButton->setAutoRaise(true);
 		m_muteButton->setIconSize(QSize(20, 20));
 		m_muteButton->setFocusPolicy(Qt::NoFocus);
+		m_muteButton->setAccessibleName(tr("Mute this stream"));
+		m_volumeIcons = volumeIcons(style());
 		layout->addWidget(m_muteButton);
 
-		m_volumeSlider = new QSlider(Qt::Horizontal, m_controls);
+		m_volumeSlider = new StreamVolumeSlider(m_controls);
 		m_volumeSlider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
 		m_volumeSlider->setSingleStep(5);
 		m_volumeSlider->setPageStep(25);
 		m_volumeSlider->setFixedWidth(160);
 		m_volumeSlider->setFocusPolicy(Qt::NoFocus);
 		m_volumeSlider->setToolTip(tr("Stream volume"));
+		m_volumeSlider->setAccessibleName(tr("Stream volume"));
 		layout->addWidget(m_volumeSlider);
 
 		m_volumeLabel = new QLabel(m_controls);
@@ -604,10 +626,20 @@ private:
 		m_hideTimer->start();
 	}
 
+	/// Called for every value the slider passes through, so it does as little as it can get away with:
+	/// the icon and its tooltip only say muted or not, and only change when that does.
 	void showLevel(int value) {
-		m_volumeLabel->setText(tr("%1%").arg(value));
-		m_muteButton->setIcon(style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
-		m_muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+		const QString level = tr("%1%").arg(value);
+		m_volumeLabel->setText(level);
+		m_volumeSlider->setLevelText(level);
+
+		const bool muted = value == 0;
+
+		if (m_shownAsMuted != muted) {
+			m_shownAsMuted = muted;
+			m_muteButton->setIcon(muted ? m_volumeIcons.second : m_volumeIcons.first);
+			m_muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
+		}
 	}
 
 	VideoGrid *m_owner;
@@ -647,10 +679,17 @@ private:
 	QToolButton *m_modeButton    = nullptr;
 	QToolButton *m_exitButton = nullptr;
 	QToolButton *m_muteButton = nullptr;
-	QSlider *m_volumeSlider   = nullptr;
+	StreamVolumeSlider *m_volumeSlider = nullptr;
 	QLabel *m_volumeLabel     = nullptr;
 	QTimer *m_hideTimer       = nullptr;
 	int m_volumeBeforeMute    = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+
+	/// What the speaker button is currently drawn as - see showLevel(), which only touches the icon when
+	/// this disagrees with the level. Starts as neither, so the first level sets it whichever way it goes.
+	std::optional< bool > m_shownAsMuted;
+
+	/// Loud and muted, built when the bar is built. See volumeIcons().
+	std::pair< QIcon, QIcon > m_volumeIcons;
 
 	/// Which presentation is showing. Fullscreen is the default, so the existing fullscreen button
 	/// behaves exactly as it did before the pop-out existed.
@@ -774,6 +813,56 @@ void VideoGrid::noteStatsPaint(Surface &surface, quint64 frameNumber) {
 		stats.maxPaintGapMsec = std::max(stats.maxPaintGapMsec, now - stats.lastPaintMsec);
 	}
 	stats.lastPaintMsec = now;
+
+	// One sample per frame, when its first tile is painted: that is the moment the frame became visible,
+	// and a tiled codec calls this once per tile. Erasing up to and including the frame found is what makes
+	// it the first - and it also discards the capture times of any older frames still waiting, which by now
+	// are never going to be painted.
+	const auto capture = stats.captureUsecByFrame.find(frameNumber);
+
+	if (capture != stats.captureUsecByFrame.end()) {
+		const qint64 floor = std::min(stats.arrivalFloorMsec, stats.previousArrivalFloorMsec);
+
+		// No floor yet would mean no unit has been timed, which cannot be the case here - this frame's own
+		// capture time is in the map - but a sample measured against the sentinel would be nonsense, so it
+		// is checked rather than assumed.
+		if (floor != std::numeric_limits< qint64 >::max() && stats.paintDelayMsec.size() < MAX_LATENCY_SAMPLES) {
+			stats.paintDelayMsec.push_back(now - static_cast< qint64 >(capture->second / 1000) - floor);
+		}
+
+		stats.captureUsecByFrame.erase(stats.captureUsecByFrame.begin(), std::next(capture));
+	}
+}
+
+/// The sample at the given fraction of the way through @p sorted, or -1 when there are none.
+///
+/// Nearest-rank, not interpolated: these are millisecond latencies, and an interpolated figure that no
+/// frame actually took would be harder to reason about than one that some frame did.
+static qint64 percentileMsec(const std::vector< qint64 > &sorted, double fraction) {
+	if (sorted.empty()) {
+		return -1;
+	}
+
+	const std::size_t index =
+		std::min(sorted.size() - 1, static_cast< std::size_t >(fraction * static_cast< double >(sorted.size())));
+
+	return sorted[index];
+}
+
+void VideoGrid::dumpPaintedFrame(const Surface &surface, quint64 frameNumber, const QImage &image) {
+	if (m_frameDumpDirectory.isEmpty()) {
+		return;
+	}
+
+	// Whole-frame codecs only. A tiled stream's "frame" arrives as up to 135 separate pictures with no
+	// moment at which one of them is the frame, so saving any of them under the frame's number would
+	// produce a file that is not what the sender encoded and would be compared against it anyway.
+	if (surface.codec != MumbleProto::VideoState_Codec_VP8 && surface.codec != MumbleProto::VideoState_Codec_VP9
+		&& surface.codec != MumbleProto::VideoState_Codec_H264) {
+		return;
+	}
+
+	VideoFrameDump::write(m_frameDumpDirectory, "rx", surface.streamID, frameNumber, image);
 }
 
 void VideoGrid::logStats() {
@@ -790,9 +879,20 @@ void VideoGrid::logStats() {
 		// to close it.
 		const qint64 openGap = stats.lastPaintMsec > 0 ? now - stats.lastPaintMsec : 0;
 
+		// Sorted in place: these samples are reset below and nothing else reads them.
+		std::sort(stats.paintDelayMsec.begin(), stats.paintDelayMsec.end());
+
+		// The playout code's own estimate of the same floor, from the same arithmetic over a different
+		// window. Printed beside this one because the two disagreeing is itself worth seeing. -1 when
+		// nothing has been timed yet, rather than the sentinel maximum.
+		const qint64 offset       = surface.playout.delay.minTransitMsec();
+		const qint64 rawFloor     = std::min(stats.arrivalFloorMsec, stats.previousArrivalFloorMsec);
+		const qint64 arrivalFloor = rawFloor == std::numeric_limits< qint64 >::max() ? -1 : rawFloor;
+
 		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
 			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d gapsRecovered=%u "
-			  "gapsAbandoned=%u held=%zu",
+			  "gapsAbandoned=%u held=%zu paintDelayMsP50=%lld paintDelayMsP90=%lld paintDelayMsMax=%lld "
+			  "paintDelaySamples=%zu arrivalFloorMs=%lld playoutOffsetMs=%lld playoutTargetMs=%lld",
 			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
 			  static_cast< unsigned long long >(stats.tilesPainted),
 			  static_cast< unsigned long long >(stats.framesPainted),
@@ -803,8 +903,14 @@ void VideoGrid::logStats() {
 			  static_cast< unsigned long long >(stats.keyframeRequestsLoss),
 			  static_cast< unsigned long long >(stats.keyframeRequestsFailure), surface.pendingTiles.size(),
 			  surface.awaitingKeyframe ? 1 : 0, surface.vp8GapsRecovered, surface.vp8GapsAbandoned,
-			  surface.vp8Held.size());
+			  surface.vp8Held.size(), static_cast< long long >(percentileMsec(stats.paintDelayMsec, 0.5)),
+			  static_cast< long long >(percentileMsec(stats.paintDelayMsec, 0.9)),
+			  static_cast< long long >(stats.paintDelayMsec.empty() ? -1 : stats.paintDelayMsec.back()),
+			  stats.paintDelayMsec.size(), static_cast< long long >(arrivalFloor),
+			  static_cast< long long >(offset == std::numeric_limits< qint64 >::max() ? -1 : offset),
+			  static_cast< long long >(surface.playout.delay.targetMsec()));
 
+		stats.paintDelayMsec.clear();
 		stats.units = stats.tilesPainted = stats.framesPainted = 0;
 		stats.keyframeRequestsOverload = stats.keyframeRequestsLoss = stats.keyframeRequestsFailure = 0;
 		stats.maxPaintGapMsec                                                                       = 0;
@@ -1084,15 +1190,17 @@ void VideoGrid::presentFrame(std::uint64_t key, Surface &surface, quint64 frameN
 							 const QImage &image) {
 	Surface::Playout &playout = surface.playout;
 	const auto capture        = playout.captureUsec.find(frameNumber);
-	const qint64 offset       = std::min(playout.windowMin, playout.previousMin);
+	const qint64 offset       = playout.delay.minTransitMsec();
 
-	if (capture == playout.captureUsec.end() || offset == std::numeric_limits< qint64 >::max()) {
+	if (capture == playout.captureUsec.end() || !playout.delay.hasEstimate()) {
 		noteStatsPaint(surface, frameNumber);
+		dumpPaintedFrame(surface, frameNumber, image);
 		applyDecodedTile(key, surface, x, y, image);
 		return;
 	}
 
-	const qint64 due = static_cast< qint64 >(capture->second / 1000) + offset + PLAYOUT_DELAY_MSEC;
+	const qint64 due =
+		static_cast< qint64 >(capture->second / 1000) + offset + playout.delay.delayMsec(QDateTime::currentMSecsSinceEpoch());
 	playout.captureUsec.erase(playout.captureUsec.begin(), std::next(capture));
 
 	Surface::Playout::Pending pending;
@@ -1128,6 +1236,7 @@ void VideoGrid::flushPlayout() {
 			queue.erase(front);
 
 			noteStatsPaint(surface, frameNumber);
+			dumpPaintedFrame(surface, frameNumber, pending.image);
 			applyDecodedTile(entry.first, surface, pending.x, pending.y, pending.image);
 		}
 	}
@@ -1251,6 +1360,15 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		surface.vp8RequestedThrough = 0;
 		surface.canvas = QImage();
 		surface.vp8.reset();
+#ifdef USE_H264
+		// The same reasoning as surface.vp8 above, and it was missed here: an H264Decoder carries the
+		// previous content's SPS, PPS and reference frames, and a half-assembled frame's parts belong to
+		// a stream that no longer exists. A sender re-announcing one stream id as H.264, then VP9, then
+		// H.264 again - which a codec setting change does - got the first incarnation's decoder back.
+		surface.h264.reset();
+		surface.h264Parts = H264FrameAssembler();
+		surface.h264RecentPartCount = 1;
+#endif
 		++surface.decodeEpoch;
 		resetPlayout(surface);
 		surface.tileFrameNumbers.clear();
@@ -1436,6 +1554,29 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	++surface.stats.units;
 	surface.stats.newestUnitFrame = std::max(surface.stats.newestUnitFrame, static_cast< quint64 >(frameNumber));
 
+	// Before the watching check below, so that a frame whose first unit arrived just as watching began is
+	// not measured as having taken however long the click took.
+	if (m_statsTimer && captureTimestampUsec != 0) {
+		Surface::Stats &stats = surface.stats;
+		const qint64 nowMsec  = QDateTime::currentMSecsSinceEpoch();
+
+		stats.captureUsecByFrame.emplace(frameNumber, captureTimestampUsec);
+
+		while (stats.captureUsecByFrame.size() > MAX_LATENCY_FRAMES) {
+			stats.captureUsecByFrame.erase(stats.captureUsecByFrame.begin());
+		}
+
+		if (stats.arrivalFloorWindowStartMsec == 0
+			|| nowMsec - stats.arrivalFloorWindowStartMsec >= ARRIVAL_FLOOR_WINDOW_MSEC) {
+			stats.previousArrivalFloorMsec    = stats.arrivalFloorMsec;
+			stats.arrivalFloorMsec            = std::numeric_limits< qint64 >::max();
+			stats.arrivalFloorWindowStartMsec = nowMsec;
+		}
+
+		stats.arrivalFloorMsec =
+			std::min(stats.arrivalFloorMsec, nowMsec - static_cast< qint64 >(captureTimestampUsec / 1000));
+	}
+
 	if (!surface.watching) {
 		// Unwatched: the owner has already sent (or is about to send) a VideoSubscribe withdrawing this,
 		// so units are expected to stop arriving shortly, but a few in flight when the button was clicked
@@ -1454,17 +1595,21 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 			playout.captureUsec.erase(playout.captureUsec.begin());
 		}
 
-		if (playout.windowStartMsec == 0 || now - playout.windowStartMsec >= 10000) {
-			playout.previousMin     = playout.windowMin;
-			playout.windowMin       = std::numeric_limits< qint64 >::max();
-			playout.windowStartMsec = now;
-		}
-		playout.windowMin = std::min(playout.windowMin, now - static_cast< qint64 >(captureTimestampUsec / 1000));
+		playout.delay.noteArrival(static_cast< qint64 >(captureTimestampUsec / 1000), now);
 	}
 
 	// VP9 (screen shares) goes through the same whole-frame path as VP8 (cameras): frame ordering, holding
 	// frames across a gap while it is retransmitted, and keyframe requests are the same for both.
 	if (surface.codec == MumbleProto::VideoState_Codec_VP8 || surface.codec == MumbleProto::VideoState_Codec_VP9) {
+		// A whole frame covers the surface, so its position is always the origin - every encoder here sets
+		// x and y to zero for these codecs. A peer sending anything else gets its frame painted into an
+		// oversized canvas instead of becoming the canvas: at the surface bound that is 33 MB held and a
+		// full-frame copy on the GUI thread for every frame of the share, from one field nobody validated.
+		// Refused rather than clamped, because a legitimate sender never sends it.
+		if (x != 0 || y != 0) {
+			return;
+		}
+
 		onVp8UnitReceived(existing->first, surface, frameNumber, isKeyframe, x, y, encodedTile);
 		return;
 	}
@@ -1575,7 +1720,19 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 			surface.vp8Held.erase(surface.vp8Held.begin());
 		}
 
+		// Nothing branches on this while hasDecodedFrame is false - the one test of it, below, is past the
+		// return at the end of this block - so it is set purely to be reported. Before, a stream that had
+		// never managed to decode its first keyframe logged awaitingKey=0, which is also what a perfectly
+		// healthy stream logs, so "never started" and "running fine" were indistinguishable in the only
+		// output anyone has. Finding that state in a benchmark took an afternoon it should not have.
+		surface.awaitingKeyframe = true;
+
 		// No keyframe yet: ask now and then, in case the request that should have produced one was lost.
+		//
+		// Driven by units arriving, which is its weakness: a link too congested to carry a keyframe can
+		// still deliver a trickle, and a trickle below this threshold means the re-request effectively
+		// stops - as does the stall-refresh watchdog, which lastUnitMsec keeps satisfied for the same
+		// reason. Making this time-driven is a real fix and a larger one; see the backlog.
 		if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
 			surface.unitsWhileAwaiting = 0;
 
@@ -1760,6 +1917,7 @@ bool VideoGrid::decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frame
 	surface.unitsWhileAwaiting  = 0;
 
 	noteStatsPaint(surface, frameNumber);
+	dumpPaintedFrame(surface, frameNumber, tile);
 	applyDecodedTile(key, surface, x, y, tile);
 
 	return true;
@@ -1939,6 +2097,7 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 	surface.consecutiveFailures       = 0;
 
 	noteStatsPaint(surface, frameNumber);
+	dumpPaintedFrame(surface, frameNumber, tile);
 	applyDecodedTile(existing->first, surface, x, y, tile);
 }
 
@@ -2355,7 +2514,7 @@ static QWidget *makeTileControlStrip(QWidget *parent) {
 		"#tileControls QSlider::add-page:horizontal {"
 		"  height: 4px; border: none; border-radius: 2px; background: rgba(255, 255, 255, 70); }"
 		"#tileControls QSlider::handle:horizontal {"
-		"  width: 12px; height: 12px; margin: -4px 0px; border: none; border-radius: 6px; background: white; }"
+		"  width: 14px; height: 14px; margin: -5px 0px; border: none; border-radius: 7px; background: white; }"
 		"#tileControls QSlider::handle:horizontal:hover,"
 		"#tileControls QSlider::handle:horizontal:focus,"
 		"#tileControls QSlider::handle:horizontal:pressed { background: #e3e5ff; border: none; }"));
@@ -2377,6 +2536,9 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	controls->viewersButton->setFocusPolicy(Qt::NoFocus);
 	controls->viewersButton->setPopupMode(QToolButton::InstantPopup);
 	controls->viewersButton->setMenu(new QMenu(controls->viewersButton));
+	// Its text is an eye and a digit, which reads as nothing at all. refreshViewersButton() keeps the
+	// tooltip - the names and the level each one hears - in step with the menu.
+	controls->viewersButton->setAccessibleName(tr("Who is watching"));
 	layout->addWidget(controls->viewersButton);
 	refreshViewersButton(controls.get(),
 						 target == FocusTarget::SelfScreen ? m_ownScreenViewers : m_ownCameraViewers);
@@ -2391,6 +2553,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
 	controls->fullscreenButton->setToolTip(tr("Fullscreen"));
+	controls->fullscreenButton->setAccessibleName(tr("Fullscreen"));
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, target]() {
@@ -2431,15 +2594,17 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		muteButton->setAutoRaise(true);
 		muteButton->setIconSize(QSize(16, 16));
 		muteButton->setFocusPolicy(Qt::NoFocus);
+		muteButton->setAccessibleName(tr("Mute this stream"));
 		layout->addWidget(muteButton);
 
-		auto *slider = new QSlider(Qt::Horizontal, controls->bar);
+		auto *slider = new StreamVolumeSlider(controls->bar);
 		slider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
 		slider->setSingleStep(5);
 		slider->setPageStep(25);
 		slider->setFixedWidth(110);
 		slider->setFocusPolicy(Qt::NoFocus);
 		slider->setToolTip(tr("Stream volume"));
+		slider->setAccessibleName(tr("Stream volume"));
 		layout->addWidget(slider);
 
 		auto *label = new QLabel(controls->bar);
@@ -2456,11 +2621,27 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		// TileControlBar, which can be destroyed while these widgets are still waiting on deleteLater().
 		auto volumeBeforeMute = std::make_shared< int >(percent > 0 ? percent : defaultPercent);
 
-		const auto showLevel = [this, muteButton, label](int value) {
-			label->setText(tr("%1%").arg(value));
-			muteButton->setIcon(
-				style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
-			muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+		// Which way the speaker button is currently drawn, so that a drag through a hundred levels sets the
+		// icon at most once - when it crosses zero - instead of on every value. Shared the same way
+		// volumeBeforeMute is, and for the same reason.
+		auto shownAsMuted = std::make_shared< std::optional< bool > >();
+
+		// Captured by value: QIcon is refcounted, and the pair must outlive this bar's widgets, which can
+		// be waiting on deleteLater() after the TileControlBar holding them is gone.
+		const std::pair< QIcon, QIcon > icons = volumeIcons(style());
+
+		const auto showLevel = [this, muteButton, label, slider, shownAsMuted, icons](int value) {
+			const QString level = tr("%1%").arg(value);
+			label->setText(level);
+			slider->setLevelText(level);
+
+			const bool muted = value == 0;
+
+			if (*shownAsMuted != muted) {
+				*shownAsMuted = muted;
+				muteButton->setIcon(muted ? icons.second : icons.first);
+				muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
+			}
 		};
 
 		slider->setValue(percent);
@@ -2483,6 +2664,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		connect(muteButton, &QToolButton::clicked, slider,
 				[slider, volumeBeforeMute]() { slider->setValue(slider->value() == 0 ? *volumeBeforeMute : 0); });
 
+		// updateHoveredBarImpl() leaves the bars alone while this is held down (see
+		// aVolumeSliderIsBeingDragged()), so whatever it wanted to do is done once the drag ends - the
+		// pointer may well have left the tile by then.
+		connect(slider, &QSlider::sliderReleased, this, [this]() { scheduleHoveredBarUpdate(); });
+
 		// The audio buffer for this share may already exist at another level - a share restarted after
 		// the slider was moved - so say where the slider stands rather than assume the buffer agrees.
 		emit volumeChanged(senderSession, static_cast< float >(percent) / 100.0f);
@@ -2499,6 +2685,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	controls->popOutButton->setAutoRaise(true);
 	controls->popOutButton->setText(QStringLiteral("❐"));
 	controls->popOutButton->setToolTip(tr("Show in its own window, outside the grid"));
+	controls->popOutButton->setAccessibleName(tr("Show in its own window"));
 	layout->addWidget(controls->popOutButton);
 
 	connect(controls->popOutButton, &QToolButton::clicked, this, [this, senderSession, streamID]() {
@@ -2513,6 +2700,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
 	controls->fullscreenButton->setToolTip(tr("Fullscreen"));
+	controls->fullscreenButton->setAccessibleName(tr("Fullscreen"));
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, key]() {
@@ -2643,7 +2831,32 @@ void VideoGrid::updateHoveredBar() {
 	m_updatingHoveredBar = false;
 }
 
+bool VideoGrid::aVolumeSliderIsBeingDragged() const {
+	for (const auto &entry : m_remoteControls) {
+		if (entry.second->volumeSlider && entry.second->volumeSlider->isSliderDown()) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void VideoGrid::updateHoveredBarImpl() {
+	// Hiding the bar a slider is being dragged on takes the slider out from under the pointer and ends the
+	// drag where it happens to be. That is reachable without the pointer going anywhere: anything that
+	// changes the layout - somebody else starting a share, a tile ending, the dock being resized - comes
+	// through relayout() and so through here. Asked of the sliders rather than remembered in a flag, which
+	// a bar destroyed mid-drag would leave stuck on.
+	//
+	// Nothing below has run, so m_hoveredSlot still describes what is on screen; the sliderReleased
+	// connection in makeRemoteControlBar() asks again once the drag is over. The cost is that a bar
+	// created while a drag is in progress - somebody starting a share at that moment - stays visible
+	// until the drag ends, which is a second of a bar being shown rather than a drag going somewhere
+	// the user did not aim it.
+	if (aVolumeSliderIsBeingDragged()) {
+		return;
+	}
+
 	// Worked out before anything is touched, so that the overwhelmingly common case - this being called
 	// again with the hover state exactly as it already is - can return without changing any widget's
 	// visibility at all.

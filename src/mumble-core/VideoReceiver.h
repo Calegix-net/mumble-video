@@ -47,9 +47,18 @@ namespace Protocol {
 		/// How often, at most, incomplete units are looked for. Driven by arriving packets, which is exactly
 		/// when there is anything to ask about.
 		static constexpr std::uint64_t NACK_COLLECT_INTERVAL_USEC = 10 * 1000;
-		/// Retransmission requests per second, at most, so a burst of loss costs the server's rate limit for
-		/// this client a bounded amount, leaving room for its subscriptions and keyframe requests.
-		static constexpr unsigned int MAX_NACK_MESSAGES_PER_SECOND = 30;
+		/// Retransmission request messages per second, at most, so that a burst of loss cannot turn one
+		/// receiver into a flood.
+		///
+		/// Below the server's own limit on the same thing (MAX_NACKS_PER_SECOND, 100 per requester), with
+		/// room left over, because a request the server discards is worse than one never sent: it costs
+		/// the bandwidth and buys nothing. It is not below it by as much as it used to be - this was 30,
+		/// justified by a comment about costing "the server's rate limit for this client", which is a
+		/// different budget (m_videoControlBucket, for subscriptions and keyframe requests over TCP).
+		/// Retransmission requests ride UDP and are metered separately, so being three times stricter than
+		/// the server bought nothing and threw away requests at exactly the loss rates this mechanism
+		/// exists for.
+		static constexpr unsigned int MAX_NACK_MESSAGES_PER_SECOND = 60;
 
 		/**
 		 * Feeds one datagram from the video channel, channel byte included.

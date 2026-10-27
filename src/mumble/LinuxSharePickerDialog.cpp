@@ -66,8 +66,13 @@ LinuxSharePickerDialog::LinuxSharePickerDialog(QWidget *parent, bool directCaptu
 		m_region->setEnabled(false);
 		m_region->setToolTip(tr("Not available when the desktop's own screen picker is used."));
 	}
+	// All three, including the region. Qt's own exclusivity only pairs auto-exclusive siblings that are
+	// in no QButtonGroup, so a radio left out of the group here has nothing to be exclusive with: it
+	// could be checked at the same time as "An entire screen", and picking a different option would not
+	// clear it - leaving two radios lit and regionRequested() still true.
 	auto *group = new QButtonGroup(this);
 	group->addButton(m_screen);
+	group->addButton(m_region);
 	group->addButton(m_window);
 
 	if (!m_directCapture) {

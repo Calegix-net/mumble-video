@@ -31,6 +31,26 @@
  * Authorisation is injected rather than called directly so that this class can be tested without a
  * running server, and so that the routing logic and the permission model can be reasoned about
  * separately.
+ *
+ * ## Locking
+ *
+ * **This class takes no locks. Every caller must already hold Server::qrwlVoiceThread** - the write
+ * lock from the main thread, the read lock from the UDP thread, exactly as docs/dev/MurmurLocking.md
+ * describes for the rest of the server's shared state. All call sites do; it was simply written down
+ * nowhere, which is how the next one stops doing it.
+ *
+ * One of them bends the rule and is worth naming rather than leaving to be rediscovered.
+ * Server::run() holds the **read** lock and reaches noteRelayed() through relayVideo(), which assigns
+ * into m_lastRelayedMsec. MurmurLocking.md does not contemplate a write from the voice thread at all.
+ * It is safe today only because Server is a single QThread, so exactly one thread reaches it and the
+ * read lock excludes every writer - and that is a property of the server's current shape, not of this
+ * class. The moment a second reader appears under a read lock (an Ice method, a stats endpoint, a
+ * status page) it becomes a real race, and the QReadLocker at the call site will actively suggest that
+ * adding one is safe.
+ *
+ * The small fix, when somebody does this: have announceStream() insert the key under the write lock,
+ * and have noteRelayed() find-and-assign rather than use operator[], so it never inserts. Assigning to
+ * an existing std::map element touches no shared structure, which makes the read lock honest.
  */
 class VideoRouter {
 public:

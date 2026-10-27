@@ -1,0 +1,183 @@
+#!/bin/bash
+# Copyright The Mumble Developers. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file at the root of the
+# Mumble source tree or at <https://www.mumble.info/LICENSE>.
+
+# CPU profiles of the sender and the receiver while a share is running, as perf reports and folded
+# stacks ready for a flame graph.
+#
+# perf_event_paranoid is 2 on this host, so only user-space samples are available - no kernel stacks,
+# no scheduler tracing. That is enough for "which of our functions is hot", which is the question, and
+# it needs no root.
+#
+#   profile.sh <seconds> <outdir>
+set -u
+# shellcheck source=env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+# A fresh network namespace's loopback is DOWN, and everything here talks to 127.0.0.1. Without
+# this the clients start, never reach the server, and what gets profiled or soaked is two clients
+# retrying a connection - which is a measurement of nothing that looks like a measurement of
+# something. This line was missing from both of these scripts for their whole existence.
+ip link set lo up
+SECONDS_TOTAL="${1:-25}"
+OUT="${2:-$MV_OUT/profile}"
+
+
+mkdir -p "$OUT"
+say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$OUT/profile.log"; }
+
+PIDS=()
+cleanup() {
+    for d in "$MV_WORK/clients/sender" "$MV_WORK/clients/receiver"; do
+        HOME="$d" XDG_RUNTIME_DIR="$d/run" timeout 10 "$MV_CLIENT" rpc quit >/dev/null 2>&1
+    done
+    sleep 2
+    for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done
+    sleep 1
+    for p in ${PIDS[@]+"${PIDS[@]}"}; do kill -9 "$p" 2>/dev/null; done
+}
+trap cleanup EXIT
+
+Xvfb :90 -screen 0 1920x1080x24 -extension GLX >/dev/null 2>&1 & PIDS+=($!)
+Xvfb :91 -screen 0 1920x1080x24 -extension GLX >/dev/null 2>&1 & PIDS+=($!)
+sleep 2
+
+"$MV_SERVER" --foreground --ini "$MV_WORK/server/mumble-server.ini" > "$OUT/server.stdout" 2>&1 &
+SERVER_PID=$!
+PIDS+=("$SERVER_PID")
+sleep 3
+
+start_client() {
+    local name="$1" display="$2" user="$3"
+    shift 3
+    local dir="$MV_WORK/clients/$name"
+    mkdir -p "$dir/run"; chmod 700 "$dir/run"
+    rm -f "$dir/run/MumbleSocket" "$dir/mumble.lock"
+    env HOME="$dir" XDG_RUNTIME_DIR="$dir/run" XDG_CONFIG_HOME="$dir/.config" \
+        XDG_DATA_HOME="$dir/.local/share" DISPLAY="$display" QT_QPA_PLATFORM=xcb \
+        MUMBLE_VIDEO_STATS=1 "$@" \
+        "$MV_CLIENT" --skip-settings-backup-prompt "mumble://$user@127.0.0.1:64740/" \
+        > "$OUT/$name.log" 2>&1 &
+    echo $!
+}
+
+SENDER_PID=$(start_client sender :90 qa-mv1 env MUMBLE_MOCK_SCREEN=1 MUMBLE_MOCK_SCREEN_SIZE=1920x1080)
+PIDS+=("$SENDER_PID")
+RECEIVER_PID=$(start_client receiver :91 qa-mv2 env)
+PIDS+=("$RECEIVER_PID")
+sleep 8
+
+rpc() { local d="$MV_WORK/clients/$1"; shift; HOME="$d" XDG_RUNTIME_DIR="$d/run" timeout 10 "$MV_CLIENT" rpc "$@" >/dev/null 2>&1; }
+
+for _ in $(seq 1 30); do rpc sender sharescreen; sleep 2; grep -q "VideoStats tx" "$OUT/sender.log" && break; done
+for _ in $(seq 1 30); do rpc receiver watchall; sleep 2; grep -q "VideoStats rx" "$OUT/receiver.log" && break; done
+grep -m1 "Screen share:" "$OUT/sender.log" | tee -a "$OUT/profile.log"
+
+# Checked, not assumed. A profile of a pipeline that is not running is not an empty result - it is a
+# plausible-looking one, full of connection retries and audio threads, and it was reported as a
+# profile of the video pipeline for exactly as long as nobody checked.
+if ! grep -q "VideoStats tx" "$OUT/sender.log" || ! grep -q "VideoStats rx" "$OUT/receiver.log"; then
+    say "no frames are moving; there is nothing worth profiling. Last lines of each client:"
+    tail -15 "$OUT/sender.log" | tee -a "$OUT/profile.log"
+    tail -15 "$OUT/receiver.log" | tee -a "$OUT/profile.log"
+    exit 1
+fi
+
+say "both running; settling"
+sleep 8
+
+# How the stacks get unwound, which is not a free choice.
+#
+# --call-graph dwarf is the obvious answer, because it needs nothing of the binary under test. It is
+# also silently useless on a perf built without libunwind and libdw, which is what the WSL2 kernel
+# ships: perf accepts the option, records the stack bytes faithfully, and then unwinds none of them.
+# The flat report looks completely normal. Every call graph comes back empty, and the only hint is a
+# one-line warning you see solely if you ask for a graph. Two profiling runs were wasted on this.
+#
+# Frame-pointer unwinding is done by the kernel, so it works with any perf at all. The price is that
+# the binary must have frame pointers, which an -O2 build does not by default, so MUMBLE_BUILD has to
+# point at a build configured with -fno-omit-frame-pointer. Without that the stacks come back one or
+# two frames deep - which the check after the reports will tell you about rather than leaving you to
+# notice.
+#
+# MV_CALL_GRAPH=dwarf restores the other behaviour on a host whose perf can unwind it.
+CALL_GRAPH="${MV_CALL_GRAPH:-fp}"
+
+if ! grep -q "fno-omit-frame-pointer" "$MUMBLE_BUILD/CMakeCache.txt" 2>/dev/null && [ "$CALL_GRAPH" = "fp" ]; then
+    say "warning: $MUMBLE_BUILD was not configured with -fno-omit-frame-pointer, so frame-pointer"
+    say "         stacks will be shallow. Configure a build with it, or set MV_CALL_GRAPH=dwarf if"
+    say "         this host's perf can unwind DWARF."
+fi
+
+for pair in "sender:$SENDER_PID" "receiver:$RECEIVER_PID"; do
+    name="${pair%%:*}"
+    pid="${pair##*:}"
+    say "profiling $name ($pid) for ${SECONDS_TOTAL}s, call graph $CALL_GRAPH"
+    perf record -F 499 -g --call-graph "$CALL_GRAPH" -p "$pid" -o "$OUT/$name.data" \
+        -- sleep "$SECONDS_TOTAL" > "$OUT/$name.perf.log" 2>&1
+    say "  perf record exit $?"
+done
+
+say "reporting"
+for name in sender receiver; do
+    [ -f "$OUT/$name.data" ] || continue
+    perf report -i "$OUT/$name.data" --stdio --no-children --percent-limit 0.4 \
+        > "$OUT/$name.flat.txt" 2>/dev/null
+    perf report -i "$OUT/$name.data" --stdio --children --percent-limit 1.0 \
+        > "$OUT/$name.tree.txt" 2>/dev/null
+    # Folded stacks: one line per unique stack with a count, which is what a flame graph renders and is
+    # also readable on its own with sort/head.
+    perf script -i "$OUT/$name.data" 2>/dev/null \
+        | awk '
+            /^$/ { if (n > 0) { s = ""; for (i = n; i >= 1; i--) s = s (s == "" ? "" : ";") f[i]; print s } n = 0; next }
+            /^[^ \t]/ { next }
+            { name_field = $2; sub(/\+0x[0-9a-f]+$/, "", name_field); f[++n] = name_field }
+        ' | sort | uniq -c | sort -rn > "$OUT/$name.folded.txt"
+    say "  $name: $(wc -l < "$OUT/$name.flat.txt") flat lines, $(wc -l < "$OUT/$name.folded.txt") unique stacks"
+done
+
+# A profile whose stacks are all one frame deep is a flat profile wearing a call graph's clothes. It
+# still answers "which library is hot" and it cannot answer "which of our call sites got us there",
+# so it should not be presented as if it could.
+for name in sender receiver; do
+    [ -f "$OUT/$name.folded.txt" ] || continue
+    deep=$(awk '$0 ~ /;/ { n++ } END { print n + 0 }' "$OUT/$name.folded.txt")
+    if [ "$deep" -eq 0 ]; then
+        say "warning: $name has no stack deeper than one frame; the call graph is empty. Treat"
+        say "         $name.flat.txt as the result and see the note above perf record."
+    fi
+done
+
+# Names, where perf gives addresses. See resolve.py for why it has to be done outside perf; the short
+# version is that a perf built without libelf cannot read any symbol table at all and says nothing
+# about it. The per-library attribution in the flat report is the answer for the libraries, which have
+# no debug packages anyway; this is the answer for our own code, which is the part that can change.
+for name in sender receiver; do
+    [ -f "$OUT/$name.data" ] || continue
+    python3 "$(dirname "${BASH_SOURCE[0]}")/resolve.py" "$OUT/$name.data" "$MUMBLE_BUILD/mumble" \
+        --limit 15 > "$OUT/$name.ours.txt" 2>&1 \
+        || say "  $name: resolve.py failed; see $name.ours.txt"
+done
+
+say "done; reports in $OUT"
+
+# What to read, in the order worth reading it. The flat report is per library and answers "where does
+# the time go"; the resolved report is per function of ours and answers "what of ours put it there".
+for name in sender receiver; do
+    [ -f "$OUT/$name.ours.txt" ] || continue
+    echo
+    echo "================ $name: by thread and library ================"
+    perf report -i "$OUT/$name.data" --stdio --no-children --sort comm,dso --percent-limit 1.0 \
+        2>/dev/null | grep -E '^ +[0-9]' | head -12
+    echo
+    echo "================ $name: our own functions ================"
+    cat "$OUT/$name.ours.txt"
+done
+
+# One thing to hold on to when reading the sender's numbers: the share the rig itself accounts for.
+# The sending client draws a synthetic desktop with QPainter rather than capturing a real one, so Qt's
+# image code is on the sender's profile for a reason that does not exist in production. The resolved
+# report names it - SyntheticVideoSource::render and renderScreenLike - and it is worth subtracting
+# before drawing any conclusion about the capture path.

@@ -6,6 +6,8 @@
 #ifndef MUMBLE_MUMBLE_VIDEOGRID_H_
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
+#include "PlayoutDelay.h"
+#include "VideoFrameDump.h"
 #include "VpxCodec.h"
 #ifdef USE_H264
 #	include "H264Codec.h"
@@ -531,18 +533,16 @@ protected:
 		std::uint64_t decodeEpoch = 0;
 
 		/// Playout (threaded decoding only - see presentFrame()): each frame is shown at its capture time
-		/// plus the stream's smallest recent transit delay plus PLAYOUT_DELAY_MSEC, rather than the moment it
-		/// is decoded, so that frames that arrive bunched together - typically right after a lost one is
+		/// plus the stream's smallest recent transit delay plus a buffer, rather than the moment it is
+		/// decoded, so that frames that arrive bunched together - typically right after a lost one is
 		/// re-sent - are shown at the pace they were captured instead of as a pause followed by a jump.
+		///
+		/// How deep that buffer is, is measured rather than fixed: see PlayoutDelayEstimator.
 		struct Playout {
 			/// Capture time (sender's clock, microseconds) by frame number, recorded on arrival.
 			std::map< quint64, quint64 > captureUsec;
-			/// Smallest (arrival - capture), in milliseconds, in the current and the previous ten-second
-			/// window: the transit delay with no queueing in it. Windowed so a drifting sender clock is
-			/// followed instead of pinning the minimum for good.
-			qint64 windowStartMsec = 0;
-			qint64 windowMin       = std::numeric_limits< qint64 >::max();
-			qint64 previousMin     = std::numeric_limits< qint64 >::max();
+			/// The smallest recent transit delay, and how long a frame should be held on top of it.
+			PlayoutDelayEstimator delay;
 			struct Pending {
 				QImage image;
 				unsigned int x = 0;
@@ -596,6 +596,35 @@ protected:
 			quint64 newestPaintedFrame       = 0;
 			qint64 lastPaintMsec             = 0;
 			qint64 maxPaintGapMsec           = 0;
+
+			/// Capture time (the sender's clock, microseconds) by frame number, for the latency below.
+			/// Separate from Surface::Playout::captureUsec, which looks like it would do: that one only
+			/// exists for whole-frame codecs decoded on a thread, and is consumed as frames are shown. This
+			/// one is filled for every codec whenever MUMBLE_VIDEO_STATS is set, and for nothing else.
+			std::map< quint64, quint64 > captureUsecByFrame;
+
+			/// The smallest (arrival - capture) seen in this ten-second window and in the one before it.
+			///
+			/// A capture timestamp is microseconds since the sending capture source started, not a wall
+			/// clock, so (arrival - capture) is a real delay plus a large arbitrary constant. The smallest
+			/// value seen is the best available estimate of that constant plus the minimum transit, and
+			/// subtracting it is what turns the samples below into a figure anyone can compare. Windowed,
+			/// so that two drifting clocks are followed instead of the minimum being pinned for the life of
+			/// the stream - the same reasoning, and the same ten seconds, as Playout above.
+			qint64 arrivalFloorWindowStartMsec = 0;
+			qint64 arrivalFloorMsec            = std::numeric_limits< qint64 >::max();
+			qint64 previousArrivalFloorMsec    = std::numeric_limits< qint64 >::max();
+
+			/// How long each frame since the last log line waited between arriving and being painted, in
+			/// milliseconds above the floor above: decoding, the playout buffer's deliberate wait, and
+			/// whatever else the GUI thread was busy with. One sample per frame, taken when its first tile
+			/// lands - the moment the frame became visible.
+			///
+			/// This is the receiver's share of glass-to-glass, and it cannot be the whole of it: the
+			/// camera's exposure, the monitor's own pipeline and the capture-to-send time on the other
+			/// machine are all outside anything this process can see. It is the part this code controls,
+			/// and so the part a change here moves.
+			std::vector< qint64 > paintDelayMsec;
 		} stats;
 	};
 
@@ -634,9 +663,6 @@ protected:
 	/// Drops a stream's playout state when its decoding starts over.
 	static void resetPlayout(Surface &surface);
 
-	/// How far behind the earliest a frame could be shown that it is shown: room for a lost fragment's
-	/// re-send (a request at VIDEO_NACK_DELAY_USEC plus a round trip) to arrive before its frame is due.
-	static constexpr qint64 PLAYOUT_DELAY_MSEC = 200;
 	/// Frames waiting in the playout queue, at most, before the oldest is shown regardless.
 	static constexpr std::size_t MAX_PLAYOUT_QUEUE = 30;
 	QTimer *m_playoutTimer                         = nullptr;
@@ -654,8 +680,22 @@ protected:
 							unsigned int index, unsigned int count, const QByteArray &part);
 #endif
 
+	/// How many frames' capture times are held for the latency measurement, and how many samples are
+	/// kept between log lines. Both are far above a two-second window at any frame rate anyone shares at;
+	/// they exist so that stats left on in a client nobody is looking at cannot grow without limit.
+	static constexpr std::size_t MAX_LATENCY_FRAMES  = 256;
+	static constexpr std::size_t MAX_LATENCY_SAMPLES = 4096;
+
+	/// How long the arrival floor is measured over before the window rolls. See Stats::arrivalFloorMsec:
+	/// the same ten seconds Playout uses, for the same reason.
+	static constexpr qint64 ARRIVAL_FLOOR_WINDOW_MSEC = 10000;
+
 	/// MUMBLE_VIDEO_STATS: records a tile about to be painted for frame @p frameNumber.
 	void noteStatsPaint(Surface &surface, quint64 frameNumber);
+	/// MUMBLE_VIDEO_DUMP_RX: saves a decoded whole frame, for the benchmark's picture-quality
+	/// comparison against the sender's own copy of the same frame number. See VideoFrameDump.
+	void dumpPaintedFrame(const Surface &surface, quint64 frameNumber, const QImage &image);
+
 	/// MUMBLE_VIDEO_STATS: one log line per watched stream, then resets the per-line counters.
 	void logStats();
 	QTimer *m_statsTimer = nullptr;
@@ -733,6 +773,13 @@ protected:
 	std::size_t m_pendingTileDecodes                      = 0;
 	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 
+	/// What to actually paint for a surface: its own picture, or, in the gap between a replacement being
+	/// announced and its first frame arriving, the picture of the stream it replaced. See
+	/// Surface::heldPicture.
+	static const QImage &displayImage(const Surface &surface) {
+		return surface.canvas.isNull() ? surface.heldPicture : surface.canvas;
+	}
+
 	/**
 	 * Whether a surface takes up a cell in the grid.
 	 *
@@ -751,13 +798,6 @@ protected:
 	 * the restarted share's first frame arrives, and it already has the previous stream's cell. Letting
 	 * it fall out and back in reflows the whole grid twice per rotation.
 	 */
-	/// What to actually paint for a surface: its own picture, or, in the gap between a replacement being
-	/// announced and its first frame arriving, the picture of the stream it replaced. See
-	/// Surface::heldPicture.
-	static const QImage &displayImage(const Surface &surface) {
-		return surface.canvas.isNull() ? surface.heldPicture : surface.canvas;
-	}
-
 	static bool occupiesCell(const Surface &surface) {
 		return !surface.poppedOut && !surface.hiddenByPreference
 			   && !(surface.watching && surface.canvas.isNull() && !surface.awaitingReplacementPicture);
@@ -902,6 +942,9 @@ protected:
 	/// The picture-in-picture windows, keyed by the surface each one currently shows.
 	std::map< std::uint64_t, PipWindow > m_pipWindows;
 
+	/// See dumpPaintedFrame(). Empty in every build that is not being benchmarked.
+	QString m_frameDumpDirectory = VideoFrameDump::receiverDirectory();
+
 	/// See setRemoteVideoHidden(). Applied to surfaces as they are announced, so a share that starts
 	/// while this is on is hidden too rather than appearing for a moment.
 	bool m_remoteVideoHidden = false;
@@ -1045,6 +1088,10 @@ protected:
 	/// The actual work of updateHoveredBar(), pulled out so the reentrancy guard has one place to wrap
 	/// regardless of which of this function's several early returns is taken.
 	void updateHoveredBarImpl();
+
+	/// Whether a tile's stream-volume slider currently has the mouse. updateHoveredBarImpl() will not
+	/// hide a bar while that is true - hiding it would end the drag under the pointer.
+	bool aVolumeSliderIsBeingDragged() const;
 
 	/// Asks for a hover update on the next turn of the event loop instead of performing one immediately,
 	/// coalescing repeats. What enterEvent(), leaveEvent() and mouseMoveEvent() use; relayout() still

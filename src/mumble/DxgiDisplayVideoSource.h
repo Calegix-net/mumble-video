@@ -63,7 +63,14 @@ public:
 	 */
 	static QList< DisplayInfo > availableDisplays();
 
-	explicit DxgiDisplayVideoSource(const DisplayInfo &display, QObject *parent = nullptr);
+	/**
+	 * @param display Which output to duplicate.
+	 * @param showCursor Whether to composite the mouse pointer into the frames. Duplication hands back
+	 *   the pointer's shape and position separately from the desktop image, so this is a real choice
+	 *   rather than something the capture decides - and a whole-screen share that always sent the cursor
+	 *   was sending something the user had been shown no way to decline.
+	 */
+	explicit DxgiDisplayVideoSource(const DisplayInfo &display, bool showCursor = true, QObject *parent = nullptr);
 	~DxgiDisplayVideoSource() override;
 
 	bool start() override;
@@ -85,6 +92,7 @@ protected:
 	void releaseDuplication();
 
 	DisplayInfo m_display;
+	bool m_showCursor = true;
 
 	ID3D11Device *m_device                = nullptr;
 	ID3D11DeviceContext *m_context        = nullptr;

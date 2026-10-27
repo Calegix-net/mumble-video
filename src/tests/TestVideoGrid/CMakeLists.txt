@@ -21,6 +21,12 @@ set(TESTVIDEOGRID_SOURCES
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.h"
 	"${MUMBLE_SOURCE_DIR}/VideoGrid.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoGrid.h"
+	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.cpp"
+	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.h"
+	"${MUMBLE_SOURCE_DIR}/widgets/SemanticSlider.cpp"
+	"${MUMBLE_SOURCE_DIR}/widgets/SemanticSlider.h"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.cpp"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.h"
 	"${MUMBLE_SOURCE_DIR}/VideoSource.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoSource.h"
 )

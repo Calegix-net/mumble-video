@@ -149,6 +149,11 @@ Build the g15helper executable in emulator mode. This will cause an emulated G15
 Build support for Logitech G-Keys. Note: This feature does not require any build-time dependencies, and requires Logitech Gaming Software to be installed to have any effect at runtime.
 (Default: ON)
 
+### h264
+
+Build H.264 screen sharing, through a hardware encoder where the graphics card has one (NVENC, AMF or Media Foundation on Windows; VA-API or NVENC on Linux). Needs libavcodec, libavutil and libswscale. Turning this off also removes the VP8/VP9 decoder's libswscale colour conversion, which then falls back to a scalar loop several times slower, so a build without H.264 is slower at receiving VP9 as well as unable to send H.264.
+(Default: ON)
+
 ### ice
 
 Build support for Ice RPC.
@@ -252,6 +257,16 @@ Use RNNoise for machine learning noise reduction.
 ### server
 
 Build the server (Murmur)
+(Default: ON)
+
+### screen-share-pipewire
+
+Build screen sharing through the XDG desktop portal, with frames arriving over PipeWire. This is the only way screen capture works on Wayland, and it is the preferred path on a modern X11 session too. Needs libpipewire and Qt's D-Bus module. Not REQUIRED: a build environment without them loses the feature and says so in a warning rather than failing.
+(Default: ON)
+
+### screen-share-x11
+
+Build the X11 screen-capture fallback, for a session where no ScreenCast portal answers. Needs libX11 and libXext. Only meaningful together with `screen-share-pipewire`, because the X11 path is a different video source inside the same flow; configuring with this on and that off warns and disables it.
 (Default: ON)
 
 ### skip-msi-rebuild

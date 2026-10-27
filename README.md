@@ -99,7 +99,7 @@ docker run --rm --privileged -v "$PWD":/src -v "$PWD/flatpak-state":/state -v "$
   mumble-flatpak-build bash /src/scripts/build-flatpak.sh /src /state /out/mumble-video.flatpak
 ```
 
-The test suite runs with `ctest` in the build directory. It has 35 suites, including an
+The test suite runs with `ctest` in the build directory. It has 42 suites, including an
 integration test that spawns a real server and completes a two-client video call over the wire.
 
 For testing without a camera or a desktop, `MUMBLE_MOCK_CAMERA` and `MUMBLE_MOCK_SCREEN` stream
@@ -110,8 +110,8 @@ script. See [docs/dev/mock-video-sources.md](docs/dev/mock-video-sources.md).
 
 | | |
 |---|---|
-| `src/VideoTransport.*` | per-stream crypt state, nonce derivation, replay window |
-| `src/VideoFragmentation.*` | fragment/reassemble units across 1200-byte datagrams |
+| `src/mumble-core/VideoTransport.*` | per-stream crypt state, nonce derivation, replay window |
+| `src/mumble-core/VideoFragmentation.*` | fragment/reassemble units across 1200-byte datagrams |
 | `src/murmur/VideoRouter.*` | subscription routing and permission enforcement |
 | `src/murmur/Server.cpp` | relays video units and resend requests (`relayVideoNack`) |
 | `src/mumble/VideoGrid.*` | the panel: per-sender surfaces, decoding, layout |

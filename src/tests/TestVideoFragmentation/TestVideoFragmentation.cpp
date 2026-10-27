@@ -120,6 +120,8 @@ private slots:
 	void roundtripAtMaxFragmentCount();
 	void nackNamesMissingFragmentsWithinTheMask();
 	void nackNamesMissingFragmentsBeyondTheMask();
+	void anUnsentNackCostsNoAttempt();
+	void attemptsRunOutOnlyOnceTheyHaveBeenSent();
 	void fragmentCountsAtBoundaries();
 	void outOfOrderDeliveryReassembles();
 	void duplicateFragmentsAreIgnored();
@@ -403,6 +405,70 @@ void TestVideoFragmentation::nackNamesMissingFragmentsBeyondTheMask() {
 			reassembler.processPacket(fragmenter.packets()[index], header.senderSession, VIDEO_NACK_DELAY_USEC, unit);
 	}
 	QCOMPARE(result, VideoReassemblyResult::Complete);
+}
+
+// collectNacks() says what is missing; noteNackSent() records that somebody asked. They are separate
+// because the caller batches requests into messages and drops whatever will not fit its own per-second
+// and per-message caps - and when the attempt was counted at collection time, a unit could spend all
+// three of its attempts without one request ever leaving the host. Under sustained loss, which is when
+// those caps bite, that was most of them.
+void TestVideoFragmentation::anUnsentNackCostsNoAttempt() {
+	VideoFragmenter fragmenter;
+	VideoReassembler reassembler;
+
+	const VideoUnitHeader header = makeMaxHeader();
+	QVERIFY(fragmenter.fragment(header, makePayload(VideoFragmenter::maxUnitSize() / 4)));
+
+	VideoUnit unit;
+	for (std::size_t i = 0; i < fragmenter.packets().size(); ++i) {
+		if (i != 3) {
+			reassembler.processPacket(fragmenter.packets()[i], header.senderSession, 0, unit);
+		}
+	}
+
+	// Collected over and over, far past VIDEO_NACK_MAX_ATTEMPTS, with nothing ever sent. The unit must
+	// still be asking: no attempt has actually been made.
+	for (int round = 0; round < 10; ++round) {
+		std::vector< VideoNackRequest > nacks;
+		reassembler.collectNacks(VIDEO_NACK_DELAY_USEC + static_cast< std::uint64_t >(round) * VIDEO_NACK_RETRY_USEC,
+								 nacks);
+		QCOMPARE(nacks.size(), static_cast< std::size_t >(1));
+	}
+}
+
+void TestVideoFragmentation::attemptsRunOutOnlyOnceTheyHaveBeenSent() {
+	VideoFragmenter fragmenter;
+	VideoReassembler reassembler;
+
+	const VideoUnitHeader header = makeMaxHeader();
+	QVERIFY(fragmenter.fragment(header, makePayload(VideoFragmenter::maxUnitSize() / 4)));
+
+	VideoUnit unit;
+	for (std::size_t i = 0; i < fragmenter.packets().size(); ++i) {
+		if (i != 3) {
+			reassembler.processPacket(fragmenter.packets()[i], header.senderSession, 0, unit);
+		}
+	}
+
+	// Three asked-for-and-sent rounds, each a retry interval apart, and then it gives up - which is what
+	// VIDEO_NACK_MAX_ATTEMPTS means and what the hold-then-keyframe path upstream depends on.
+	for (unsigned int attempt = 0; attempt < VIDEO_NACK_MAX_ATTEMPTS; ++attempt) {
+		const std::uint64_t now = VIDEO_NACK_DELAY_USEC + static_cast< std::uint64_t >(attempt) * VIDEO_NACK_RETRY_USEC;
+		std::vector< VideoNackRequest > nacks;
+		reassembler.collectNacks(now, nacks);
+
+		QCOMPARE(nacks.size(), static_cast< std::size_t >(1));
+		reassembler.noteNackSent(nacks[0], now);
+
+		// And not again before the retry interval has passed.
+		std::vector< VideoNackRequest > tooSoon;
+		reassembler.collectNacks(now + VIDEO_NACK_RETRY_USEC / 2, tooSoon);
+		QVERIFY(tooSoon.empty());
+	}
+
+	std::vector< VideoNackRequest > spent;
+	reassembler.collectNacks(VIDEO_NACK_DELAY_USEC + 10 * VIDEO_NACK_RETRY_USEC, spent);
+	QVERIFY(spent.empty());
 }
 
 void TestVideoFragmentation::fragmentCountsAtBoundaries() {

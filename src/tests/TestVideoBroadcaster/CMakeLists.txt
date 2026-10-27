@@ -16,6 +16,8 @@ set(TESTVIDEOBROADCASTER_SOURCES
 
 	"${MUMBLE_SOURCE_DIR}/VideoBroadcaster.cpp"
 	"${MUMBLE_SOURCE_DIR}/VideoBroadcaster.h"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.cpp"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.h"
 	"${MUMBLE_SOURCE_DIR}/VpxCodec.cpp"
 	"${MUMBLE_SOURCE_DIR}/VpxCodec.h"
 	"${MUMBLE_SOURCE_DIR}/VideoEncoder.cpp"

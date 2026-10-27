@@ -7,6 +7,7 @@
 #define MUMBLE_MUMBLE_VIDEOBROADCASTER_H_
 
 #include "VideoEncoder.h"
+#include "VideoFrameDump.h"
 #include "VideoFragmentation.h"
 #include "VpxCodec.h"
 #ifdef USE_H264
@@ -64,8 +65,6 @@ public:
 	int codec() const { return m_codec; }
 	bool isScreenCodec() const;
 
-	TiledImageEncoder &tiledEncoder() { return m_encoder; }
-
 private:
 	TiledImageEncoder m_encoder;
 	VpxEncoder m_vpx;
@@ -86,6 +85,10 @@ private:
 	// Consecutive frames identical to the one before, for the screen codecs' still-screen handling.
 	unsigned int m_unchangedFrames      = 0;
 	std::uint64_t m_lastEncodeTimestamp = 0;
+
+	/// Where frames handed to the encoder are saved for a picture-quality comparison, or empty - which
+	/// is every build that is not being benchmarked. See VideoFrameDump.
+	QString m_dumpDirectory = VideoFrameDump::senderDirectory();
 };
 
 /**
@@ -184,9 +187,6 @@ public:
 	/// Forces the next frame to be sent in full, in response to a receiver asking for a keyframe or a
 	/// new subscriber arriving.
 	void requestKeyframe();
-
-	/// The tiled encoder, for tests. Only meaningful without threaded encoding.
-	TiledImageEncoder &encoder() { return m_core->tiledEncoder(); }
 
 	/// Which codec to encode with: CODEC_VP8 for cameras; CODEC_H264 (on a hardware encoder, only in a build
 	/// with USE_H264) or CODEC_VP9 for screens. CODEC_TILED is the old screen codec, kept for tests; 0 and 1
