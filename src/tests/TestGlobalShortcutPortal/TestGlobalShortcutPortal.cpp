@@ -14,7 +14,6 @@
 #include "GlobalShortcutPortal.h"
 
 #include <QtCore/QProcess>
-#include <QtCore/QTemporaryFile>
 #include <QtDBus/QDBusConnection>
 #include <QtDBus/QDBusMessage>
 #include <QtDBus/QDBusVirtualObject>
@@ -131,18 +130,11 @@ class TestGlobalShortcutPortal : public QObject {
 
 private:
 	QProcess m_daemon;
-	/// Holds the bus configuration for the daemon's lifetime; removed when this object is destroyed.
-	QTemporaryFile m_config;
-	/// Every connection connect() opened, so cleanup() can close them whether or not the test passed.
-	QStringList m_openConnections;
 	QString m_address;
 	int m_connections = 0;
 
 	QDBusConnection connect(const QString &name) {
-		const QString unique = QStringLiteral("%1%2").arg(name).arg(++m_connections);
-		m_openConnections << unique;
-
-		return QDBusConnection::connectToBus(m_address, unique);
+		return QDBusConnection::connectToBus(m_address, QStringLiteral("%1%2").arg(name).arg(++m_connections));
 	}
 
 	static PortalShortcutList shortcuts(const QStringList &ids) {
@@ -157,34 +149,8 @@ private:
 
 private slots:
 	void initTestCase() {
-		// A bus of our own, and - the part that matters - one that can activate nothing.
-		//
-		// `dbus-daemon --session` reads the machine's /usr/share/dbus-1/services/, which on any desktop
-		// Linux box contains org.freedesktop.portal.Desktop.service. So the first test to call a method on
-		// that name made this private bus start the machine's real /usr/libexec/xdg-desktop-portal, which
-		// then owned the name for the rest of the process - and the later case that registers the name as
-		// a fake portal could not, because a real portal had it. That failed on every developer machine
-		// with a portal installed and passed in CI containers, which is the worst way round.
-		//
-		// It also meant noPortalIsReportedNotHung() passed for the wrong reason: it is meant to test
-		// "nothing owns the portal name", and what it actually met was a real portal with no
-		// GlobalShortcuts backend, which happens to report unavailable as well.
-		//
-		// An empty set of service directories is what makes the bus honest.
-		QVERIFY(m_config.open());
-		m_config.write("<busconfig>\n"
-					   "  <type>session</type>\n"
-					   "  <listen>unix:tmpdir=/tmp</listen>\n"
-					   "  <policy context=\"default\">\n"
-					   "    <allow send_destination=\"*\"/>\n"
-					   "    <allow own=\"*\"/>\n"
-					   "  </policy>\n"
-					   "</busconfig>\n");
-		m_config.flush();
-
-		m_daemon.start(QStringLiteral("dbus-daemon"), { QStringLiteral("--config-file=") + m_config.fileName(),
-														QStringLiteral("--nofork"),
-														QStringLiteral("--print-address=1") });
+		m_daemon.start(QStringLiteral("dbus-daemon"),
+					   { QStringLiteral("--session"), QStringLiteral("--nofork"), QStringLiteral("--print-address=1") });
 		if (!m_daemon.waitForStarted(5000)) {
 			QSKIP("dbus-daemon is not available");
 		}
@@ -196,24 +162,6 @@ private slots:
 	void cleanupTestCase() {
 		m_daemon.terminate();
 		m_daemon.waitForFinished(5000);
-	}
-
-	/// QtTest runs this even after a failing QVERIFY, which the unregister calls at the end of each test
-	/// body do not get. Without it one failure cascaded into every later case, because the fake portal's
-	/// bus name stayed registered on a connection nobody closed.
-	void cleanup() {
-		for (const QString &name : m_openConnections) {
-			QDBusConnection connection(name);
-
-			if (connection.isConnected()) {
-				connection.unregisterService(PORTAL_SERVICE);
-				connection.unregisterObject(PORTAL_PATH, QDBusConnection::UnregisterTree);
-			}
-
-			QDBusConnection::disconnectFromBus(name);
-		}
-
-		m_openConnections.clear();
 	}
 
 	void bindsAndForwardsOnlyItsOwnSession() {
