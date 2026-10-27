@@ -86,33 +86,60 @@ namespace Protocol {
 			m_nackMessagesInWindow = 0;
 		}
 
-		// One message per stream, carrying every unit of it that is missing something.
-		std::map< std::pair< std::uint32_t, std::uint32_t >, MumbleUDP::VideoNack > messages;
-		for (const VideoNackRequest &request : requests) {
-			MumbleUDP::VideoNack &nack = messages[{ request.senderSession, request.streamID }];
-			nack.set_sender_session(request.senderSession);
-			nack.set_stream_id(request.streamID);
+		// Messages per stream, each carrying up to MAX_VIDEO_NACK_UNITS of it. More than one where a
+		// stream has more missing units than that: the units beyond the first batch used to be dropped on
+		// the floor while still being counted as asked for, so the same first 32 won every time and the
+		// rest were never requested at all.
+		struct Batch {
+			MumbleUDP::VideoNack message;
+			std::vector< const VideoNackRequest * > requests;
+		};
 
-			if (nack.units_size() < MAX_VIDEO_NACK_UNITS) {
-				MumbleUDP::VideoNack::Unit *unit = nack.add_units();
-				unit->set_frame_number(request.frameNumber);
-				unit->set_unit_id(request.unitID);
-				unit->set_missing_fragments(request.missingFragments);
-				for (std::uint32_t index : request.missingIndices) {
-					unit->add_missing_indices(index);
-				}
+		std::map< std::pair< std::uint32_t, std::uint32_t >, std::vector< Batch > > batches;
+
+		for (const VideoNackRequest &request : requests) {
+			std::vector< Batch > &forStream = batches[{ request.senderSession, request.streamID }];
+
+			if (forStream.empty() || forStream.back().message.units_size() >= MAX_VIDEO_NACK_UNITS) {
+				forStream.emplace_back();
+				forStream.back().message.set_sender_session(request.senderSession);
+				forStream.back().message.set_stream_id(request.streamID);
 			}
+
+			Batch &batch                     = forStream.back();
+			MumbleUDP::VideoNack::Unit *unit = batch.message.add_units();
+			unit->set_frame_number(request.frameNumber);
+			unit->set_unit_id(request.unitID);
+			unit->set_missing_fragments(request.missingFragments);
+			for (std::uint32_t index : request.missingIndices) {
+				unit->add_missing_indices(index);
+			}
+
+			batch.requests.push_back(&request);
 		}
 
-		for (const auto &entry : messages) {
-			if (m_nackMessagesInWindow >= MAX_NACK_MESSAGES_PER_SECOND) {
-				return;
-			}
-			++m_nackMessagesInWindow;
+		for (const auto &entry : batches) {
+			for (const Batch &batch : entry.second) {
+				if (m_nackMessagesInWindow >= MAX_NACK_MESSAGES_PER_SECOND) {
+					// Out of budget for this second. Nothing is recorded as asked for, so these units are
+					// collected again on the next tick rather than silently losing an attempt here.
+					return;
+				}
 
-			std::vector< byte > packet = encodeVideoNackPacket(entry.second);
-			if (!packet.empty()) {
+				std::vector< byte > packet = encodeVideoNackPacket(batch.message);
+
+				if (packet.empty()) {
+					// Would not encode or would not fit a datagram. Again, no attempt is spent.
+					continue;
+				}
+
+				++m_nackMessagesInWindow;
 				events.packetsToSend.push_back(std::move(packet));
+
+				// Only now is the attempt against each of these units real.
+				for (const VideoNackRequest *request : batch.requests) {
+					m_reassembler.noteNackSent(*request, nowUsec);
+				}
 			}
 		}
 	}

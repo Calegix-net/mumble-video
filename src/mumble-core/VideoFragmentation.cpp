@@ -267,9 +267,7 @@ namespace Protocol {
 				}
 			}
 
-			++unit.nackAttempts;
-			unit.lastNackUsec = nowUsec;
-
+			// The attempt is recorded in noteNackSent(), once the caller has actually sent this.
 			VideoNackRequest request;
 			request.senderSession    = entry.first.senderSession;
 			request.streamID         = entry.first.streamID;
@@ -279,6 +277,18 @@ namespace Protocol {
 			request.missingIndices   = std::move(missingIndices);
 			out.push_back(std::move(request));
 		}
+	}
+
+	void VideoReassembler::noteNackSent(const VideoNackRequest &request, std::uint64_t nowUsec) {
+		const auto it =
+			m_pending.find(UnitKey{ request.senderSession, request.streamID, request.frameNumber, request.unitID });
+
+		if (it == m_pending.end()) {
+			return;
+		}
+
+		++it->second.nackAttempts;
+		it->second.lastNackUsec = nowUsec;
 	}
 
 	void VideoReassembler::enforceSenderLimit(std::uint32_t senderSession) {

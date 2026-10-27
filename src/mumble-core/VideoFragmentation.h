@@ -267,6 +267,19 @@ namespace Protocol {
 		void collectNacks(std::uint64_t nowUsec, std::vector< VideoNackRequest > &out);
 
 		/**
+		 * Records that a request collectNacks() produced has actually been sent.
+		 *
+		 * Separate from collectNacks() because the caller is the only one that knows: it batches requests
+		 * into messages and drops whatever will not fit its own caps. Counting the attempt when the
+		 * request was merely *considered* meant a unit could burn all three of its attempts without one
+		 * request leaving the host - and under sustained loss, where the caps bite, that is most of them.
+		 *
+		 * Not finding the unit is normal and ignored: it may have completed or expired between being
+		 * collected and being sent.
+		 */
+		void noteNackSent(const VideoNackRequest &request, std::uint64_t nowUsec);
+
+		/**
 		 * The number of partial units currently being tracked, across all senders.
 		 */
 		std::size_t pendingUnitCount() const { return m_pending.size(); }
