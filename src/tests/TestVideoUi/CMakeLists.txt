@@ -5,7 +5,7 @@
 
 set(MUMBLE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/mumble")
 
-find_pkg(Qt6 COMPONENTS Gui REQUIRED)
+find_pkg(Qt6 COMPONENTS Gui Widgets REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
@@ -23,6 +23,8 @@ set(TESTVIDEOUI_SOURCES
 	"${MUMBLE_SOURCE_DIR}/VideoSource.h"
 	"${MUMBLE_SOURCE_DIR}/CroppedVideoSource.cpp"
 	"${MUMBLE_SOURCE_DIR}/CroppedVideoSource.h"
+	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.cpp"
+	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.h"
 )
 
 add_executable(TestVideoUi ${TESTVIDEOUI_SOURCES})
@@ -31,7 +33,7 @@ set_target_properties(TestVideoUi PROPERTIES AUTOMOC ON)
 
 target_include_directories(TestVideoUi PRIVATE ${MUMBLE_SOURCE_DIR})
 
-target_link_libraries(TestVideoUi PRIVATE shared Qt6::Gui Qt6::Test PkgConfig::VPX)
+target_link_libraries(TestVideoUi PRIVATE shared Qt6::Gui Qt6::Widgets Qt6::Test PkgConfig::VPX)
 
 # The sweep encodes for a couple of seconds per candidate.
 add_test(NAME TestVideoUi COMMAND $<TARGET_FILE:TestVideoUi>)

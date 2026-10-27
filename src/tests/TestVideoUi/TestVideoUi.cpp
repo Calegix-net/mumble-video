@@ -12,12 +12,15 @@
 // that runs against a synthetic camera with no UI at all - which is the only reason these tests exist.
 
 #include "CroppedVideoSource.h"
+#include "StreamVolumeSlider.h"
 #include "VideoBandwidthProbe.h"
 #include "VideoSource.h"
 
 #include <QObject>
 #include <QSignalSpy>
+#include <QtGui/QMouseEvent>
 #include <QtTest>
+#include <QtWidgets/QApplication>
 
 #include <memory>
 
@@ -92,6 +95,12 @@ private slots:
 	void aRegionIsClampedToTheFrameAndNeverWidened();
 	void croppingEmitsOnlyTheSelectedRectangle();
 	void aRegionThatLeavesTheScreenReportsOnceInsteadOfSharingEverything();
+
+	void aPressLandsOnTheLevelUnderThePointer();
+	void thePressableSpanReachesBothLimits();
+	void aGrooveNarrowerThanItsHandleStillAnswers();
+	void aPressSetsTheLevelInsteadOfPagingTowardsIt();
+	void aDragThatLeavesTheSliderKeepsFollowingThePointer();
 };
 
 void TestVideoUi::aSweepProducesOneResultPerCandidate() {
@@ -322,6 +331,106 @@ void TestVideoUi::aRegionThatLeavesTheScreenReportsOnceInsteadOfSharingEverythin
 
 	QCOMPARE(frames.count(), 0);
 	QCOMPARE(failures.count(), 1);
+}
+
+// The stream volume slider on a screen share's tile. What makes it worth testing is that the behaviour
+// people complained about - a press moving the level 25% towards the pointer and stopping - is Qt's
+// default, so a future refactor that drops StreamVolumeSlider for a plain QSlider would silently bring it
+// back. These say what the slider is for: the level goes where it is pressed.
+
+/// A groove the full width of the widget, which is what the tile's style sheet produces, with a handle of
+/// the size it draws.
+static constexpr int GROOVE_WIDTH = 110;
+static constexpr int HANDLE_WIDTH = 14;
+static constexpr int MAX_PERCENT  = 200;
+
+void TestVideoUi::aPressLandsOnTheLevelUnderThePointer() {
+	const QRect groove(0, 0, GROOVE_WIDTH, 4);
+
+	// The usable span is the groove less the handle, and a press is measured from the handle's centre, so
+	// the middle of the span is the middle of the range.
+	const int span   = GROOVE_WIDTH - HANDLE_WIDTH;
+	const int middle = StreamVolumeSlider::valueForPosition(HANDLE_WIDTH / 2 + span / 2, groove, HANDLE_WIDTH, 0,
+															MAX_PERCENT, false);
+
+	QCOMPARE(middle, MAX_PERCENT / 2);
+
+	// A quarter along is a quarter of the range - no paging, no rounding to a step.
+	const int quarter = StreamVolumeSlider::valueForPosition(HANDLE_WIDTH / 2 + span / 4, groove, HANDLE_WIDTH, 0,
+															 MAX_PERCENT, false);
+
+	QCOMPARE(quarter, MAX_PERCENT / 4);
+}
+
+void TestVideoUi::thePressableSpanReachesBothLimits() {
+	const QRect groove(0, 0, GROOVE_WIDTH, 4);
+
+	// Silence at the left-hand end and the full 200% at the right-hand end. Half a handle is taken off the
+	// position, so without the matching half taken off the span the right-hand end would stop short of the
+	// maximum and the slider could never be pushed all the way up.
+	QCOMPARE(StreamVolumeSlider::valueForPosition(0, groove, HANDLE_WIDTH, 0, MAX_PERCENT, false), 0);
+	QCOMPARE(StreamVolumeSlider::valueForPosition(GROOVE_WIDTH, groove, HANDLE_WIDTH, 0, MAX_PERCENT, false),
+			 MAX_PERCENT);
+
+	// And past either end, which a drag does constantly: it is clamped, not wrapped or extrapolated.
+	QCOMPARE(StreamVolumeSlider::valueForPosition(-500, groove, HANDLE_WIDTH, 0, MAX_PERCENT, false), 0);
+	QCOMPARE(StreamVolumeSlider::valueForPosition(5000, groove, HANDLE_WIDTH, 0, MAX_PERCENT, false), MAX_PERCENT);
+}
+
+void TestVideoUi::aGrooveNarrowerThanItsHandleStillAnswers() {
+	// No style here draws this, but a user theme is free to, and the interpolation divides by the span.
+	const QRect groove(0, 0, 8, 4);
+
+	QCOMPARE(StreamVolumeSlider::valueForPosition(0, groove, 20, 0, MAX_PERCENT, false), 0);
+	QCOMPARE(StreamVolumeSlider::valueForPosition(40, groove, 20, 0, MAX_PERCENT, false), MAX_PERCENT);
+}
+
+void TestVideoUi::aPressSetsTheLevelInsteadOfPagingTowardsIt() {
+	StreamVolumeSlider slider;
+	slider.setRange(0, MAX_PERCENT);
+	slider.setPageStep(25);
+	slider.resize(GROOVE_WIDTH, 20);
+	slider.setValue(0);
+
+	// Near the right-hand end. A plain QSlider would page by 25 and stop; this should land there.
+	const QPoint target(GROOVE_WIDTH - 8, 10);
+
+	QTest::mousePress(&slider, Qt::LeftButton, Qt::KeyboardModifiers(), target);
+
+	QVERIFY2(slider.value() > 150, qPrintable(QStringLiteral("level after the press: %1").arg(slider.value())));
+	QVERIFY(slider.isSliderDown());
+
+	QTest::mouseRelease(&slider, Qt::LeftButton, Qt::KeyboardModifiers(), target);
+
+	QVERIFY(!slider.isSliderDown());
+}
+
+void TestVideoUi::aDragThatLeavesTheSliderKeepsFollowingThePointer() {
+	StreamVolumeSlider slider;
+	slider.setRange(0, MAX_PERCENT);
+	slider.resize(GROOVE_WIDTH, 20);
+	slider.setValue(MAX_PERCENT);
+
+	QTest::mousePress(&slider, Qt::LeftButton, Qt::KeyboardModifiers(), QPoint(GROOVE_WIDTH / 2, 10));
+
+	const int middle = slider.value();
+	QVERIFY(middle > 0 && middle < MAX_PERCENT);
+
+	// Well below the widget and off its left-hand edge, which is where a pointer ends up when somebody
+	// drags a 110px slider on a tile. Qt keeps delivering these to the slider because the press grabbed
+	// the mouse, and the level should follow them to the end rather than stop at the boundary.
+	QMouseEvent moved(QEvent::MouseMove, QPointF(-40, 60), slider.mapToGlobal(QPoint(-40, 60)), Qt::NoButton,
+					  Qt::LeftButton, Qt::KeyboardModifiers());
+	QApplication::sendEvent(&slider, &moved);
+
+	QCOMPARE(slider.value(), 0);
+
+	QMouseEvent movedBack(QEvent::MouseMove, QPointF(GROOVE_WIDTH + 200, -30),
+						  slider.mapToGlobal(QPoint(GROOVE_WIDTH + 200, -30)), Qt::NoButton, Qt::LeftButton,
+						  Qt::KeyboardModifiers());
+	QApplication::sendEvent(&slider, &movedBack);
+
+	QCOMPARE(slider.value(), MAX_PERCENT);
 }
 
 QTEST_MAIN(TestVideoUi)

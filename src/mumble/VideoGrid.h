@@ -1046,6 +1046,10 @@ protected:
 	/// regardless of which of this function's several early returns is taken.
 	void updateHoveredBarImpl();
 
+	/// Whether a tile's stream-volume slider currently has the mouse. updateHoveredBarImpl() will not
+	/// hide a bar while that is true - hiding it would end the drag under the pointer.
+	bool aVolumeSliderIsBeingDragged() const;
+
 	/// Asks for a hover update on the next turn of the event loop instead of performing one immediately,
 	/// coalescing repeats. What enterEvent(), leaveEvent() and mouseMoveEvent() use; relayout() still
 	/// calls updateHoveredBar() directly, since it does not run from inside Qt's own event delivery.

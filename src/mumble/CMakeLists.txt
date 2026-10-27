@@ -120,6 +120,8 @@ set(MUMBLE_SOURCES
 	"CameraVideoSource.h"
 	"VideoStreamDispatcher.cpp"
 	"VideoStreamDispatcher.h"
+	"StreamVolumeSlider.cpp"
+	"StreamVolumeSlider.h"
 	"AudioLoopbackSource.h"
 	"AudioOutputScreenShare.cpp"
 	"AudioOutputScreenShare.h"

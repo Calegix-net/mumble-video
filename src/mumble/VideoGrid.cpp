@@ -7,6 +7,7 @@
 
 #include "AudioOutputScreenShare.h"
 #include "Mumble.pb.h"
+#include "StreamVolumeSlider.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
@@ -17,6 +18,7 @@
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
+#include <QtGui/QIcon>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
@@ -36,10 +38,34 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 static QWidget *makeTileControlStrip(QWidget *parent);
+
+/**
+ * The speaker icon for a stream at the given level, from a pair built once per style rather than per call.
+ *
+ * QStyle::standardIcon() is not a lookup; it builds a QIcon, and on some styles rasterises it. The level
+ * label and this icon are refreshed together on every value the slider passes through, which during a drag
+ * is every few pixels, on the GUI thread that is also decoding and painting video. Two icons for the two
+ * states it can be in cost one build each for the life of the process.
+ */
+static const QIcon &volumeIcon(QStyle *style, bool muted) {
+	static QIcon loud;
+	static QIcon silent;
+	static QStyle *builtWith = nullptr;
+
+	// Rebuilt if the theme changed under us, which is what swaps the QStyle instance.
+	if (builtWith != style) {
+		loud      = style->standardIcon(QStyle::SP_MediaVolume);
+		silent    = style->standardIcon(QStyle::SP_MediaVolumeMuted);
+		builtWith = style;
+	}
+
+	return muted ? silent : loud;
+}
 
 namespace {
 
@@ -501,13 +527,14 @@ private:
 		m_muteButton->setFocusPolicy(Qt::NoFocus);
 		layout->addWidget(m_muteButton);
 
-		m_volumeSlider = new QSlider(Qt::Horizontal, m_controls);
+		m_volumeSlider = new StreamVolumeSlider(m_controls);
 		m_volumeSlider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
 		m_volumeSlider->setSingleStep(5);
 		m_volumeSlider->setPageStep(25);
 		m_volumeSlider->setFixedWidth(160);
 		m_volumeSlider->setFocusPolicy(Qt::NoFocus);
 		m_volumeSlider->setToolTip(tr("Stream volume"));
+		m_volumeSlider->setAccessibleName(tr("Stream volume"));
 		layout->addWidget(m_volumeSlider);
 
 		m_volumeLabel = new QLabel(m_controls);
@@ -604,10 +631,18 @@ private:
 		m_hideTimer->start();
 	}
 
+	/// Called for every value the slider passes through, so it does as little as it can get away with:
+	/// the icon and its tooltip only say muted or not, and only change when that does.
 	void showLevel(int value) {
 		m_volumeLabel->setText(tr("%1%").arg(value));
-		m_muteButton->setIcon(style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
-		m_muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+
+		const bool muted = value == 0;
+
+		if (m_shownAsMuted != muted) {
+			m_shownAsMuted = muted;
+			m_muteButton->setIcon(volumeIcon(style(), muted));
+			m_muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
+		}
 	}
 
 	VideoGrid *m_owner;
@@ -647,10 +682,14 @@ private:
 	QToolButton *m_modeButton    = nullptr;
 	QToolButton *m_exitButton = nullptr;
 	QToolButton *m_muteButton = nullptr;
-	QSlider *m_volumeSlider   = nullptr;
+	StreamVolumeSlider *m_volumeSlider = nullptr;
 	QLabel *m_volumeLabel     = nullptr;
 	QTimer *m_hideTimer       = nullptr;
 	int m_volumeBeforeMute    = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
+
+	/// What the speaker button is currently drawn as - see showLevel(), which only touches the icon when
+	/// this disagrees with the level. Starts as neither, so the first level sets it whichever way it goes.
+	std::optional< bool > m_shownAsMuted;
 
 	/// Which presentation is showing. Fullscreen is the default, so the existing fullscreen button
 	/// behaves exactly as it did before the pop-out existed.
@@ -2355,7 +2394,7 @@ static QWidget *makeTileControlStrip(QWidget *parent) {
 		"#tileControls QSlider::add-page:horizontal {"
 		"  height: 4px; border: none; border-radius: 2px; background: rgba(255, 255, 255, 70); }"
 		"#tileControls QSlider::handle:horizontal {"
-		"  width: 12px; height: 12px; margin: -4px 0px; border: none; border-radius: 6px; background: white; }"
+		"  width: 14px; height: 14px; margin: -5px 0px; border: none; border-radius: 7px; background: white; }"
 		"#tileControls QSlider::handle:horizontal:hover,"
 		"#tileControls QSlider::handle:horizontal:focus,"
 		"#tileControls QSlider::handle:horizontal:pressed { background: #e3e5ff; border: none; }"));
@@ -2433,13 +2472,14 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		muteButton->setFocusPolicy(Qt::NoFocus);
 		layout->addWidget(muteButton);
 
-		auto *slider = new QSlider(Qt::Horizontal, controls->bar);
+		auto *slider = new StreamVolumeSlider(controls->bar);
 		slider->setRange(0, static_cast< int >(AudioOutputScreenShare::MAX_VOLUME * 100.0f));
 		slider->setSingleStep(5);
 		slider->setPageStep(25);
 		slider->setFixedWidth(110);
 		slider->setFocusPolicy(Qt::NoFocus);
 		slider->setToolTip(tr("Stream volume"));
+		slider->setAccessibleName(tr("Stream volume"));
 		layout->addWidget(slider);
 
 		auto *label = new QLabel(controls->bar);
@@ -2456,11 +2496,21 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		// TileControlBar, which can be destroyed while these widgets are still waiting on deleteLater().
 		auto volumeBeforeMute = std::make_shared< int >(percent > 0 ? percent : defaultPercent);
 
-		const auto showLevel = [this, muteButton, label](int value) {
+		// Which way the speaker button is currently drawn, so that a drag through a hundred levels sets the
+		// icon at most once - when it crosses zero - instead of on every value. Shared the same way
+		// volumeBeforeMute is, and for the same reason.
+		auto shownAsMuted = std::make_shared< std::optional< bool > >();
+
+		const auto showLevel = [this, muteButton, label, shownAsMuted](int value) {
 			label->setText(tr("%1%").arg(value));
-			muteButton->setIcon(
-				style()->standardIcon(value == 0 ? QStyle::SP_MediaVolumeMuted : QStyle::SP_MediaVolume));
-			muteButton->setToolTip(value == 0 ? tr("Unmute stream") : tr("Mute stream"));
+
+			const bool muted = value == 0;
+
+			if (*shownAsMuted != muted) {
+				*shownAsMuted = muted;
+				muteButton->setIcon(volumeIcon(style(), muted));
+				muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
+			}
 		};
 
 		slider->setValue(percent);
@@ -2482,6 +2532,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 
 		connect(muteButton, &QToolButton::clicked, slider,
 				[slider, volumeBeforeMute]() { slider->setValue(slider->value() == 0 ? *volumeBeforeMute : 0); });
+
+		// updateHoveredBarImpl() leaves the bars alone while this is held down (see
+		// aVolumeSliderIsBeingDragged()), so whatever it wanted to do is done once the drag ends - the
+		// pointer may well have left the tile by then.
+		connect(slider, &QSlider::sliderReleased, this, [this]() { scheduleHoveredBarUpdate(); });
 
 		// The audio buffer for this share may already exist at another level - a share restarted after
 		// the slider was moved - so say where the slider stands rather than assume the buffer agrees.
@@ -2643,7 +2698,29 @@ void VideoGrid::updateHoveredBar() {
 	m_updatingHoveredBar = false;
 }
 
+bool VideoGrid::aVolumeSliderIsBeingDragged() const {
+	for (const auto &entry : m_remoteControls) {
+		if (entry.second->volumeSlider && entry.second->volumeSlider->isSliderDown()) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void VideoGrid::updateHoveredBarImpl() {
+	// Hiding the bar a slider is being dragged on takes the slider out from under the pointer and ends the
+	// drag where it happens to be. That is reachable without the pointer going anywhere: anything that
+	// changes the layout - somebody else starting a share, a tile ending, the dock being resized - comes
+	// through relayout() and so through here. Asked of the sliders rather than remembered in a flag, which
+	// a bar destroyed mid-drag would leave stuck on.
+	//
+	// Nothing below has run, so m_hoveredSlot still describes what is on screen; the sliderReleased
+	// connection in makeRemoteControlBar() asks again once the drag is over.
+	if (aVolumeSliderIsBeingDragged()) {
+		return;
+	}
+
 	// Worked out before anything is touched, so that the overwhelmingly common case - this being called
 	// again with the hover state exactly as it already is - can return without changing any widget's
 	// visibility at all.
