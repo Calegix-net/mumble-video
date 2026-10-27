@@ -63,10 +63,18 @@ public:
 	static constexpr std::int64_t MINIMUM_MSEC = 20;
 	/// Added to the measured lateness, for the frame that is a little later than any seen so far.
 	static constexpr std::int64_t MARGIN_MSEC = 10;
-	/// How much of the distribution of lateness to cover. Not the maximum: one 180 ms outlier should not
-	/// hold the buffer at 190 ms for ten seconds, because showing that one frame late costs one frame
-	/// and holding every frame costs every frame.
-	static constexpr int PERCENTILE = 95;
+	/// How much of the distribution of lateness to cover.
+	///
+	/// 99 rather than 95, and the rig is why. At 95 the VP9 path on a 2 % loss link settled on a 50 ms
+	/// buffer and the worst gap between painted frames went from 63 ms to 185 ms: the tail beyond the
+	/// 95th percentile was larger than the buffer, so the frames in it were shown late instead of being
+	/// absorbed. The latency win was real and so was that hitch.
+	///
+	/// Still not the maximum. A ten-second window holds about three hundred frames and two of them are
+	/// in play, so the 99th percentile has half a dozen samples above it - enough that one freak frame
+	/// cannot hold the buffer deep for ten seconds, which is what using the maximum would do. Showing
+	/// one frame in a hundred late costs one frame; holding every frame costs every frame.
+	static constexpr int PERCENTILE = 99;
 	/// How fast the delay may shrink. 50 ms a second means frames are shown 5 % sooner than they were
 	/// captured while it is shrinking, which is not visible in a picture, and that the full 200 ms down
 	/// to the floor takes under four seconds rather than happening in one visible step.
