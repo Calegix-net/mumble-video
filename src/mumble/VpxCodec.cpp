@@ -166,13 +166,20 @@ QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache, SwsContex
 	//
 	// The scaling flag is inert here and SWS_POINT is only a statement of intent: source and
 	// destination are the same size, so libswscale uses its unscaled YUV-to-RGB converter and never
-	// consults the scaler. Measured on a still frame of screen content with no encoder in the loop,
-	// SWS_POINT, bilinear and bicubic all round-trip identically to 46.56 dB.
+	// consults the scaler.
 	//
-	// SWS_ACCURATE_RND and SWS_BITEXACT are the flags that matter: without them the conversion is
-	// 46.56 dB on that frame, with them 48.43 dB, against 46.75 dB for the hand-written loop this
-	// replaces. The default rounding is the reason - it is cheap and slightly biased, and a bias
-	// shows up in a round trip as a systematic error no amount of averaging removes.
+	// SWS_BITEXACT is the flag that matters, and SWS_ACCURATE_RND on its own does nothing. The
+	// default rounding is cheap and slightly biased, and a bias shows up in a round trip as a
+	// systematic error that no amount of averaging removes.
+	//
+	// Measured by calling this exact sequence against libswscale on a still frame of screen content,
+	// with no encoder in the loop, as RGB PSNR against the original: 47.49 dB for the hand-written
+	// loop this replaces, 47.29 dB for libswscale with SWS_POINT alone, 49.59 dB with these flags.
+	//
+	// Those numbers were measured twice. The first attempt isolated the flags with the ffmpeg
+	// command-line tool instead, which reported that accurate rounding recovered ten decibels - a
+	// figure the pipeline then refused to reproduce, because `-vf scale` is not the call sequence
+	// above and was not measuring the same thing. A convenient tool is not the code under test.
 	cache = sws_getCachedContext(cache, width, height, AV_PIX_FMT_YUV420P, width, height, AV_PIX_FMT_BGRA,
 								 SWS_POINT | SWS_ACCURATE_RND | SWS_BITEXACT, nullptr, nullptr, nullptr);
 

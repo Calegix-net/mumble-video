@@ -23,10 +23,11 @@ Mumble's. "Upstream" below always means the Mumble project this is forked from.
   link for VP9 and 21 ms for hardware H.264, and at 2 % packet loss the worst stutter *improved* from
   63 ms to 36 ms.
 - **Sharper, cheaper VP9 pictures.** The receiver's colour conversion now goes through libswscale with
-  accurate rounding instead of a hand-written loop. Measured on the benchmark rig, receiver CPU for a
-  1080p30 VP9 share falls from 41–42 % to 24–28 %, and the conversion itself is more accurate than
-  what it replaced (48.4 dB against 46.8 dB on a reference frame). Nothing about the picture you send
-  changed; this is the cost of displaying one.
+  bit-exact rounding instead of a hand-written loop. Measured on the benchmark rig, receiver CPU for a
+  1080p30 VP9 share falls from 41 % to 33 % on a good connection and from 42 % to 36 % at 2 % packet
+  loss, and the picture is more accurate as well: 48.4 dB against 47.2 dB for a whole 1080p30 share,
+  and 49.6 dB against 47.5 dB measuring the conversion alone on a still frame. Nothing about the
+  picture you send changed; this is the cost of displaying one.
 - **The screen-share picker's three options are now actually exclusive.** On Linux, "whole screen",
   "a window" and "a region" were three independent buttons: picking one did not unpick the others.
 - **"Show my cursor" works.** The Windows capture path accepted the setting and ignored it, so the
@@ -72,10 +73,11 @@ Mumble's. "Upstream" below always means the Mumble project this is forked from.
 - **`docs/ARCHITECTURE.md`** — a guided tour from capture to encode to network to decode to render,
   the threading model, and where the video code touches upstream Mumble.
 - **`docs/CONTRIBUTING.md`** — how to build, test, benchmark and add a feature.
-- **Fuzz targets for the three things that read bytes off the network** — the reassembler, the video
-  crypt state and the media demultiplexer — in `src/mumble-core/fuzz`. They build as corpus replayers
-  on every build and run under `ctest`; with clang and `-DMUMBLE_CORE_FUZZERS=ON` the same sources
-  become libFuzzer fuzzers with address sanitizer.
+- **Fuzz targets for every part of the client that reads bytes off the network** — the reassembler,
+  the video crypt state, the media demultiplexer and the whole receive path — in
+  `src/mumble-core/fuzz`. They build as corpus replayers on every build and run under `ctest`; with
+  clang and `-DMUMBLE_CORE_FUZZERS=ON` the same sources become libFuzzer fuzzers with address
+  sanitizer. The server's own video parsing is not covered yet, and `docs/CONTRIBUTING.md` says so.
 - **Ten new unit tests** across the slider, the grid, the reassembler's attempt accounting and the
   colour conversion, which now exercises the real libswscale path rather than only the fallback.
 - **A build directory is no longer tracked.** 80.8 MB of build output had been committed.
@@ -84,6 +86,14 @@ Mumble's. "Upstream" below always means the Mumble project this is forked from.
   quality metric can compare exactly the right pair.
 - **Paint delay is measured and reported** in the video statistics, against a windowed arrival floor
   rather than the capture timestamp, which is not a wall clock and never was.
+- **A benchmark rig, in the repository** at `scripts/benchmark`. It builds a server and two clients
+  from nothing, shares a scrolling test pattern between them, and reports CPU, memory, frame rate,
+  bitrate, glass-to-glass delay and picture quality (VMAF, PSNR, SSIM) with the link clean and with
+  packet loss, delay and a bandwidth cap applied. Every number in this changelog came out of it. It
+  also profiles either end with `perf` and soaks for as long as you ask, fitting a memory slope per
+  process; a 90-minute soak of a 1080p30 VP9 share holds flat to within 0.1 MB/hour.
+- **Performance budgets in CI.** A GitHub Actions workflow runs the rig and fails the build if paint
+  delay, CPU, memory or frame rate cross the thresholds in `scripts/benchmark/budgets.json`.
 
 ## 1.10.0 — 2026-10-14
 
