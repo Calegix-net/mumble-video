@@ -131,7 +131,31 @@ void Connection::socketRead() {
 			qtsSocket->read(reinterpret_cast< char * >(a_ucBuffer), 6);
 			const Mumble::Protocol::ControlHeader header = Mumble::Protocol::readControlHeader(a_ucBuffer);
 
-			m_type        = static_cast< Mumble::Protocol::TCPMessageType >(header.type);
+			m_type = static_cast< Mumble::Protocol::TCPMessageType >(header.type);
+
+			// Judged on the announced length, in the type it was announced in, before anything waits
+			// for the payload to arrive.
+			//
+			// This check used to sit after the "not all here yet, come back later" return below, and
+			// after a narrowing cast to int. Both parts were a problem. A peer announcing 0x7FFFFFFF and
+			// then dribbling bytes made every readyRead take that early return without consuming
+			// anything, so Qt buffered the lot - no setReadBufferSize is set anywhere - and the limit
+			// was only reached once two gigabytes were already resident. Since Server::socketRead runs
+			// before any authentication state is consulted, an unauthenticated TLS peer could do it.
+			// And the cast made the limit unreachable for the inputs it existed to catch: 0x80000000
+			// became INT_MIN, which is neither greater than the limit nor greater than iAvailable, so it
+			// fell through to a read() with a negative length, while 0xFFFFFFFF became -1 and silently
+			// put the framer back into "expecting a header" with the stream still mid-message.
+			//
+			// ControlFramer::feed, this fork's own implementation of the same framing, has always got
+			// this right and rejects an over-long length before buffering. Connection predates it and
+			// does not use it.
+			if (header.length > Mumble::Protocol::MAX_CONTROL_PAYLOAD_SIZE) {
+				qWarning() << "Host tried to send huge packet";
+				disconnectSocket(true);
+				return;
+			}
+
 			iPacketLength = static_cast< int >(header.length);
 			iAvailable -= 6;
 		}
@@ -139,15 +163,12 @@ void Connection::socketRead() {
 		if ((iPacketLength == -1) || (iAvailable < iPacketLength))
 			return;
 
-		if (iPacketLength > 0x7fffff) {
-			qWarning() << "Host tried to send huge packet";
-			disconnectSocket(true);
-			return;
-		}
-
 		QByteArray qbaBuffer = qtsSocket->read(iPacketLength);
-		iPacketLength        = -1;
+		// In this order: the subtraction used to come after the reset, so it added one instead of
+		// taking the payload off. Harmless, because iAvailable is recomputed at the top of the loop, but
+		// only by accident.
 		iAvailable -= iPacketLength;
+		iPacketLength = -1;
 
 		emit message(m_type, qbaBuffer);
 	}
