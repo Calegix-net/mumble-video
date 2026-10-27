@@ -1,0 +1,72 @@
+{
+  "_comment": [
+    "Performance budgets, checked by budget.py. A budget is a line a regression crosses, not a target:",
+    "every number here has deliberate headroom over what the pipeline actually measures, because a",
+    "budget that fails on a slow morning teaches people to ignore it.",
+    "",
+    "Only metrics that survive a shared CI runner are here. Absolute CPU is not one of them - a runner",
+    "with two cores and a noisy neighbour will report whatever it likes - so CPU budgets are left to",
+    "the developer rig, where before and after are taken on the same machine minutes apart. What does",
+    "survive is whether frames arrive, whether they arrive on time, and whether memory is where it",
+    "should be, and those are the three ways this pipeline has actually broken.",
+    "",
+    "Each entry is a metric path into results.json, a scenario, a limit and the direction. The comment",
+    "on each says what it was measured at, so the headroom is visible rather than implied."
+  ],
+  "budgets": [
+    {
+      "metric": "rx.frames_per_s",
+      "scenario": "clean",
+      "at_least": 25.0,
+      "why": "Measures 31.2 on the developer rig against a 31.3 fps sender. Below 25 the picture is visibly not what was sent, and every receiver-side regression so far has shown up here first."
+    },
+    {
+      "metric": "rx.paint_delay_ms_p50",
+      "scenario": "clean",
+      "at_most": 230.0,
+      "why": "The playout buffer's own ceiling is 200 ms and it warms up at that depth, so anything near it is correct and anything far above it means frames are queueing somewhere they should not. Was exactly 200 when the buffer was a constant."
+    },
+    {
+      "metric": "rx.max_paint_gap_ms",
+      "scenario": "clean",
+      "at_most": 250.0,
+      "why": "Measures 34-36 ms on a clean link, which is one frame. 250 is a quarter-second freeze: far beyond noise, still well short of the two-second stall watchdog, and the first thing a bad playout change does."
+    },
+    {
+      "metric": "tx.dropped",
+      "scenario": "clean",
+      "at_most": 5.0,
+      "why": "Measures 0. A sender dropping frames on an unimpaired loopback means the encoder cannot keep up with a mock desktop, which no amount of network explains."
+    },
+    {
+      "metric": "resources.receiver.rss_mb_mean",
+      "scenario": "clean",
+      "at_most": 450.0,
+      "why": "Measures 197-212 MB. Generous because a CI runner's Qt, Mesa and driver stack is not the developer rig's, and because this is a leak detector rather than a size target - the soak test measures growth, which is the better question."
+    },
+    {
+      "metric": "resources.sender.rss_mb_mean",
+      "scenario": "clean",
+      "at_most": 600.0,
+      "why": "Measures 322 MB, most of which is the 1080p mock desktop and the encoder's own buffers."
+    },
+    {
+      "metric": "rx.gaps_abandoned",
+      "scenario": "clean",
+      "at_most": 0.0,
+      "why": "Measures 0, and on a link with no loss there is nothing to abandon. Any value at all means frames are being given up on for a reason that is not the network."
+    },
+    {
+      "metric": "rx.max_paint_gap_ms",
+      "scenario": "drop",
+      "at_most": 12000.0,
+      "why": "The link is taken away for 5 seconds, so a gap of about that is correct and unavoidable. 12 seconds allows 7 for noticing and recovering. The failure this catches is the one that matters: a picture that never comes back, which would show the whole remainder of the window as one gap."
+    },
+    {
+      "metric": "rx.frames_per_s",
+      "scenario": "drop",
+      "at_least": 15.0,
+      "why": "Five dead seconds in a twenty-second window leaves about 23 fps averaged over the whole thing. Below 15 the stream did not resume properly after the link came back, which is a different failure from the gap and worth its own line."
+    }
+  ]
+}
