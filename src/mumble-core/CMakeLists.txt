@@ -180,7 +180,36 @@ endif()
 
 if(MUMBLE_CORE_TESTS)
 	add_subdirectory(tests)
-	# Built with the tests, because by default they are tests: replayers for the corpus of inputs that
-	# have broken a network parser before. MUMBLE_CORE_FUZZERS turns the same sources into real fuzzers.
+endif()
+
+# Built with the tests, because by default they are tests: replayers for the corpus of inputs that have
+# broken a network parser before. MUMBLE_CORE_FUZZERS turns the same sources into real fuzzers.
+#
+# Deliberately not nested inside the tests condition any more. It used to be, which meant
+# MUMBLE_CORE_FUZZERS=ON with MUMBLE_CORE_TESTS=OFF configured and built with no complaint and produced
+# no fuzzer at all - an hour of fuzzing that reported nothing found because nothing ran.
+if(MUMBLE_CORE_TESTS OR MUMBLE_CORE_FUZZERS)
 	add_subdirectory(fuzz)
+endif()
+
+if(MUMBLE_CORE_FUZZERS)
+	# The library under test has to be instrumented too, not just the harness.
+	#
+	# Putting the sanitizers only on the fuzz target gave up most of the value. The redzone checks of
+	# AddressSanitizer need instrumented loads and stores, so a read past the end of a fragment inside
+	# VideoFragmentation.cpp was caught only if it happened to pass through an intercepted libc call,
+	# and libFuzzer saw no coverage from the parser at all, which left it mutating blindly rather than
+	# following the code. fuzzer-no-link is the coverage instrumentation without libFuzzer's main(),
+	# which only the executables want.
+	#
+	# PUBLIC so the fuzz targets and the tests link against a library built the same way; mixing an
+	# instrumented library with an uninstrumented executable is how one gets link errors about missing
+	# sanitizer symbols.
+	target_compile_options(mumble-core PUBLIC
+		-fsanitize=fuzzer-no-link,address,undefined
+		-fno-sanitize=vptr
+		-fno-sanitize-recover=undefined
+		-fno-omit-frame-pointer
+	)
+	target_link_options(mumble-core PUBLIC -fsanitize=address,undefined)
 endif()
