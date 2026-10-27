@@ -266,6 +266,58 @@ jobs:
           name: mumble-video-flatpak
           path: out/mumble-video.flatpak
 
+  # macOS. This is the one platform the fork had never built in CI, and the gap mattered: the APPLE
+  # branch of the client gets the camera and the Cocoa integration but no screen-share capture source
+  # (there is no ScreenCaptureKit video source in the tree yet), so the parts that are meant to be
+  # cross-platform could regress on macOS with nothing to catch it. This job builds the client, the
+  # server and the tests on a real macOS runner and runs the suite, plus the Qt-free protocol core on
+  # its own as the other platforms do.
+  #
+  # It is deliberately NOT in the release job's `needs`: it has not been validated on a runner yet (the
+  # fork is developed on Linux and Windows), so a first run that needs a tweak must not be able to hold
+  # back a release. Promote it into `needs` once it has gone green, and add a bundling/artifact step
+  # then. Honest status, in the spirit of the benchmark workflow's own note: written from the project's
+  # documented macOS build (docs/dev/build-instructions/build_macos.md), not yet seen to pass.
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The dependencies the project's macOS build instructions list. ice and poco are included so the
+      # server's Ice interface builds as it does elsewhere; drop both and add -Dice=OFF below if they
+      # prove troublesome on the runner.
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake pkg-config qt6 boost libogg libvorbis flac libsndfile protobuf openssl@3 poco ice
+
+      - name: Configure, build and test
+        run: |
+          # OpenSSL from Homebrew rather than Apple's SecureTransport shim, which the build FAQ warns
+          # produces undefined-symbol link errors. overlay and update are off for the same reasons the
+          # other packaged builds turn them off: the macOS overlay is a separate component, and the
+          # update check points at upstream's server, which knows nothing of this fork.
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -Dtests=ON -Dclient=ON -Dserver=ON -Doverlay=OFF -Dupdate=OFF \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)"
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          cd build && QT_QPA_PLATFORM=offscreen ctest --output-on-failure
+
+      # The protocol core on its own, with the same warnings-as-errors the Linux job holds it to. This
+      # is where a macOS-specific sign-conversion or alignment warning in the video code would surface -
+      # exactly the class of bug the branch already fixed on Linux, where a compiler on a different
+      # platform is a second opinion worth having.
+      - name: Build and test the protocol core without Qt
+        run: |
+          cmake -S src/mumble-core -B core -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wsign-conversion -Werror" \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --build core -j"$(sysctl -n hw.ncpu)"
+          cd core && ctest --output-on-failure
+
   # Two kinds of release. A v* tag publishes a proper versioned release. A push to main rolls the
   # dev-latest prerelease forward, so the Releases page always carries current artifacts without
   # anyone having to tag - CI artifacts expire and are buried behind a login; releases are neither.
