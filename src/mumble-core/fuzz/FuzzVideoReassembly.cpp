@@ -72,6 +72,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
 			// unit that points outside its own buffer a crash here rather than a surprise in a decoder.
 			static volatile std::size_t sink;
 			sink = sum;
+			// Read back, so the store cannot be dead and the sum really is computed.
+			(void) sink;
 		}
 
 		// The two maintenance calls a real receiver makes on a timer, driven here by the same input, so

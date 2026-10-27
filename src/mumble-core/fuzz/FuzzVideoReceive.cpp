@@ -125,6 +125,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
 			}
 
 			sink = sum;
+			// Read back, so the store cannot be dead and the sum really is computed.
+			(void) sink;
 		}
 
 		if (input.choice(8) == 0) {
