@@ -285,13 +285,14 @@ jobs:
         with:
           submodules: recursive
 
-      # The dependencies the project's macOS build instructions list. ice and poco are included so the
-      # server's Ice interface builds as it does elsewhere; drop both and add -Dice=OFF below if they
-      # prove troublesome on the runner.
+      # The dependencies the project's macOS build instructions list, minus ice and poco. ZeroC Ice is
+      # not a Homebrew core formula - it lives in a tap - so `brew install ice` failed the first run
+      # with "No available formula with the name 'ice'". Ice is only the server's RPC interface, not
+      # needed to validate the build, so it is dropped here and turned off in the configure below.
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake pkg-config qt6 boost libogg libvorbis flac libsndfile protobuf openssl@3 poco ice
+          brew install cmake pkg-config qt6 boost libogg libvorbis flac libsndfile protobuf openssl@3
 
       - name: Configure, build and test
         run: |
@@ -300,7 +301,7 @@ jobs:
           # other packaged builds turn them off: the macOS overlay is a separate component, and the
           # update check points at upstream's server, which knows nothing of this fork.
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -Dtests=ON -Dclient=ON -Dserver=ON -Doverlay=OFF -Dupdate=OFF \
+            -Dtests=ON -Dclient=ON -Dserver=ON -Dice=OFF -Doverlay=OFF -Dupdate=OFF \
             -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
