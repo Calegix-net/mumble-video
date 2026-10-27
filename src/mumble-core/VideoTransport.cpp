@@ -30,17 +30,16 @@ namespace Protocol {
 
 	bool VideoCryptState::setKey(const std::string &key, const std::string &encryptNonceBase,
 								 const std::string &decryptNonceBase) {
-		// Whether this call re-installs the parameters already in force. Worked out before anything is
-		// overwritten, because the answer decides whether the sequence counter may restart.
-		const bool unchanged =
-			m_valid && key.size() == AES_KEY_SIZE_BYTES && m_ocb.getRawKey() == key
-			&& encryptNonceBase.size() == sizeof(m_encryptNonceBase)
-			&& decryptNonceBase.size() == sizeof(m_decryptNonceBase)
-			&& std::memcmp(m_encryptNonceBase, encryptNonceBase.data(), sizeof(m_encryptNonceBase)) == 0
-			&& std::memcmp(m_decryptNonceBase, decryptNonceBase.data(), sizeof(m_decryptNonceBase)) == 0;
-
-		m_valid = false;
-
+		// Everything is validated before anything is written, and in particular before m_valid is
+		// touched. A refused call therefore leaves the state exactly as it was rather than invalidating
+		// it, which matters for more than tidiness.
+		//
+		// When this cleared m_valid first, a refused call in the middle of a connection destroyed the
+		// evidence the "unchanged" test below depends on: setKey(K, A, B), then a refused setKey(K, A,
+		// A), then setKey(K, A, B) again saw m_valid false, concluded the parameters were new, and
+		// restarted the sequence counter under key K - reintroducing exactly the nonce reuse the test
+		// exists to prevent. Keeping a working key in force when a re-key is refused is also the better
+		// behaviour in its own right: video keeps flowing instead of going silently dead.
 		if (key.size() != AES_KEY_SIZE_BYTES || encryptNonceBase.size() != sizeof(m_encryptNonceBase)
 			|| decryptNonceBase.size() != sizeof(m_decryptNonceBase)) {
 			return false;
@@ -53,7 +52,18 @@ namespace Protocol {
 			return false;
 		}
 
+		// Whether this call re-installs the parameters already in force. Worked out before anything is
+		// overwritten, because the answer decides whether the sequence counter may restart.
+		const bool unchanged =
+			m_valid && m_ocb.getRawKey() == key
+			&& std::memcmp(m_encryptNonceBase, encryptNonceBase.data(), sizeof(m_encryptNonceBase)) == 0
+			&& std::memcmp(m_decryptNonceBase, decryptNonceBase.data(), sizeof(m_decryptNonceBase)) == 0;
+
 		if (!m_ocb.setRawKey(key)) {
+			// Unreachable: setRawKey only rejects a wrong length, checked above. Kept because an
+			// unchecked return here would be the kind of omission that stops being unreachable later.
+			m_valid = false;
+
 			return false;
 		}
 
@@ -90,6 +100,10 @@ namespace Protocol {
 			m_replays      = 0;
 			m_tooOld       = 0;
 			m_authFailures = 0;
+			m_xexStarAltered = 0;
+			m_tooFarAhead  = 0;
+			m_resyncs      = 0;
+			m_aheadStreak  = 0;
 		}
 
 		m_valid = true;
@@ -150,7 +164,7 @@ namespace Protocol {
 
 		unsigned char tag[AES_BLOCK_SIZE];
 
-		// modifyPlainOnXEXStarAttack = false: video refuses to send such a packet rather than altering it.
+		// The counter-cryptanalysis case is delivered, like audio, but counted rather than left silent.
 		//
 		// ocb_encrypt carries the counter-cryptanalysis from eprint 2019/311. When the plaintext's
 		// second-to-last block is fifteen zero bytes, the construction is attackable, and the default
@@ -159,24 +173,36 @@ namespace Protocol {
 		// authenticates perfectly and differs from what was sent.
 		//
 		// For audio that was a considered trade - upstream notes digital silence produces such packets in
-		// quantity, and one bit in an Opus frame is inaudible. Video is not audio. A flipped bit lands in
-		// a compressed bitstream or in the Protobuf header of a fragment, where it is a silent
-		// corruption rather than a glitch nobody hears, and silent corruption is the wrong failure mode
-		// for a layer whose job is integrity. Refusing means the fragment is simply not sent, which the
-		// transport already has an answer for: the receiver notices the gap and asks for it again.
+		// quantity, and one bit in an Opus frame is inaudible. The first attempt here was to refuse such
+		// a frame instead, on the reasoning that a silently altered compressed bitstream is a worse
+		// failure than a dropped fragment. The tests said otherwise, and they were right: a payload of
+		// 64 zero bytes trips the condition, so TestVideoTransport refused to send three of its own
+		// fixtures. A payload with a zero run at the wrong offset is not exotic - a flat region of a
+		// screen can produce one - and refusing it is deterministic for that payload, so a region could
+		// simply stop updating, repeatedly, for as long as it looked like that. One altered bit that
+		// arrives beats a fragment that never does.
 		//
-		// Reachability is low and worth stating so nobody reads more into this than it deserves. The
-		// first plaintext byte is UDPMessageType::Video, which is 2, so for any plaintext of 17 to 32
-		// bytes the block examined is the one holding that byte and the condition cannot fire. It takes a
-		// plaintext over 32 bytes with fifteen zero bytes in exactly the second-to-last block, which
-		// compressed video and JPEG essentially never produce. A sender also only ever corrupts its own
-		// stream this way, so there is no attack here - which is why this refuses rather than being
-		// treated as urgent. It was found by MumbleFuzzcrypt, whose round-trip invariant it broke.
+		// So it is sent, as audio sends it, and counted. The counter is the part that was missing: the
+		// alteration was previously invisible at every level, and a receiver has no way to detect it
+		// because the tag is computed over the altered plaintext. One bit in a compressed frame is
+		// something the existing corrupt-frame detection and keyframe requests already recover from; an
+		// unexplained artifact with no number anywhere is not.
+		//
+		// Costed deliberately: the first call asks for the refusal so the condition can be observed, and
+		// only the rare failing case pays for a second pass. Re-encrypting is safe because ocb_encrypt
+		// is a pure function of its inputs and the sequence is not consumed until this succeeds.
+		//
+		// Found by MumbleFuzzcrypt, whose round-trip invariant it broke.
 		if (!m_ocb.ocb_encrypt(plaintext.data(), datagram.data() + VIDEO_HEADER_SIZE,
 							   static_cast< unsigned int >(plaintext.size()), nonce, tag, false)) {
-			datagram.clear();
+			m_xexStarAltered++;
 
-			return false;
+			if (!m_ocb.ocb_encrypt(plaintext.data(), datagram.data() + VIDEO_HEADER_SIZE,
+								   static_cast< unsigned int >(plaintext.size()), nonce, tag, true)) {
+				datagram.clear();
+
+				return false;
+			}
 		}
 
 		std::memcpy(datagram.data() + VIDEO_TAG_OFFSET, tag, VIDEO_TAG_SIZE);
@@ -191,12 +217,24 @@ namespace Protocol {
 			return Result::Malformed;
 		}
 
-		if (m_highestReceived == 0) {
-			// Nothing accepted yet, so anything is new.
+		if (sequence > m_highestReceived) {
+			// Ahead of everything accepted, which is the normal case - but only believable up to a
+			// point. See VIDEO_MAX_SEQUENCE_JUMP: the anchor below is what a forged packet carrying a
+			// huge sequence used to move, locking the genuine sender out permanently.
+			//
+			// The bound applies from a cold start too. A sender begins at VIDEO_FIRST_SEQUENCE, so the
+			// first packet to arrive is near it; without this, a single forgery landing before any
+			// genuine packet could set the anchor anywhere.
+			if (sequence - m_highestReceived > VIDEO_MAX_SEQUENCE_JUMP) {
+				return Result::TooFarAhead;
+			}
+
 			return Result::Ok;
 		}
 
-		if (sequence > m_highestReceived) {
+		if (m_highestReceived == 0) {
+			// Nothing accepted yet, and the sequence is not above zero - which only sequence 0 is, and
+			// that is rejected above as malformed.
 			return Result::Ok;
 		}
 
@@ -256,7 +294,11 @@ namespace Protocol {
 		// refuse, but committed only afterwards so a forgery cannot mark a sequence as seen.
 		const Result sequenceCheck = checkSequence(sequence);
 
-		if (sequenceCheck != Result::Ok) {
+		// Replay and TooOld are refused here, without decrypting. Both are cheap to refuse and neither
+		// can ever become acceptable: a genuine sender's sequence only increases, so the only thing that
+		// could be served by reconsidering an old sequence is a replay of captured traffic.
+		if (sequenceCheck == Result::Replay || sequenceCheck == Result::TooOld
+			|| sequenceCheck == Result::Malformed) {
 			if (sequenceCheck == Result::Replay) {
 				m_replays++;
 			} else if (sequenceCheck == Result::TooOld) {
@@ -265,6 +307,13 @@ namespace Protocol {
 
 			return sequenceCheck;
 		}
+
+		// TooFarAhead is not refused here, because it is the one rejection a genuine sender can
+		// legitimately provoke - by getting far ahead during an outage - and the only way to tell that
+		// apart from a forgery is to check the tag. So the packet is decrypted below and judged
+		// afterwards: authentic ones count towards a re-anchor, forged ones are thrown away having cost
+		// the attacker a packet and us one AES pass, which is exactly what any forgery attempt already
+		// costs.
 
 		unsigned char nonce[AES_BLOCK_SIZE];
 		std::memcpy(nonce, m_decryptNonceBase, sizeof(m_decryptNonceBase));
@@ -290,6 +339,32 @@ namespace Protocol {
 
 			return Result::AuthenticationFailed;
 		}
+
+		// Authentic. If it was further ahead than the jump bound allows, it still is not accepted on its
+		// own - it has to be one of a run of them, because a single authentic-looking packet at an
+		// absurd sequence is what a successful forgery looks like, and accepting it is what used to end
+		// the connection's video for good.
+		if (sequenceCheck == Result::TooFarAhead) {
+			m_tooFarAhead++;
+			m_aheadStreak++;
+
+			if (m_aheadStreak < VIDEO_RESYNC_PACKETS) {
+				plaintext.clear();
+
+				return Result::TooFarAhead;
+			}
+
+			// A run this long, with nothing in-window arriving in between, is a sender that really has
+			// moved on. Re-anchor to it: the window is cleared because nothing it held is relevant to
+			// the new position.
+			m_resyncs++;
+			m_aheadStreak     = 0;
+			m_highestReceived = 0;
+			m_window.reset();
+		}
+
+		// Anything accepted normally is evidence the anchor is right, so the run has to start over.
+		m_aheadStreak = 0;
 
 		commitSequence(sequence);
 
