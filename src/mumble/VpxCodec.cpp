@@ -151,38 +151,55 @@ void freePicture(void *pixels) {
 /// as grey text on a grey page, and it is the one way this change can go wrong quietly.
 ///
 /// @param cache A context kept across calls; built on the first frame and whenever the size changes.
-QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache) {
+/// @param configured The context whose range has already been set, so the setting happens once per
+///   context. sws_setColorspaceDetails() rebuilds the conversion tables, which is not something to do
+///   on every frame of a path that exists to be fast.
+/// @param unusable Set when libswscale refuses, so the caller stops asking. Retrying per frame would
+///   mean building a context and attempting a configuration before each scalar conversion, which is
+///   slower than never having tried.
+QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache, SwsContext *&configured, bool &unusable) {
 	const int width  = static_cast< int >(source->d_w);
 	const int height = static_cast< int >(source->d_h);
 
+	// sws_getCachedContext() returns the same context when the parameters are unchanged and a fresh one
+	// when they are not, so comparing the pointer is how a size change is noticed.
 	cache = sws_getCachedContext(cache, width, height, AV_PIX_FMT_YUV420P, width, height, AV_PIX_FMT_BGRA,
 								 SWS_POINT, nullptr, nullptr, nullptr);
 
 	if (!cache) {
+		unusable = true;
 		return i420ToRgbScalar(source);
 	}
 
-	int *inverseTable    = nullptr;
-	int *table           = nullptr;
-	int sourceRange      = 0;
-	int destinationRange = 0;
-	int brightness       = 0;
-	int contrast         = 0;
-	int saturation       = 0;
+	if (configured != cache) {
+		int *inverseTable    = nullptr;
+		int *table           = nullptr;
+		int sourceRange      = 0;
+		int destinationRange = 0;
+		int brightness       = 0;
+		int contrast         = 0;
+		int saturation       = 0;
 
-	// Read back before writing, so that only the two ranges change and swscale's own brightness,
-	// contrast and saturation are put back exactly as they were. The two tables are read and ignored:
-	// the coefficients below replace them, and the call has no way to say "leave these alone".
-	if (sws_getColorspaceDetails(cache, &inverseTable, &sourceRange, &table, &destinationRange, &brightness,
-								 &contrast, &saturation)
-		< 0) {
-		return i420ToRgbScalar(source);
-	}
+		// Read back before writing, so that only the two ranges change and swscale's own brightness,
+		// contrast and saturation are put back exactly as they were. The two tables are read and
+		// ignored: the coefficients below replace them, and the call has no way to say "leave these
+		// alone".
+		if (sws_getColorspaceDetails(cache, &inverseTable, &sourceRange, &table, &destinationRange, &brightness,
+									 &contrast, &saturation)
+			< 0) {
+			unusable = true;
+			return i420ToRgbScalar(source);
+		}
 
-	const int *coefficients = sws_getCoefficients(SWS_CS_ITU601);
+		const int *coefficients = sws_getCoefficients(SWS_CS_ITU601);
 
-	if (sws_setColorspaceDetails(cache, coefficients, 1, coefficients, 1, brightness, contrast, saturation) < 0) {
-		return i420ToRgbScalar(source);
+		if (sws_setColorspaceDetails(cache, coefficients, 1, coefficients, 1, brightness, contrast, saturation)
+			< 0) {
+			unusable = true;
+			return i420ToRgbScalar(source);
+		}
+
+		configured = cache;
 	}
 
 	// swscale's x86 conversion works in whole blocks of 8 pixels and drops a block that would not fit
@@ -219,11 +236,19 @@ QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache) {
 #endif
 
 /// The conversion this build actually uses.
-QImage i420ToRgb(const vpx_image_t *source, [[maybe_unused]] void *&swsCache) {
+QImage i420ToRgb(const vpx_image_t *source, [[maybe_unused]] void *&swsCache,
+				 [[maybe_unused]] void *&swsConfigured, [[maybe_unused]] bool &swsUnusable) {
 #ifdef USE_H264
-	SwsContext *cache = static_cast< SwsContext * >(swsCache);
-	const QImage out  = i420ToRgbSwscale(source, cache);
-	swsCache          = cache;
+	if (swsUnusable) {
+		return i420ToRgbScalar(source);
+	}
+
+	SwsContext *cache      = static_cast< SwsContext * >(swsCache);
+	SwsContext *configured = static_cast< SwsContext * >(swsConfigured);
+	const QImage out       = i420ToRgbSwscale(source, cache, configured, swsUnusable);
+
+	swsCache      = cache;
+	swsConfigured = configured;
 
 	return out;
 #else
@@ -233,14 +258,6 @@ QImage i420ToRgb(const vpx_image_t *source, [[maybe_unused]] void *&swsCache) {
 
 } // namespace
 
-bool VpxDecoder::usesSwscale() {
-#ifdef USE_H264
-	return true;
-#else
-	return false;
-#endif
-}
-
 void VpxDecoder::releaseConverter() {
 #ifdef USE_H264
 	if (m_sws) {
@@ -248,6 +265,8 @@ void VpxDecoder::releaseConverter() {
 		m_sws = nullptr;
 	}
 #endif
+
+	m_swsConfigured = nullptr;
 }
 
 VpxEncoder::VpxEncoder(VpxContent content) : m_content(content) {
@@ -577,7 +596,7 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 	}
 
 	if (image) {
-		*image = i420ToRgb(img, m_sws);
+		*image = i420ToRgb(img, m_sws, m_swsConfigured, m_swsUnusable);
 	}
 
 	return true;

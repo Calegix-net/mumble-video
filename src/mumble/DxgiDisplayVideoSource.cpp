@@ -68,7 +68,7 @@ QList< DxgiDisplayVideoSource::DisplayInfo > DxgiDisplayVideoSource::availableDi
 }
 
 DxgiDisplayVideoSource::DxgiDisplayVideoSource(const DisplayInfo &display, bool showCursor, QObject *parent)
-	: VideoSource(parent), m_display(display) {
+	: VideoSource(parent), m_display(display), m_showCursor(showCursor) {
 	// Connected once, here, rather than in start(): start()/stop() may run more than once over this
 	// object's life, and reconnecting on every start() would stack up duplicate connections, firing
 	// pollFrame() more than once per timeout after the second start().

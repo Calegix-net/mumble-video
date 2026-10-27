@@ -561,14 +561,6 @@ void MainWindow::setupVideoGrid() {
 				[this]() { m_videoDock->setFloating(!m_videoDock->isFloating()); });
 		connect(closeButton, &QToolButton::clicked, m_videoDock, &QDockWidget::close);
 
-		// m_videoDockShown is what the senderCountChanged handler compares against to spot the transition
-		// into "something to show". Closing the dock by hand without clearing it left the two disagreeing,
-		// so the next person to start sharing moved the count from one to two, the handler saw no
-		// transition, and the panel stayed shut.
-		connect(m_videoDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
-			m_videoDockShown = visible;
-		});
-
 		m_videoDock->setTitleBarWidget(titleBar);
 	}
 

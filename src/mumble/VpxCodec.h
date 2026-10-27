@@ -155,10 +155,6 @@ public:
 	explicit VpxDecoder(VpxCodec codec = VpxCodec::VP8);
 	~VpxDecoder();
 
-	/// Whether this build converts decoded frames with libswscale rather than the fallback loop. For
-	/// tests, which should check the conversion that actually runs.
-	static bool usesSwscale();
-
 	VpxDecoder(const VpxDecoder &)            = delete;
 	VpxDecoder &operator=(const VpxDecoder &) = delete;
 
@@ -185,8 +181,7 @@ public:
 	 */
 	bool decode(const std::vector< Mumble::Protocol::byte > &payload, QImage *image);
 
-	/// Releases the conversion context. Called by the destructor; separate so that it can be used from
-	/// the one place that needs a frame size change to take effect.
+	/// Releases the colour-conversion context. Called by the destructor.
 	void releaseConverter();
 
 protected:
@@ -197,6 +192,16 @@ protected:
 	/// more than using it. Held as void* so that this header does not pull in FFmpeg: most of the
 	/// client's translation units neither include it nor link it, and a build with -Dh264=OFF has none.
 	void *m_sws = nullptr;
+
+	/// The context whose colour range has already been set, so that the range is configured once per
+	/// context rather than once per frame - rebuilding the conversion tables on every frame would pay
+	/// part of the cost this path exists to avoid.
+	void *m_swsConfigured = nullptr;
+
+	/// Set when libswscale refused to convert or to be configured. Without it, a failure would be
+	/// retried on every frame: a context built, a configuration attempted, and then the scalar fallback
+	/// run anyway - strictly slower than never having tried.
+	bool m_swsUnusable = false;
 };
 
 #endif // MUMBLE_MUMBLE_VPXCODEC_H_
