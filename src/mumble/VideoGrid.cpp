@@ -1723,7 +1723,19 @@ void VideoGrid::onVp8UnitReceived(std::uint64_t key, Surface &surface, quint64 f
 			surface.vp8Held.erase(surface.vp8Held.begin());
 		}
 
+		// Nothing branches on this while hasDecodedFrame is false - the one test of it, below, is past the
+		// return at the end of this block - so it is set purely to be reported. Before, a stream that had
+		// never managed to decode its first keyframe logged awaitingKey=0, which is also what a perfectly
+		// healthy stream logs, so "never started" and "running fine" were indistinguishable in the only
+		// output anyone has. Finding that state in a benchmark took an afternoon it should not have.
+		surface.awaitingKeyframe = true;
+
 		// No keyframe yet: ask now and then, in case the request that should have produced one was lost.
+		//
+		// Driven by units arriving, which is its weakness: a link too congested to carry a keyframe can
+		// still deliver a trickle, and a trickle below this threshold means the re-request effectively
+		// stops - as does the stall-refresh watchdog, which lastUnitMsec keeps satisfied for the same
+		// reason. Making this time-driven is a real fix and a larger one; see the backlog.
 		if (++surface.unitsWhileAwaiting >= KEYFRAME_REREQUEST_AFTER_UNITS) {
 			surface.unitsWhileAwaiting = 0;
 
