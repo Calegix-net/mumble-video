@@ -7,6 +7,7 @@
 #define MUMBLE_MUMBLE_VIDEOBROADCASTER_H_
 
 #include "VideoEncoder.h"
+#include "VideoFrameDump.h"
 #include "VideoFragmentation.h"
 #include "VpxCodec.h"
 #ifdef USE_H264
@@ -86,6 +87,10 @@ private:
 	// Consecutive frames identical to the one before, for the screen codecs' still-screen handling.
 	unsigned int m_unchangedFrames      = 0;
 	std::uint64_t m_lastEncodeTimestamp = 0;
+
+	/// Where frames handed to the encoder are saved for a picture-quality comparison, or empty - which
+	/// is every build that is not being benchmarked. See VideoFrameDump.
+	QString m_dumpDirectory = VideoFrameDump::senderDirectory();
 };
 
 /**

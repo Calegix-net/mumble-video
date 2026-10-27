@@ -25,6 +25,8 @@ set(TESTVIDEOUI_SOURCES
 	"${MUMBLE_SOURCE_DIR}/CroppedVideoSource.h"
 	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.cpp"
 	"${MUMBLE_SOURCE_DIR}/StreamVolumeSlider.h"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.cpp"
+	"${MUMBLE_SOURCE_DIR}/VideoFrameDump.h"
 )
 
 add_executable(TestVideoUi ${TESTVIDEOUI_SOURCES})

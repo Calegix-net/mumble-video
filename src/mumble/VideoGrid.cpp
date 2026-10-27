@@ -8,6 +8,7 @@
 #include "AudioOutputScreenShare.h"
 #include "Mumble.pb.h"
 #include "StreamVolumeSlider.h"
+#include "VideoFrameDump.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QDateTime>
@@ -813,6 +814,51 @@ void VideoGrid::noteStatsPaint(Surface &surface, quint64 frameNumber) {
 		stats.maxPaintGapMsec = std::max(stats.maxPaintGapMsec, now - stats.lastPaintMsec);
 	}
 	stats.lastPaintMsec = now;
+
+	// One sample per frame, when its first tile is painted: that is the moment the frame became visible,
+	// and a tiled codec calls this once per tile. Erasing up to and including the frame found is what makes
+	// it the first - and it also discards the capture times of any older frames still waiting, which by now
+	// are never going to be painted.
+	const auto capture = stats.captureUsecByFrame.find(frameNumber);
+
+	if (capture != stats.captureUsecByFrame.end()) {
+		if (stats.captureToPaintMsec.size() < MAX_LATENCY_SAMPLES) {
+			stats.captureToPaintMsec.push_back(now - static_cast< qint64 >(capture->second / 1000));
+		}
+
+		stats.captureUsecByFrame.erase(stats.captureUsecByFrame.begin(), std::next(capture));
+	}
+}
+
+/// The sample at the given fraction of the way through @p sorted, or -1 when there are none.
+///
+/// Nearest-rank, not interpolated: these are millisecond latencies, and an interpolated figure that no
+/// frame actually took would be harder to reason about than one that some frame did.
+static qint64 percentileMsec(const std::vector< qint64 > &sorted, double fraction) {
+	if (sorted.empty()) {
+		return -1;
+	}
+
+	const std::size_t index =
+		std::min(sorted.size() - 1, static_cast< std::size_t >(fraction * static_cast< double >(sorted.size())));
+
+	return sorted[index];
+}
+
+void VideoGrid::dumpPaintedFrame(const Surface &surface, quint64 frameNumber, const QImage &image) {
+	if (m_frameDumpDirectory.isEmpty()) {
+		return;
+	}
+
+	// Whole-frame codecs only. A tiled stream's "frame" arrives as up to 135 separate pictures with no
+	// moment at which one of them is the frame, so saving any of them under the frame's number would
+	// produce a file that is not what the sender encoded and would be compared against it anyway.
+	if (surface.codec != MumbleProto::VideoState_Codec_VP8 && surface.codec != MumbleProto::VideoState_Codec_VP9
+		&& surface.codec != MumbleProto::VideoState_Codec_H264) {
+		return;
+	}
+
+	VideoFrameDump::write(m_frameDumpDirectory, "rx", surface.streamID, frameNumber, image);
 }
 
 void VideoGrid::logStats() {
@@ -829,9 +875,17 @@ void VideoGrid::logStats() {
 		// to close it.
 		const qint64 openGap = stats.lastPaintMsec > 0 ? now - stats.lastPaintMsec : 0;
 
+		// Sorted in place: these samples are reset below and nothing else reads them.
+		std::sort(stats.captureToPaintMsec.begin(), stats.captureToPaintMsec.end());
+
+		// The transit delay with no queueing in it, which between machines is mostly the clock offset. -1
+		// when nothing has been timed yet, rather than the sentinel maximum.
+		const qint64 offset = std::min(surface.playout.windowMin, surface.playout.previousMin);
+
 		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
 			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d gapsRecovered=%u "
-			  "gapsAbandoned=%u held=%zu",
+			  "gapsAbandoned=%u held=%zu g2gMsP50=%lld g2gMsP90=%lld g2gMsMax=%lld g2gSamples=%zu "
+			  "playoutOffsetMs=%lld",
 			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
 			  static_cast< unsigned long long >(stats.tilesPainted),
 			  static_cast< unsigned long long >(stats.framesPainted),
@@ -842,8 +896,13 @@ void VideoGrid::logStats() {
 			  static_cast< unsigned long long >(stats.keyframeRequestsLoss),
 			  static_cast< unsigned long long >(stats.keyframeRequestsFailure), surface.pendingTiles.size(),
 			  surface.awaitingKeyframe ? 1 : 0, surface.vp8GapsRecovered, surface.vp8GapsAbandoned,
-			  surface.vp8Held.size());
+			  surface.vp8Held.size(), static_cast< long long >(percentileMsec(stats.captureToPaintMsec, 0.5)),
+			  static_cast< long long >(percentileMsec(stats.captureToPaintMsec, 0.9)),
+			  static_cast< long long >(stats.captureToPaintMsec.empty() ? -1 : stats.captureToPaintMsec.back()),
+			  stats.captureToPaintMsec.size(),
+			  static_cast< long long >(offset == std::numeric_limits< qint64 >::max() ? -1 : offset));
 
+		stats.captureToPaintMsec.clear();
 		stats.units = stats.tilesPainted = stats.framesPainted = 0;
 		stats.keyframeRequestsOverload = stats.keyframeRequestsLoss = stats.keyframeRequestsFailure = 0;
 		stats.maxPaintGapMsec                                                                       = 0;
@@ -1127,6 +1186,7 @@ void VideoGrid::presentFrame(std::uint64_t key, Surface &surface, quint64 frameN
 
 	if (capture == playout.captureUsec.end() || offset == std::numeric_limits< qint64 >::max()) {
 		noteStatsPaint(surface, frameNumber);
+		dumpPaintedFrame(surface, frameNumber, image);
 		applyDecodedTile(key, surface, x, y, image);
 		return;
 	}
@@ -1167,6 +1227,7 @@ void VideoGrid::flushPlayout() {
 			queue.erase(front);
 
 			noteStatsPaint(surface, frameNumber);
+			dumpPaintedFrame(surface, frameNumber, pending.image);
 			applyDecodedTile(entry.first, surface, pending.x, pending.y, pending.image);
 		}
 	}
@@ -1474,6 +1535,17 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 
 	++surface.stats.units;
 	surface.stats.newestUnitFrame = std::max(surface.stats.newestUnitFrame, static_cast< quint64 >(frameNumber));
+
+	// Before the watching check below, so that a frame whose first unit arrived just as watching began is
+	// not measured as having taken however long the click took.
+	if (m_statsTimer && captureTimestampUsec != 0) {
+		auto &byFrame = surface.stats.captureUsecByFrame;
+		byFrame.emplace(frameNumber, captureTimestampUsec);
+
+		while (byFrame.size() > MAX_LATENCY_FRAMES) {
+			byFrame.erase(byFrame.begin());
+		}
+	}
 
 	if (!surface.watching) {
 		// Unwatched: the owner has already sent (or is about to send) a VideoSubscribe withdrawing this,
@@ -1799,6 +1871,7 @@ bool VideoGrid::decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frame
 	surface.unitsWhileAwaiting  = 0;
 
 	noteStatsPaint(surface, frameNumber);
+	dumpPaintedFrame(surface, frameNumber, tile);
 	applyDecodedTile(key, surface, x, y, tile);
 
 	return true;
@@ -1978,6 +2051,7 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 	surface.consecutiveFailures       = 0;
 
 	noteStatsPaint(surface, frameNumber);
+	dumpPaintedFrame(surface, frameNumber, tile);
 	applyDecodedTile(existing->first, surface, x, y, tile);
 }
 

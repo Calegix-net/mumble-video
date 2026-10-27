@@ -128,6 +128,10 @@ VideoEncodeCore::Result VideoEncodeCore::process(const Job &job) {
 	QElapsedTimer timer;
 	timer.start();
 
+	// The number this frame will carry on the wire. Read before encoding because m_frameNumber moves on
+	// below, and only for some codecs - see the comment there.
+	const std::uint64_t encodedFrameNumber = m_frameNumber;
+
 #ifdef USE_H264
 	if (m_codec == VideoBroadcaster::CODEC_H264) {
 		result.units = m_h264.encode(frame, job.streamID, m_frameNumber, job.captureTimestampUsec, job.forceKeyframe);
@@ -140,6 +144,11 @@ VideoEncodeCore::Result VideoEncodeCore::process(const Job &job) {
 
 	result.encodeUsec = static_cast< std::uint64_t >(timer.nsecsElapsed() / 1000);
 	result.encoded    = true;
+
+	// After fitToEncodeSize(), so this is the picture the encoder actually saw rather than the capture it
+	// came from: a quality figure against anything else would include the scaling as if it were codec
+	// error. Costs nothing unless a benchmark asked for it.
+	VideoFrameDump::write(m_dumpDirectory, "tx", job.streamID, encodedFrameNumber, frame);
 
 	// libvpx (VP8, VP9) returns its output for a frame immediately, so nothing back means the frame was
 	// dropped - too large for one transport unit - and the next one is forced to be a keyframe. Its number

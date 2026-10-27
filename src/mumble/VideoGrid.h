@@ -6,6 +6,7 @@
 #ifndef MUMBLE_MUMBLE_VIDEOGRID_H_
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
+#include "VideoFrameDump.h"
 #include "VpxCodec.h"
 #ifdef USE_H264
 #	include "H264Codec.h"
@@ -596,6 +597,22 @@ protected:
 			quint64 newestPaintedFrame       = 0;
 			qint64 lastPaintMsec             = 0;
 			qint64 maxPaintGapMsec           = 0;
+
+			/// Capture time (the sender's clock, microseconds) by frame number, for the latency below.
+			/// Separate from Surface::Playout::captureUsec, which looks like it would do: that one only
+			/// exists for whole-frame codecs decoded on a thread, and is consumed as frames are shown. This
+			/// one is filled for every codec whenever MUMBLE_VIDEO_STATS is set, and for nothing else.
+			std::map< quint64, quint64 > captureUsecByFrame;
+
+			/// How long each frame since the last log line took from being captured to being painted, in
+			/// milliseconds: one sample per frame, taken when its first tile lands.
+			///
+			/// This is glass-to-glass in the only sense a program can measure it - the camera's exposure and
+			/// the monitor's own pipeline are outside it - and it is an absolute figure only when the two
+			/// clients share a clock, which is what the benchmark rig arranges by running them on one
+			/// machine. Between machines the clock offset is in every sample; playoutOffsetMs on the same
+			/// log line is an estimate of that offset, so differences remain meaningful.
+			std::vector< qint64 > captureToPaintMsec;
 		} stats;
 	};
 
@@ -654,8 +671,18 @@ protected:
 							unsigned int index, unsigned int count, const QByteArray &part);
 #endif
 
+	/// How many frames' capture times are held for the latency measurement, and how many samples are
+	/// kept between log lines. Both are far above a two-second window at any frame rate anyone shares at;
+	/// they exist so that stats left on in a client nobody is looking at cannot grow without limit.
+	static constexpr std::size_t MAX_LATENCY_FRAMES  = 256;
+	static constexpr std::size_t MAX_LATENCY_SAMPLES = 4096;
+
 	/// MUMBLE_VIDEO_STATS: records a tile about to be painted for frame @p frameNumber.
 	void noteStatsPaint(Surface &surface, quint64 frameNumber);
+	/// MUMBLE_VIDEO_DUMP_RX: saves a decoded whole frame, for the benchmark's picture-quality
+	/// comparison against the sender's own copy of the same frame number. See VideoFrameDump.
+	void dumpPaintedFrame(const Surface &surface, quint64 frameNumber, const QImage &image);
+
 	/// MUMBLE_VIDEO_STATS: one log line per watched stream, then resets the per-line counters.
 	void logStats();
 	QTimer *m_statsTimer = nullptr;
@@ -904,6 +931,9 @@ protected:
 
 	/// See setRemoteVideoHidden(). Applied to surfaces as they are announced, so a share that starts
 	/// while this is on is hidden too rather than appearing for a moment.
+	/// See dumpPaintedFrame(). Empty in every build that is not being benchmarked.
+	QString m_frameDumpDirectory = VideoFrameDump::receiverDirectory();
+
 	bool m_remoteVideoHidden = false;
 
 	/// What was being watched when hiding began, to start watching again when it ends.
