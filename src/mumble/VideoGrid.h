@@ -6,6 +6,7 @@
 #ifndef MUMBLE_MUMBLE_VIDEOGRID_H_
 #define MUMBLE_MUMBLE_VIDEOGRID_H_
 
+#include "PlayoutDelay.h"
 #include "VideoFrameDump.h"
 #include "VpxCodec.h"
 #ifdef USE_H264
@@ -532,18 +533,16 @@ protected:
 		std::uint64_t decodeEpoch = 0;
 
 		/// Playout (threaded decoding only - see presentFrame()): each frame is shown at its capture time
-		/// plus the stream's smallest recent transit delay plus PLAYOUT_DELAY_MSEC, rather than the moment it
-		/// is decoded, so that frames that arrive bunched together - typically right after a lost one is
+		/// plus the stream's smallest recent transit delay plus a buffer, rather than the moment it is
+		/// decoded, so that frames that arrive bunched together - typically right after a lost one is
 		/// re-sent - are shown at the pace they were captured instead of as a pause followed by a jump.
+		///
+		/// How deep that buffer is, is measured rather than fixed: see PlayoutDelayEstimator.
 		struct Playout {
 			/// Capture time (sender's clock, microseconds) by frame number, recorded on arrival.
 			std::map< quint64, quint64 > captureUsec;
-			/// Smallest (arrival - capture), in milliseconds, in the current and the previous ten-second
-			/// window: the transit delay with no queueing in it. Windowed so a drifting sender clock is
-			/// followed instead of pinning the minimum for good.
-			qint64 windowStartMsec = 0;
-			qint64 windowMin       = std::numeric_limits< qint64 >::max();
-			qint64 previousMin     = std::numeric_limits< qint64 >::max();
+			/// The smallest recent transit delay, and how long a frame should be held on top of it.
+			PlayoutDelayEstimator delay;
 			struct Pending {
 				QImage image;
 				unsigned int x = 0;
@@ -664,9 +663,6 @@ protected:
 	/// Drops a stream's playout state when its decoding starts over.
 	static void resetPlayout(Surface &surface);
 
-	/// How far behind the earliest a frame could be shown that it is shown: room for a lost fragment's
-	/// re-send (a request at VIDEO_NACK_DELAY_USEC plus a round trip) to arrive before its frame is due.
-	static constexpr qint64 PLAYOUT_DELAY_MSEC = 200;
 	/// Frames waiting in the playout queue, at most, before the oldest is shown regardless.
 	static constexpr std::size_t MAX_PLAYOUT_QUEUE = 30;
 	QTimer *m_playoutTimer                         = nullptr;

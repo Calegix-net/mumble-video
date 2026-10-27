@@ -885,14 +885,14 @@ void VideoGrid::logStats() {
 		// The playout code's own estimate of the same floor, from the same arithmetic over a different
 		// window. Printed beside this one because the two disagreeing is itself worth seeing. -1 when
 		// nothing has been timed yet, rather than the sentinel maximum.
-		const qint64 offset       = std::min(surface.playout.windowMin, surface.playout.previousMin);
+		const qint64 offset       = surface.playout.delay.minTransitMsec();
 		const qint64 rawFloor     = std::min(stats.arrivalFloorMsec, stats.previousArrivalFloorMsec);
 		const qint64 arrivalFloor = rawFloor == std::numeric_limits< qint64 >::max() ? -1 : rawFloor;
 
 		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
 			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d gapsRecovered=%u "
 			  "gapsAbandoned=%u held=%zu paintDelayMsP50=%lld paintDelayMsP90=%lld paintDelayMsMax=%lld "
-			  "paintDelaySamples=%zu arrivalFloorMs=%lld playoutOffsetMs=%lld",
+			  "paintDelaySamples=%zu arrivalFloorMs=%lld playoutOffsetMs=%lld playoutTargetMs=%lld",
 			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
 			  static_cast< unsigned long long >(stats.tilesPainted),
 			  static_cast< unsigned long long >(stats.framesPainted),
@@ -907,7 +907,8 @@ void VideoGrid::logStats() {
 			  static_cast< long long >(percentileMsec(stats.paintDelayMsec, 0.9)),
 			  static_cast< long long >(stats.paintDelayMsec.empty() ? -1 : stats.paintDelayMsec.back()),
 			  stats.paintDelayMsec.size(), static_cast< long long >(arrivalFloor),
-			  static_cast< long long >(offset == std::numeric_limits< qint64 >::max() ? -1 : offset));
+			  static_cast< long long >(offset == std::numeric_limits< qint64 >::max() ? -1 : offset),
+			  static_cast< long long >(surface.playout.delay.targetMsec()));
 
 		stats.paintDelayMsec.clear();
 		stats.units = stats.tilesPainted = stats.framesPainted = 0;
@@ -1189,16 +1190,17 @@ void VideoGrid::presentFrame(std::uint64_t key, Surface &surface, quint64 frameN
 							 const QImage &image) {
 	Surface::Playout &playout = surface.playout;
 	const auto capture        = playout.captureUsec.find(frameNumber);
-	const qint64 offset       = std::min(playout.windowMin, playout.previousMin);
+	const qint64 offset       = playout.delay.minTransitMsec();
 
-	if (capture == playout.captureUsec.end() || offset == std::numeric_limits< qint64 >::max()) {
+	if (capture == playout.captureUsec.end() || !playout.delay.hasEstimate()) {
 		noteStatsPaint(surface, frameNumber);
 		dumpPaintedFrame(surface, frameNumber, image);
 		applyDecodedTile(key, surface, x, y, image);
 		return;
 	}
 
-	const qint64 due = static_cast< qint64 >(capture->second / 1000) + offset + PLAYOUT_DELAY_MSEC;
+	const qint64 due =
+		static_cast< qint64 >(capture->second / 1000) + offset + playout.delay.delayMsec(QDateTime::currentMSecsSinceEpoch());
 	playout.captureUsec.erase(playout.captureUsec.begin(), std::next(capture));
 
 	Surface::Playout::Pending pending;
@@ -1593,12 +1595,7 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 			playout.captureUsec.erase(playout.captureUsec.begin());
 		}
 
-		if (playout.windowStartMsec == 0 || now - playout.windowStartMsec >= 10000) {
-			playout.previousMin     = playout.windowMin;
-			playout.windowMin       = std::numeric_limits< qint64 >::max();
-			playout.windowStartMsec = now;
-		}
-		playout.windowMin = std::min(playout.windowMin, now - static_cast< qint64 >(captureTimestampUsec / 1000));
+		playout.delay.noteArrival(static_cast< qint64 >(captureTimestampUsec / 1000), now);
 	}
 
 	// VP9 (screen shares) goes through the same whole-frame path as VP8 (cameras): frame ordering, holding

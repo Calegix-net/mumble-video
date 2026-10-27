@@ -158,6 +158,11 @@ private slots:
 	void doubleClickingYourOwnTileFullscreensIt();
 	void yourOwnTileShowsWhoIsWatchingWithoutHovering();
 	void aPoppedOutWindowCanBeDraggedByItsPicture();
+	void anUntimedStreamIsHeldForTheOldFixedDelay();
+	void aCleanPathSettlesToTheShallowestBuffer();
+	void theBufferNeverShrinksFasterThanTheRamp();
+	void framesArrivingLateDeepenTheBufferAtOnce();
+	void aFasterPathThrowsAwayWhatWasMeasuredBefore();
 };
 
 namespace {
@@ -2252,6 +2257,132 @@ void TestVideoGrid::aPoppedOutWindowCanBeDraggedByItsPicture() {
 }
 
 QTEST_MAIN(TestVideoGrid)
+// The playout delay estimator. Pure arithmetic over two clocks, so these need no window, no decoder and
+// no real time - which is the reason it was pulled out of VideoGrid in the first place.
+
+void TestVideoGrid::anUntimedStreamIsHeldForTheOldFixedDelay() {
+	PlayoutDelayEstimator estimator;
+
+	// Before a single frame has been timed there is nothing to base a decision on, and the first seconds
+	// of a stream are its worst-behaved. So it must start where the old fixed delay was rather than at
+	// the floor: starting deep and shrinking is invisible, starting shallow and growing is a stutter.
+	QVERIFY(!estimator.hasEstimate());
+	QCOMPARE(estimator.targetMsec(), PlayoutDelayEstimator::MAXIMUM_MSEC);
+	QCOMPARE(estimator.delayMsec(1000), PlayoutDelayEstimator::MAXIMUM_MSEC);
+}
+
+void TestVideoGrid::aCleanPathSettlesToTheShallowestBuffer() {
+	PlayoutDelayEstimator estimator;
+
+	// Sixty frames at a steady two frames per second of transit: every frame exactly as late as the one
+	// before, which is a path with no jitter at all.
+	for (int i = 0; i < 60; ++i) {
+		estimator.noteArrival(i * 33, 5000 + i * 33 + 40);
+	}
+
+	QVERIFY(estimator.hasEstimate());
+	QCOMPARE(estimator.minTransitMsec(), 5040);
+	// Nothing is ever late, so the only thing left is the floor.
+	QCOMPARE(estimator.targetMsec(), PlayoutDelayEstimator::MINIMUM_MSEC);
+}
+
+void TestVideoGrid::theBufferNeverShrinksFasterThanTheRamp() {
+	PlayoutDelayEstimator estimator;
+
+	// Driven the way presentFrame() drives it - a frame arrives, and then the delay is asked for - rather
+	// than filling it up first and asking afterwards. The order matters: the delay in force starts at the
+	// ceiling only because the first frames are asked about before there are enough of them to measure.
+	const qint64 base  = 100000;
+	const int samples  = PlayoutDelayEstimator::MINIMUM_SAMPLES;
+
+	for (int i = 0; i < samples; ++i) {
+		estimator.noteArrival(i * 33, base + i * 33 + 40);
+		estimator.delayMsec(base + i * 33 + 40);
+	}
+
+	// Now there are enough frames to measure, and the measurement says the floor. The delay in force must
+	// not jump there: re-timing a picture by 180 ms under the person watching it is the stutter this
+	// buffer exists to prevent.
+	QCOMPARE(estimator.targetMsec(), PlayoutDelayEstimator::MINIMUM_MSEC);
+
+	const qint64 settled = base + samples * 33 + 40;
+	const qint64 start   = estimator.delayMsec(settled);
+	QVERIFY2(start > PlayoutDelayEstimator::MAXIMUM_MSEC - PlayoutDelayEstimator::FALL_MSEC_PER_SECOND,
+			 qPrintable(QStringLiteral("delay in force was %1").arg(start)));
+
+	// One second later it may have given up FALL_MSEC_PER_SECOND and no more.
+	QCOMPARE(estimator.delayMsec(settled + 1000), start - PlayoutDelayEstimator::FALL_MSEC_PER_SECOND);
+
+	// And it does get all the way down, in the time the ramp implies rather than instantly.
+	const qint64 expected =
+		(start - PlayoutDelayEstimator::MINIMUM_MSEC) * 1000 / PlayoutDelayEstimator::FALL_MSEC_PER_SECOND;
+	QVERIFY(estimator.delayMsec(settled + expected / 2) > PlayoutDelayEstimator::MINIMUM_MSEC);
+	QCOMPARE(estimator.delayMsec(settled + expected), PlayoutDelayEstimator::MINIMUM_MSEC);
+}
+
+void TestVideoGrid::framesArrivingLateDeepenTheBufferAtOnce() {
+	PlayoutDelayEstimator estimator;
+
+	for (int i = 0; i < 60; ++i) {
+		estimator.noteArrival(i * 33, 5000 + i * 33 + 40);
+	}
+
+	const qint64 settled = 100000;
+	// Ramped all the way down, so there is somewhere to rise from.
+	const qint64 floor   = estimator.delayMsec(settled + 60000);
+	QCOMPARE(floor, PlayoutDelayEstimator::MINIMUM_MSEC);
+
+	// Now a fifth of the frames arrive 80 ms late, which is what a re-sent fragment looks like from here:
+	// the frame is not lost, it is simply later than the ones around it. A fifth rather than a tenth
+	// because the window still holds the sixty well-behaved frames above, and a measurement at the 95th
+	// percentile is supposed to ignore a population smaller than a twentieth - showing one frame in fifty
+	// late costs one frame, and deepening the buffer for it costs every frame.
+	for (int i = 60; i < 160; ++i) {
+		const qint64 lateness = (i % 5 == 0) ? 80 : 0;
+		estimator.noteArrival(i * 33, 5000 + i * 33 + 40 + lateness);
+	}
+
+	// The measurement has to notice, and the delay in force has to follow it immediately - upwards there
+	// is no ramp, because too little buffer shows frames before the frames they come after.
+	QVERIFY2(estimator.targetMsec() > floor + 40,
+			 qPrintable(QStringLiteral("target was %1").arg(estimator.targetMsec())));
+	QCOMPARE(estimator.delayMsec(settled + 60000), estimator.targetMsec());
+	// Still never worse than the constant it replaced.
+	QVERIFY(estimator.targetMsec() <= PlayoutDelayEstimator::MAXIMUM_MSEC);
+}
+
+void TestVideoGrid::aFasterPathThrowsAwayWhatWasMeasuredBefore() {
+	PlayoutDelayEstimator estimator;
+
+	// A stream where a quarter of the frames are 90 ms later than the rest, so there is a measurement
+	// worth throwing away.
+	for (int i = 0; i < 120; ++i) {
+		const qint64 lateness = (i % 4 == 0) ? 90 : 0;
+		estimator.noteArrival(i * 33, 5000 + i * 33 + 100 + lateness);
+	}
+
+	QCOMPARE(estimator.minTransitMsec(), 5100);
+	QVERIFY2(estimator.targetMsec() > PlayoutDelayEstimator::MINIMUM_MSEC + 40,
+			 qPrintable(QStringLiteral("target was %1").arg(estimator.targetMsec())));
+
+	// Then a frame arrives far sooner than anything before it. Capture timestamps are not a wall clock,
+	// so this is what a changed clock relationship looks like, and every lateness recorded against the old
+	// minimum is a measurement of nothing now. It must be discarded rather than kept and scaled.
+	estimator.noteArrival(120 * 33, 5000 + 120 * 33 + 10);
+	QCOMPARE(estimator.minTransitMsec(), 5010);
+
+	// Discarded, so there is not enough left to believe: back to the ceiling until it has been measured
+	// again, which is the same caution as at the start of a stream.
+	QCOMPARE(estimator.targetMsec(), PlayoutDelayEstimator::MAXIMUM_MSEC);
+
+	// And measuring it again, now against the new relationship, settles it where the new path deserves.
+	for (int i = 121; i < 200; ++i) {
+		estimator.noteArrival(i * 33, 5000 + i * 33 + 10);
+	}
+
+	QCOMPARE(estimator.targetMsec(), PlayoutDelayEstimator::MINIMUM_MSEC);
+}
+
 #include "TestVideoGrid.moc"
 
 // A sender that stops and restarts a camera announces a fresh stream id. If the end of the old stream was
