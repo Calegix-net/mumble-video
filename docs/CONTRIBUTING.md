@@ -103,13 +103,16 @@ The harness runs a real server and two real clients, each on its own X server, i
 network namespace so that `tc netem` can shape the loopback without root. One client shares the mock
 desktop; the other watches it.
 
+It lives **outside this repository**, in `~/mv-bench/` on the Linux machine, because it carries client
+profiles with real certificates and a server database. The paths below are relative to that directory.
+
 ```sh
-mv-bench/run/setup-rig.sh                                  # once: server + two client profiles
-mv-bench/run/bench.sh <label> <seconds> <auto|vp9> clean loss2 delay100 bw2mbit bad
+run/setup-rig.sh                                  # once: server + two client profiles
+run/bench.sh <label> <seconds> <auto|vp9> clean loss2 delay100 bw2mbit bad
 ```
 
-Results land in `mv-bench/out/<label>/` as `summary.txt` (a table) and `results.json`. The scenarios
-are no impairment, 2% loss, 100 ms each way, a 2 Mbit/s cap, and all three at once.
+Results land in `out/<label>/` as `summary.txt` (a table) and `results.json`. The scenarios are no
+impairment, 2% loss, 100 ms each way, a 2 Mbit/s cap, and all three at once.
 
 What it reports, and where each number comes from:
 
@@ -127,8 +130,8 @@ What it reports, and where each number comes from:
 Two more scripts, for the questions a 40-second run cannot answer:
 
 ```sh
-mv-bench/run/profile.sh 25 out/profile    # perf, flat and folded stacks for sender and receiver
-mv-bench/run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per process
+run/profile.sh 25 out/profile    # perf, flat and folded stacks for sender and receiver
+run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per process
 ```
 
 ## Add a feature
