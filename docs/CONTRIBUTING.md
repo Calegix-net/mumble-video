@@ -97,8 +97,9 @@ Two things to know before adding a test:
 
 ### Fuzz
 
-Three things read bytes a hostile peer chose: the reassembler, the video crypt state and the media
-demultiplexer. Each has a fuzz target in [`src/mumble-core/fuzz`](../src/mumble-core/fuzz), and on an
+Four things read bytes a hostile peer chose: the video crypt state, the media demultiplexer, the
+reassembler, and `VideoReceiver::receive`, which is all three of those in one call. Each has a fuzz
+target in [`src/mumble-core/fuzz`](../src/mumble-core/fuzz), and on an
 ordinary build each one is compiled as a replayer that runs its committed corpus under `ctest` — so
 every input that has ever broken a parser is re-checked on every build, for milliseconds.
 
@@ -179,11 +180,12 @@ run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per pro
    the volume slider's position mapping are all pure functions that were pulled out of their widgets
    and classes specifically so they could be tested. Keep doing that: a function that needs a window
    or a camera to test will not be tested.
-6. **Fuzz anything that parses the network.** `VideoReassembler::processPacket`,
-   `VideoCryptState::decrypt`, `VideoReceiver::receive` and the server's `VideoNack` parse are the four
-   entry points for bytes someone else chose. The first two have targets, as does `MediaDemux` in front
-   of them; the other two do not yet. See [Fuzz](#fuzz) above for how to add one and why the corpus
-   matters more than the fuzzer.
+6. **Fuzz anything that parses the network.** `VideoCryptState::decrypt`, `MediaDemux::classify`,
+   `VideoReassembler::processPacket` and `VideoReceiver::receive` all have targets. The one entry point
+   for hostile bytes that does not is **the server's**: `Server::handleVideoNack` and the relayed-video
+   parse in `src/murmur/Server.cpp`, which live in the Qt server target rather than in `mumble-core`, so
+   a `mumble-core` fuzzer cannot reach them. Giving them one means either lifting the parse into the
+   core or building a server-side harness; the first is the better change. See [Fuzz](#fuzz) above.
 7. **Benchmark it**, as above, and put the before and after numbers in the commit message.
 8. **Say why, not what.** A comment that restates the code is noise; a comment explaining a
    trade-off, a workaround, a driver quirk or a measurement is what makes this code maintainable. Most

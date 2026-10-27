@@ -217,6 +217,37 @@ bool makeDemuxSeeds(const std::string &directory) {
 	return ok;
 }
 
+/// The receive target encrypts the plaintexts in its seed itself, so a seed is the same shape as the
+/// crypt target's: a length-prefixed plaintext, a clock step, and a byte choosing whether to corrupt
+/// the datagram afterwards. Real video packets, so the parse behind the decryption is reached.
+bool makeReceiveSeeds(const std::string &directory) {
+	VideoFragmenter fragmenter;
+	std::vector< std::uint8_t > seed;
+
+	// A keyframe large enough to be fragmented, then a few small frames after it: the ordinary shape of
+	// a stream starting, which is what the peek parse and the reassembler see together.
+	for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+		const bool keyframe   = frame == 1;
+		const std::size_t big = VideoFragmenter::maxPayloadPerFragment() * 4 + 5;
+
+		if (!fragmenter.fragment(header(1, frame, 0, keyframe), codedBytes(keyframe ? big : 300))) {
+			continue;
+		}
+
+		for (const std::vector< byte > &packet : fragmenter.packets()) {
+			seed.push_back(static_cast< std::uint8_t >(packet.size() >> 8));
+			seed.push_back(static_cast< std::uint8_t >(packet.size() & 0xff));
+			seed.insert(seed.end(), packet.begin(), packet.end());
+			// A 5 ms clock step, so the retransmission interval is crossed every other packet.
+			seed.push_back(5);
+			// Non-zero: do not corrupt. A seed that is refused by the tag reaches nothing.
+			seed.push_back(1);
+		}
+	}
+
+	return write(directory, "receive-stream-start", seed);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -226,8 +257,8 @@ int main(int argc, char **argv) {
 	}
 
 	const std::string root = argv[1];
-	const bool ok          = makeReassemblySeeds(root + "/reassembly") && makeCryptSeeds(root + "/crypt")
-					&& makeDemuxSeeds(root + "/demux");
+	const bool ok = makeReassemblySeeds(root + "/reassembly") && makeCryptSeeds(root + "/crypt")
+					&& makeDemuxSeeds(root + "/demux") && makeReceiveSeeds(root + "/receive");
 
 	if (!ok) {
 		std::fprintf(stderr, "make-seeds: failed; do the corpus directories exist?\n");

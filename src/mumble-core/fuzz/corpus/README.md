@@ -1,7 +1,8 @@
 # Fuzz corpus
 
-One directory per fuzz target: `reassembly`, `crypt`, `demux`. Every file in them is one input, and
-every one of them is replayed by `ctest` on an ordinary build. Adding a file adds a test case.
+One directory per fuzz target: `crypt`, `demux`, `reassembly`, `receive`. Every file in them is one
+input, and every one of them is replayed by `ctest` on an ordinary build. Adding a file adds a test
+case.
 
 Two kinds of file live here.
 
@@ -16,8 +17,8 @@ the Protobuf parse a million times. Regenerate them after changing a wire format
 
 That is deterministic, so it produces no diff unless something really did change.
 
-**Findings**, which a fuzzer produced and a human kept. When `MumbleFuzzreassembly` or either of the
-others crashes, libFuzzer writes the input to `crash-<hash>`; the input belongs here, renamed to say
+**Findings**, which a fuzzer produced and a human kept. When one of the targets crashes, libFuzzer
+writes the input to `crash-<hash>`; the input belongs here, renamed to say
 what it was, and the bug belongs fixed. After that the file is a regression test for free, on every
 build, for as long as the repository exists. Keep them small — libFuzzer's `-minimize_crash=1` will
 usually cut one down to a few bytes, and a short input is a readable bug report.

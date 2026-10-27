@@ -64,6 +64,7 @@ endfunction()
 mumble_core_add_fuzz_target(reassembly "FuzzVideoReassembly.cpp")
 mumble_core_add_fuzz_target(crypt "FuzzVideoCrypt.cpp")
 mumble_core_add_fuzz_target(demux "FuzzMediaDemux.cpp")
+mumble_core_add_fuzz_target(receive "FuzzVideoReceive.cpp")
 
 # The seed generator, which is an ordinary program in every build: the seeds are made by the real
 # fragmenter and crypt state, so they stay correct when a wire format changes, and regenerating them is
