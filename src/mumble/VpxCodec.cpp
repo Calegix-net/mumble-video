@@ -162,22 +162,24 @@ QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache) {
 		return i420ToRgbScalar(source);
 	}
 
-	const int *coefficients = sws_getCoefficients(SWS_CS_ITU601);
-	int sourceRange         = 0;
-	int destinationRange    = 0;
-	int brightness          = 0;
-	int contrast            = 0;
-	int saturation          = 0;
-	const int *unusedTable  = nullptr;
+	int *inverseTable    = nullptr;
+	int *table           = nullptr;
+	int sourceRange      = 0;
+	int destinationRange = 0;
+	int brightness       = 0;
+	int contrast         = 0;
+	int saturation       = 0;
 
-	// Read back before writing, so only the ranges change and swscale's own defaults for brightness,
-	// contrast and saturation are left exactly as they were.
-	if (sws_getColorspaceDetails(cache, const_cast< int ** >(&unusedTable), &sourceRange,
-								 const_cast< int ** >(&unusedTable), &destinationRange, &brightness, &contrast,
-								 &saturation)
+	// Read back before writing, so that only the two ranges change and swscale's own brightness,
+	// contrast and saturation are put back exactly as they were. The two tables are read and ignored:
+	// the coefficients below replace them, and the call has no way to say "leave these alone".
+	if (sws_getColorspaceDetails(cache, &inverseTable, &sourceRange, &table, &destinationRange, &brightness,
+								 &contrast, &saturation)
 		< 0) {
 		return i420ToRgbScalar(source);
 	}
+
+	const int *coefficients = sws_getCoefficients(SWS_CS_ITU601);
 
 	if (sws_setColorspaceDetails(cache, coefficients, 1, coefficients, 1, brightness, contrast, saturation) < 0) {
 		return i420ToRgbScalar(source);
