@@ -15,6 +15,12 @@
 set -u
 # shellcheck source=env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+# A fresh network namespace's loopback is DOWN, and everything here talks to 127.0.0.1. Without
+# this the clients start, never reach the server, and what gets profiled or soaked is two clients
+# retrying a connection - which is a measurement of nothing that looks like a measurement of
+# something. This line was missing from both of these scripts for their whole existence.
+ip link set lo up
 SECONDS_TOTAL="${1:-25}"
 OUT="${2:-$MV_OUT/profile}"
 
@@ -68,6 +74,17 @@ rpc() { local d="$MV_WORK/clients/$1"; shift; HOME="$d" XDG_RUNTIME_DIR="$d/run"
 for _ in $(seq 1 30); do rpc sender sharescreen; sleep 2; grep -q "VideoStats tx" "$OUT/sender.log" && break; done
 for _ in $(seq 1 30); do rpc receiver watchall; sleep 2; grep -q "VideoStats rx" "$OUT/receiver.log" && break; done
 grep -m1 "Screen share:" "$OUT/sender.log" | tee -a "$OUT/profile.log"
+
+# Checked, not assumed. A profile of a pipeline that is not running is not an empty result - it is a
+# plausible-looking one, full of connection retries and audio threads, and it was reported as a
+# profile of the video pipeline for exactly as long as nobody checked.
+if ! grep -q "VideoStats tx" "$OUT/sender.log" || ! grep -q "VideoStats rx" "$OUT/receiver.log"; then
+    say "no frames are moving; there is nothing worth profiling. Last lines of each client:"
+    tail -15 "$OUT/sender.log" | tee -a "$OUT/profile.log"
+    tail -15 "$OUT/receiver.log" | tee -a "$OUT/profile.log"
+    exit 1
+fi
+
 say "both running; settling"
 sleep 8
 

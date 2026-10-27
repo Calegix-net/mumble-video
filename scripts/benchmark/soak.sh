@@ -14,6 +14,12 @@
 set -u
 # shellcheck source=env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+# A fresh network namespace's loopback is DOWN, and everything here talks to 127.0.0.1. Without
+# this the clients start, never reach the server, and what gets profiled or soaked is two clients
+# retrying a connection - which is a measurement of nothing that looks like a measurement of
+# something. This line was missing from both of these scripts for their whole existence.
+ip link set lo up
 MINUTES="${1:-120}"
 OUT="${2:-$MV_OUT/soak}"
 
