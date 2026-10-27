@@ -74,6 +74,12 @@ public:
 	/// in play, so the 99th percentile has half a dozen samples above it - enough that one freak frame
 	/// cannot hold the buffer deep for ten seconds, which is what using the maximum would do. Showing
 	/// one frame in a hundred late costs one frame; holding every frame costs every frame.
+	///
+	/// What it measured, after: the worst gap on that link came back to 36 ms, which is better than the
+	/// 63 ms it was before any of this. The buffer there chooses the full 200 ms, so the latency saving
+	/// is given up on a lossy link and kept on a clean one - 200 ms down to 20 - which is the trade this
+	/// is supposed to make. Someone who would rather have the latency under loss can put this back to
+	/// 95; it is one constant and the rig will tell them what it costs.
 	static constexpr int PERCENTILE = 99;
 	/// How fast the delay may shrink. 50 ms a second means frames are shown 5 % sooner than they were
 	/// captured while it is shrinking, which is not visible in a picture, and that the full 200 ms down

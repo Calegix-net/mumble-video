@@ -14,6 +14,14 @@ Mumble's. "Upstream" below always means the Mumble project this is forked from.
 
 ### Screen sharing
 
+- **About 180 ms less delay between your screen changing and someone else seeing it.** The receiver
+  used to hold every frame for a fixed 200 ms, which is room for a lost piece of a frame to be re-sent
+  before that frame was due — paid on every frame of every share whether anything had been lost or not.
+  It is now measured instead: on a good connection the hold drops to about 20 ms, and when the
+  connection is actually losing data it goes back to the full 200 ms, which is what keeps the picture
+  smooth rather than stuttering. Measured on the benchmark rig: 200 ms down to 20 ms on an unimpaired
+  link for VP9 and 21 ms for hardware H.264, and at 2 % packet loss the worst stutter *improved* from
+  63 ms to 36 ms.
 - **Sharper, cheaper VP9 pictures.** The receiver's colour conversion now goes through libswscale with
   accurate rounding instead of a hand-written loop. Measured on the benchmark rig, receiver CPU for a
   1080p30 VP9 share falls from 41–42 % to 24–28 %, and the conversion itself is more accurate than
