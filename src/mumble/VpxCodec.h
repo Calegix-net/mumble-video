@@ -155,6 +155,10 @@ public:
 	explicit VpxDecoder(VpxCodec codec = VpxCodec::VP8);
 	~VpxDecoder();
 
+	/// Whether this build converts decoded frames with libswscale rather than the fallback loop. For
+	/// tests, which should check the conversion that actually runs.
+	static bool usesSwscale();
+
 	VpxDecoder(const VpxDecoder &)            = delete;
 	VpxDecoder &operator=(const VpxDecoder &) = delete;
 
@@ -181,9 +185,18 @@ public:
 	 */
 	bool decode(const std::vector< Mumble::Protocol::byte > &payload, QImage *image);
 
+	/// Releases the conversion context. Called by the destructor; separate so that it can be used from
+	/// the one place that needs a frame size change to take effect.
+	void releaseConverter();
+
 protected:
 	vpx_codec_ctx *m_context = nullptr;
 	VpxCodec m_codec         = VpxCodec::VP8;
+
+	/// A cached libswscale context for I420 to RGB32, kept across frames because building one costs far
+	/// more than using it. Held as void* so that this header does not pull in FFmpeg: most of the
+	/// client's translation units neither include it nor link it, and a build with -Dh264=OFF has none.
+	void *m_sws = nullptr;
 };
 
 #endif // MUMBLE_MUMBLE_VPXCODEC_H_

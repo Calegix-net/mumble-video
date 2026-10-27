@@ -182,6 +182,11 @@ std::vector< EncodedVideoUnit > TiledImageEncoder::encode(const QImage &frame, s
 
 	// QImage::copy on a frame whose format has padded or non-32-bit scanlines would make the per-tile
 	// hashes depend on layout rather than content, so normalise once up front.
+	//
+	// Deliberately not widened to accept ARGB32 the way VpxEncoder and H264Encoder are. They read only
+	// the colour channels; this hashes the bytes, and the fourth byte of a captured ARGB32 frame is
+	// whatever the desktop left there. A tile whose alpha byte flickers while its colours do not would
+	// re-encode and re-send every frame, which is the opposite of what the change-detection is for.
 	const QImage source = frame.format() == QImage::Format_RGB32 ? frame : frame.convertToFormat(QImage::Format_RGB32);
 
 	const int columns = (source.width() + m_tileSize - 1) / m_tileSize;

@@ -14,6 +14,7 @@
 
 #include <QObject>
 #include <QtGui/QImage>
+#include <QtGui/QPainter>
 #include <QtTest>
 
 #include <algorithm>
@@ -146,7 +147,102 @@ private slots:
 	void aScrollingScreenDecodesFrameByFrame();
 	void aStillScreenStaysWithinItsBudget();
 	void aScreenKeyframeFitsOneUnitAt1440p();
+
+	void blackStaysBlackAndWhiteStaysWhite();
+	void aFlatColourSurvivesTheRoundTrip();
 };
+
+// The conversion either side of the codec is full-range BT.601, and libswscale's default for YUV input
+// is studio range. Getting that wrong does not fail, break or warn: every frame simply comes back with
+// black lifted to 16 and white crushed to 235, which on a shared text editor reads as grey text on a
+// grey page. These two tests are the guard, and they are written so that a studio-range mistake fails
+// them by a wide margin rather than by a rounding error.
+
+void TestVpxCodec::blackStaysBlackAndWhiteStaysWhite() {
+	// Large flat blocks, so the codec has no reason to spend bits anywhere and the values that come
+	// back are the conversion's rather than the encoder's opinion of them.
+	QImage original(320, 240, QImage::Format_RGB32);
+	original.fill(Qt::black);
+	QPainter painter(&original);
+	painter.fillRect(QRect(160, 0, 160, 240), Qt::white);
+	painter.end();
+
+	VpxEncoder encoder(VpxContent::Screen);
+	encoder.setBitrate(3000);
+
+	VpxDecoder decoder(VpxCodec::VP9);
+	QVERIFY(decoder.isValid());
+
+	// A few frames, because the first is where rate control is least settled.
+	QImage decoded;
+	for (unsigned int frame = 0; frame < 4; ++frame) {
+		const std::vector< EncodedVideoUnit > units = encoder.encode(original, 1, frame, frame * 33000, frame == 0);
+		QCOMPARE(units.size(), static_cast< std::size_t >(1));
+		decoded = decoder.decode(units[0].payload);
+	}
+
+	QVERIFY(!decoded.isNull());
+	QCOMPARE(decoded.size(), original.size());
+
+	const QRgb black = decoded.pixel(80, 120);
+	const QRgb white = decoded.pixel(240, 120);
+
+	// Studio range would put black at about 16 and white at about 235. A tolerance of 8 is far inside
+	// that gap and far outside anything the codec does to a flat block.
+	QVERIFY2(qRed(black) <= 8 && qGreen(black) <= 8 && qBlue(black) <= 8,
+			 qPrintable(QStringLiteral("black came back as %1,%2,%3 - studio range would be near 16")
+							.arg(qRed(black))
+							.arg(qGreen(black))
+							.arg(qBlue(black))));
+	QVERIFY2(qRed(white) >= 247 && qGreen(white) >= 247 && qBlue(white) >= 247,
+			 qPrintable(QStringLiteral("white came back as %1,%2,%3 - studio range would be near 235")
+							.arg(qRed(white))
+							.arg(qGreen(white))
+							.arg(qBlue(white))));
+}
+
+void TestVpxCodec::aFlatColourSurvivesTheRoundTrip() {
+	// Chroma as well as luma, which a range or matrix mistake also moves. Mid-grey is deliberately
+	// included: it is the one value studio and full range nearly agree on, so a test that only looked
+	// at grey would pass either way.
+	const QList< QRgb > colours = { qRgb(255, 0, 0), qRgb(0, 255, 0), qRgb(0, 0, 255), qRgb(128, 128, 128) };
+
+	for (const QRgb colour : colours) {
+		QImage original(320, 240, QImage::Format_RGB32);
+		original.fill(colour);
+
+		VpxEncoder encoder(VpxContent::Screen);
+		encoder.setBitrate(3000);
+		VpxDecoder decoder(VpxCodec::VP9);
+		QVERIFY(decoder.isValid());
+
+		QImage decoded;
+		for (unsigned int frame = 0; frame < 4; ++frame) {
+			const std::vector< EncodedVideoUnit > units =
+				encoder.encode(original, 1, frame, frame * 33000, frame == 0);
+			QCOMPARE(units.size(), static_cast< std::size_t >(1));
+			decoded = decoder.decode(units[0].payload);
+		}
+
+		QVERIFY(!decoded.isNull());
+
+		const QRgb back = decoded.pixel(160, 120);
+		// 4:2:0 subsampling and the integer matrices on both sides cost a few levels; a range mistake
+		// costs tens. 12 separates them with room to spare.
+		const int dr = std::abs(qRed(back) - qRed(colour));
+		const int dg = std::abs(qGreen(back) - qGreen(colour));
+		const int db = std::abs(qBlue(back) - qBlue(colour));
+
+		QVERIFY2(dr <= 12 && dg <= 12 && db <= 12,
+				 qPrintable(QStringLiteral("%1,%2,%3 came back as %4,%5,%6")
+								.arg(qRed(colour))
+								.arg(qGreen(colour))
+								.arg(qBlue(colour))
+								.arg(qRed(back))
+								.arg(qGreen(back))
+								.arg(qBlue(back))));
+	}
+}
 
 void TestVpxCodec::aScreenIsEncodedWithVp9() {
 	VpxEncoder encoder(VpxContent::Screen);
