@@ -822,8 +822,13 @@ void VideoGrid::noteStatsPaint(Surface &surface, quint64 frameNumber) {
 	const auto capture = stats.captureUsecByFrame.find(frameNumber);
 
 	if (capture != stats.captureUsecByFrame.end()) {
-		if (stats.captureToPaintMsec.size() < MAX_LATENCY_SAMPLES) {
-			stats.captureToPaintMsec.push_back(now - static_cast< qint64 >(capture->second / 1000));
+		const qint64 floor = std::min(stats.arrivalFloorMsec, stats.previousArrivalFloorMsec);
+
+		// No floor yet would mean no unit has been timed, which cannot be the case here - this frame's own
+		// capture time is in the map - but a sample measured against the sentinel would be nonsense, so it
+		// is checked rather than assumed.
+		if (floor != std::numeric_limits< qint64 >::max() && stats.paintDelayMsec.size() < MAX_LATENCY_SAMPLES) {
+			stats.paintDelayMsec.push_back(now - static_cast< qint64 >(capture->second / 1000) - floor);
 		}
 
 		stats.captureUsecByFrame.erase(stats.captureUsecByFrame.begin(), std::next(capture));
@@ -876,16 +881,19 @@ void VideoGrid::logStats() {
 		const qint64 openGap = stats.lastPaintMsec > 0 ? now - stats.lastPaintMsec : 0;
 
 		// Sorted in place: these samples are reset below and nothing else reads them.
-		std::sort(stats.captureToPaintMsec.begin(), stats.captureToPaintMsec.end());
+		std::sort(stats.paintDelayMsec.begin(), stats.paintDelayMsec.end());
 
-		// The transit delay with no queueing in it, which between machines is mostly the clock offset. -1
-		// when nothing has been timed yet, rather than the sentinel maximum.
-		const qint64 offset = std::min(surface.playout.windowMin, surface.playout.previousMin);
+		// The playout code's own estimate of the same floor, from the same arithmetic over a different
+		// window. Printed beside this one because the two disagreeing is itself worth seeing. -1 when
+		// nothing has been timed yet, rather than the sentinel maximum.
+		const qint64 offset       = std::min(surface.playout.windowMin, surface.playout.previousMin);
+		const qint64 rawFloor     = std::min(stats.arrivalFloorMsec, stats.previousArrivalFloorMsec);
+		const qint64 arrivalFloor = rawFloor == std::numeric_limits< qint64 >::max() ? -1 : rawFloor;
 
 		qInfo("VideoStats rx %u/%u codec=%d units=%llu tiles=%llu frames=%llu newestUnit=%llu newestPainted=%llu "
 			  "maxGapMs=%lld kfOverload=%llu kfLoss=%llu kfFail=%llu pending=%zu awaitingKey=%d gapsRecovered=%u "
-			  "gapsAbandoned=%u held=%zu g2gMsP50=%lld g2gMsP90=%lld g2gMsMax=%lld g2gSamples=%zu "
-			  "playoutOffsetMs=%lld",
+			  "gapsAbandoned=%u held=%zu paintDelayMsP50=%lld paintDelayMsP90=%lld paintDelayMsMax=%lld "
+			  "paintDelaySamples=%zu arrivalFloorMs=%lld playoutOffsetMs=%lld",
 			  surface.senderSession, surface.streamID, surface.codec, static_cast< unsigned long long >(stats.units),
 			  static_cast< unsigned long long >(stats.tilesPainted),
 			  static_cast< unsigned long long >(stats.framesPainted),
@@ -896,13 +904,13 @@ void VideoGrid::logStats() {
 			  static_cast< unsigned long long >(stats.keyframeRequestsLoss),
 			  static_cast< unsigned long long >(stats.keyframeRequestsFailure), surface.pendingTiles.size(),
 			  surface.awaitingKeyframe ? 1 : 0, surface.vp8GapsRecovered, surface.vp8GapsAbandoned,
-			  surface.vp8Held.size(), static_cast< long long >(percentileMsec(stats.captureToPaintMsec, 0.5)),
-			  static_cast< long long >(percentileMsec(stats.captureToPaintMsec, 0.9)),
-			  static_cast< long long >(stats.captureToPaintMsec.empty() ? -1 : stats.captureToPaintMsec.back()),
-			  stats.captureToPaintMsec.size(),
+			  surface.vp8Held.size(), static_cast< long long >(percentileMsec(stats.paintDelayMsec, 0.5)),
+			  static_cast< long long >(percentileMsec(stats.paintDelayMsec, 0.9)),
+			  static_cast< long long >(stats.paintDelayMsec.empty() ? -1 : stats.paintDelayMsec.back()),
+			  stats.paintDelayMsec.size(), static_cast< long long >(arrivalFloor),
 			  static_cast< long long >(offset == std::numeric_limits< qint64 >::max() ? -1 : offset));
 
-		stats.captureToPaintMsec.clear();
+		stats.paintDelayMsec.clear();
 		stats.units = stats.tilesPainted = stats.framesPainted = 0;
 		stats.keyframeRequestsOverload = stats.keyframeRequestsLoss = stats.keyframeRequestsFailure = 0;
 		stats.maxPaintGapMsec                                                                       = 0;
@@ -1539,12 +1547,24 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	// Before the watching check below, so that a frame whose first unit arrived just as watching began is
 	// not measured as having taken however long the click took.
 	if (m_statsTimer && captureTimestampUsec != 0) {
-		auto &byFrame = surface.stats.captureUsecByFrame;
-		byFrame.emplace(frameNumber, captureTimestampUsec);
+		Surface::Stats &stats = surface.stats;
+		const qint64 nowMsec  = QDateTime::currentMSecsSinceEpoch();
 
-		while (byFrame.size() > MAX_LATENCY_FRAMES) {
-			byFrame.erase(byFrame.begin());
+		stats.captureUsecByFrame.emplace(frameNumber, captureTimestampUsec);
+
+		while (stats.captureUsecByFrame.size() > MAX_LATENCY_FRAMES) {
+			stats.captureUsecByFrame.erase(stats.captureUsecByFrame.begin());
 		}
+
+		if (stats.arrivalFloorWindowStartMsec == 0
+			|| nowMsec - stats.arrivalFloorWindowStartMsec >= ARRIVAL_FLOOR_WINDOW_MSEC) {
+			stats.previousArrivalFloorMsec    = stats.arrivalFloorMsec;
+			stats.arrivalFloorMsec            = std::numeric_limits< qint64 >::max();
+			stats.arrivalFloorWindowStartMsec = nowMsec;
+		}
+
+		stats.arrivalFloorMsec =
+			std::min(stats.arrivalFloorMsec, nowMsec - static_cast< qint64 >(captureTimestampUsec / 1000));
 	}
 
 	if (!surface.watching) {
@@ -2790,7 +2810,10 @@ void VideoGrid::updateHoveredBarImpl() {
 	// a bar destroyed mid-drag would leave stuck on.
 	//
 	// Nothing below has run, so m_hoveredSlot still describes what is on screen; the sliderReleased
-	// connection in makeRemoteControlBar() asks again once the drag is over.
+	// connection in makeRemoteControlBar() asks again once the drag is over. The cost is that a bar
+	// created while a drag is in progress - somebody starting a share at that moment - stays visible
+	// until the drag ends, which is a second of a bar being shown rather than a drag going somewhere
+	// the user did not aim it.
 	if (aVolumeSliderIsBeingDragged()) {
 		return;
 	}

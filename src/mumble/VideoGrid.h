@@ -604,15 +604,28 @@ protected:
 			/// one is filled for every codec whenever MUMBLE_VIDEO_STATS is set, and for nothing else.
 			std::map< quint64, quint64 > captureUsecByFrame;
 
-			/// How long each frame since the last log line took from being captured to being painted, in
-			/// milliseconds: one sample per frame, taken when its first tile lands.
+			/// The smallest (arrival - capture) seen in this ten-second window and in the one before it.
 			///
-			/// This is glass-to-glass in the only sense a program can measure it - the camera's exposure and
-			/// the monitor's own pipeline are outside it - and it is an absolute figure only when the two
-			/// clients share a clock, which is what the benchmark rig arranges by running them on one
-			/// machine. Between machines the clock offset is in every sample; playoutOffsetMs on the same
-			/// log line is an estimate of that offset, so differences remain meaningful.
-			std::vector< qint64 > captureToPaintMsec;
+			/// A capture timestamp is microseconds since the sending capture source started, not a wall
+			/// clock, so (arrival - capture) is a real delay plus a large arbitrary constant. The smallest
+			/// value seen is the best available estimate of that constant plus the minimum transit, and
+			/// subtracting it is what turns the samples below into a figure anyone can compare. Windowed,
+			/// so that two drifting clocks are followed instead of the minimum being pinned for the life of
+			/// the stream - the same reasoning, and the same ten seconds, as Playout above.
+			qint64 arrivalFloorWindowStartMsec = 0;
+			qint64 arrivalFloorMsec            = std::numeric_limits< qint64 >::max();
+			qint64 previousArrivalFloorMsec    = std::numeric_limits< qint64 >::max();
+
+			/// How long each frame since the last log line waited between arriving and being painted, in
+			/// milliseconds above the floor above: decoding, the playout buffer's deliberate wait, and
+			/// whatever else the GUI thread was busy with. One sample per frame, taken when its first tile
+			/// lands - the moment the frame became visible.
+			///
+			/// This is the receiver's share of glass-to-glass, and it cannot be the whole of it: the
+			/// camera's exposure, the monitor's own pipeline and the capture-to-send time on the other
+			/// machine are all outside anything this process can see. It is the part this code controls,
+			/// and so the part a change here moves.
+			std::vector< qint64 > paintDelayMsec;
 		} stats;
 	};
 
@@ -676,6 +689,10 @@ protected:
 	/// they exist so that stats left on in a client nobody is looking at cannot grow without limit.
 	static constexpr std::size_t MAX_LATENCY_FRAMES  = 256;
 	static constexpr std::size_t MAX_LATENCY_SAMPLES = 4096;
+
+	/// How long the arrival floor is measured over before the window rolls. See Stats::arrivalFloorMsec:
+	/// the same ten seconds Playout uses, for the same reason.
+	static constexpr qint64 ARRIVAL_FLOOR_WINDOW_MSEC = 10000;
 
 	/// MUMBLE_VIDEO_STATS: records a tile about to be painted for frame @p frameNumber.
 	void noteStatsPaint(Surface &surface, quint64 frameNumber);
