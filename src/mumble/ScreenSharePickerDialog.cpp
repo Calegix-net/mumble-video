@@ -409,9 +409,9 @@ void ScreenSharePickerDialog::updateControls() {
 	m_buttonBox->button(QDialogButtonBox::Ok)
 		->setText(m_tabs->currentWidget() == m_regionList ? tr("Choose area...") : tr("Share"));
 
-	// Disabled outright, not merely left unchecked, when the selection can't actually honour them - see
-	// the class comment.
-	m_showCursor->setEnabled(isWindow);
+	// Disabled outright, not merely left unchecked, when the selection can't actually honour it - see
+	// the class comment. The cursor is not in that category: every backend here can draw it or leave it
+	// out, so the choice is always offered.
 	m_windowAudioOnly->setEnabled(isWindow && m_includeAudio->isChecked());
 }
 

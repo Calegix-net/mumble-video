@@ -43,10 +43,14 @@ enum class ScreenShareTargetKind {
  * worker thread - a window that is slow to draw itself must not freeze the dialog - and refreshed every
  * THUMBNAIL_REFRESH_MSEC for the tab that is showing. They never leave this computer.
  *
- * "Only this application's audio" and "Show my cursor" only apply to a window: whole-display capture here
- * (DxgiDisplayVideoSource) has no single application to scope audio to and does not composite a cursor
- * into its frames. Both are disabled, not merely unchecked, while a display is selected. Sharing a window
- * shares only that window's sound by default, as Discord does.
+ * "Only this application's audio" applies to a window only: whole-display capture has no single
+ * application to scope audio to, so it is disabled, not merely unchecked, while a display is selected.
+ * Sharing a window shares only that window's sound by default, as Discord does.
+ *
+ * "Show my cursor" applies to all three. It used to be disabled for a display, on the stated grounds that
+ * display capture "does not composite a cursor into its frames" - which stopped being true when
+ * DxgiDisplayVideoSource learnt to draw the pointer, so the box was greyed out while the cursor was sent
+ * anyway. On a whole-screen share that is the setting people most want.
  */
 class ScreenSharePickerDialog : public QDialog {
 	Q_OBJECT

@@ -561,6 +561,14 @@ void MainWindow::setupVideoGrid() {
 				[this]() { m_videoDock->setFloating(!m_videoDock->isFloating()); });
 		connect(closeButton, &QToolButton::clicked, m_videoDock, &QDockWidget::close);
 
+		// m_videoDockShown is what the senderCountChanged handler compares against to spot the transition
+		// into "something to show". Closing the dock by hand without clearing it left the two disagreeing,
+		// so the next person to start sharing moved the count from one to two, the handler saw no
+		// transition, and the panel stayed shut.
+		connect(m_videoDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+			m_videoDockShown = visible;
+		});
+
 		m_videoDock->setTitleBarWidget(titleBar);
 	}
 
@@ -743,8 +751,14 @@ void MainWindow::setupVideoGrid() {
 	// disconnected, so nothing tells this client to stop asking for a stream nobody is sending any more.
 	// Same unsubscribe watchToggled(false) sends; the difference is only who initiated it.
 	connect(m_videoGrid, &VideoGrid::streamWentStale, this, [this](unsigned int senderSession, unsigned int streamID) {
+		// By name where one is known: this message is read at the moment somebody's client died, which is
+		// exactly when "session 7" tells the reader nothing they can act on.
+		const QString who = m_videoGrid ? m_videoGrid->senderName(senderSession) : QString();
+
 		Global::get().l->log(Log::Warning,
-							 tr("A shared stream from session %1 went silent and was dropped.").arg(senderSession));
+							 who.isEmpty()
+								 ? tr("A shared stream from session %1 went silent and was dropped.").arg(senderSession)
+								 : tr("%1's shared stream went silent and was dropped.").arg(who));
 
 		if (!Global::get().sh) {
 			return;
@@ -800,7 +814,10 @@ void MainWindow::setupVideoBroadcast() {
 	// Beside the audio wizard, because it answers the same kind of question for the other medium.
 	m_videoWizardAction = new QAction(tr("&Video Wizard"), this);
 	m_videoWizardAction->setStatusTip(tr("Guided setup for sharing video"));
-	qmConfig->addAction(m_videoWizardAction);
+
+	// Not added to qmConfig here: on_qmConfig_aboutToShow() empties that menu and rebuilds it from a
+	// fixed list every time it opens, so an entry added once is gone before the window is first shown.
+	// It is added there, beside the audio wizard.
 
 	connect(m_videoWizardAction, &QAction::triggered, this, &MainWindow::openVideoWizardDialog);
 
@@ -1654,8 +1671,8 @@ void MainWindow::toggleScreenShare(bool share) {
 			return;
 		}
 
-		auto cropped =
-			std::make_unique< CroppedVideoSource >(std::make_unique< DxgiDisplayVideoSource >(display), region);
+		auto cropped = std::make_unique< CroppedVideoSource >(
+			std::make_unique< DxgiDisplayVideoSource >(display, picker.showCursor()), region);
 
 		if (!m_screenVideoBroadcaster->start(std::move(cropped))) {
 			Global::get().l->log(Log::Warning, tr("Could not start capturing this region."));
@@ -1673,7 +1690,8 @@ void MainWindow::toggleScreenShare(bool share) {
 			return;
 		}
 
-		if (!m_screenVideoBroadcaster->start(std::make_unique< DxgiDisplayVideoSource >(display))) {
+		if (!m_screenVideoBroadcaster->start(
+				std::make_unique< DxgiDisplayVideoSource >(display, picker.showCursor()))) {
 			Global::get().l->log(Log::Warning, tr("Could not start capturing this display."));
 			m_shareScreenAction->setChecked(false);
 
@@ -2495,6 +2513,10 @@ QMenu *MainWindow::createPopupMenu() {
 		menu->addAction(qdwChat->toggleViewAction());
 		menu->addAction(qdwLog->toggleViewAction());
 		menu->addAction(qtIconToolbar->toggleViewAction());
+
+		if (m_videoDock) {
+			menu->addAction(m_videoDock->toggleViewAction());
+		}
 
 		return menu;
 	}
@@ -3955,6 +3977,15 @@ void MainWindow::on_qmConfig_aboutToShow() {
 		}
 	}
 	qmConfig->addAction(qaAudioWizard);
+
+	// Added here rather than once at construction, because the loop above removes everything on every
+	// show. Adding it in setupGui() - which is what used to happen - meant the entry was gone before the
+	// window was ever on screen, so the only way to reach the video wizard was the first-run prompt, and
+	// that fires once and only when a camera is already plugged in.
+	if (m_videoWizardAction) {
+		qmConfig->addAction(m_videoWizardAction);
+	}
+
 	qmConfig->addAction(qaConfigCert);
 	qmConfig->addSeparator();
 	qaAudioTTS->setChecked(Global::get().s.bTTS);
@@ -3968,6 +3999,17 @@ void MainWindow::on_qmConfig_aboutToShow() {
 	qmConfig->addAction(qaTalkingUIToggle);
 	if (Global::get().s.bMinimalView)
 		qmConfig->addAction(qaConfigHideFrame);
+
+	// The panel's title bar has a close button, and closing it used to be a one-way door: the dock is
+	// only re-shown when the sender count crosses from zero, so a user who closed it while anybody was
+	// sharing had no way back - and if they closed it while sharing themselves, their own preview, their
+	// watcher count and the list of who is watching went with it.
+	if (m_videoDock) {
+		QAction *toggle = m_videoDock->toggleViewAction();
+		toggle->setText(tr("&Video Panel"));
+		toggle->setStatusTip(tr("Show or hide the video panel"));
+		qmConfig->addAction(toggle);
+	}
 
 	// Last in the menu, after the Talking UI.
 	qaConfigHideOthersVideo->setChecked(Global::get().s.bHideOthersVideo);
@@ -5613,18 +5655,33 @@ void MainWindow::setServerSpeaksVideo(bool speaks) {
 		// Reconnected, but to a server that has no video: there is nothing to announce them to.
 		Global::get().l->log(Log::Warning, tr("This server does not support video, so your shares were stopped."));
 		stopAllSharesLocally();
+	} else {
+		// Said out loud, once per connection. Both share buttons are about to be greyed out by
+		// refreshShareActions(), and until now that was the entire explanation a user got for why the
+		// feature they installed this client for is missing. It is the first thing that happens to anyone
+		// who joins a friend's existing Mumble server, and the README's caveat about needing both halves
+		// is in the README, not in front of them.
+		Global::get().l->log(Log::Information,
+							 tr("This server does not have video support, so camera and screen sharing are "
+								"unavailable here. Both the client and the server have to be Mumble Video."));
 	}
 
 	refreshShareActions();
 }
 
 void MainWindow::refreshShareActions() {
+	// The tooltip carries the reason too, because a greyed-out button is what a user comes back to
+	// later, long after the log line has scrolled away.
+	const QString unavailable = tr("This server does not have video support.");
+
 	if (m_shareCameraAction) {
 		m_shareCameraAction->setEnabled(m_serverSpeaksVideo || m_shareCameraAction->isChecked());
+		m_shareCameraAction->setToolTip(m_serverSpeaksVideo ? QString() : unavailable);
 	}
 
 	if (m_shareScreenAction) {
 		m_shareScreenAction->setEnabled(m_serverSpeaksVideo || m_shareScreenAction->isChecked());
+		m_shareScreenAction->setToolTip(m_serverSpeaksVideo ? QString() : unavailable);
 	}
 }
 

@@ -67,7 +67,7 @@ QList< DxgiDisplayVideoSource::DisplayInfo > DxgiDisplayVideoSource::availableDi
 	return result;
 }
 
-DxgiDisplayVideoSource::DxgiDisplayVideoSource(const DisplayInfo &display, QObject *parent)
+DxgiDisplayVideoSource::DxgiDisplayVideoSource(const DisplayInfo &display, bool showCursor, QObject *parent)
 	: VideoSource(parent), m_display(display) {
 	// Connected once, here, rather than in start(): start()/stop() may run more than once over this
 	// object's life, and reconnecting on every start() would stack up duplicate connections, firing
@@ -394,7 +394,7 @@ void DxgiDisplayVideoSource::pollFrame() {
 	m_duplication->ReleaseFrame();
 
 	frame = ScreenCaptureImage::orient(frame, static_cast< unsigned int >(m_rotation));
-	if (m_pointerPosition.Visible) {
+	if (m_showCursor && m_pointerPosition.Visible) {
 		ScreenCaptureImage::drawPointer(frame, QPoint(m_pointerPosition.Position.x, m_pointerPosition.Position.y),
 										m_pointerShape.Type, m_pointerShape.Width, m_pointerShape.Height,
 										m_pointerShape.Pitch, m_pointerBytes.data(), m_pointerBytes.size());
