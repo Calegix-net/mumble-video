@@ -1740,6 +1740,15 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 		return;
 	}
 
+	// And "actually receiving" has to mean the same thing here as in relayVideo, or the rule leaks through
+	// this path. A deafened subscriber is sent none of a stream's audio fragments, so every unit of it has
+	// a permanent gap and its receiver asks for all of them, forever. The sender would re-send, and
+	// relayVideo would hand the duplicates to every other subscriber - a request for something the
+	// requester is not allowed to have, answered at everyone else's expense.
+	if (videoStreamCarriesAudio(senderSession, m_relayedNack.stream_id()) && !mayHearStreamAudio(requester)) {
+		return;
+	}
+
 	// Bounds what one request can make a sender re-send; the sender enforces the same limit.
 	while (m_relayedNack.units_size() > Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
 		m_relayedNack.mutable_units()->RemoveLast();

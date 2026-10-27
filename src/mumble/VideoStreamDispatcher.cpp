@@ -16,11 +16,8 @@ void VideoStreamDispatcher::setStreamCodec(unsigned int senderSession, unsigned 
 	// so only a new entry has to be counted. See the caps in the header for what this is holding back.
 	if (m_streams.find(key) == m_streams.end()) {
 		std::size_t forThisSender = 0;
-		std::set< unsigned int > senders;
 
 		for (const auto &entry : m_streams) {
-			senders.insert(entry.second.senderSession);
-
 			if (entry.second.senderSession == senderSession) {
 				forThisSender++;
 			}
@@ -30,8 +27,18 @@ void VideoStreamDispatcher::setStreamCodec(unsigned int senderSession, unsigned 
 			return;
 		}
 
-		if (senders.find(senderSession) == senders.end() && senders.size() >= MAX_SENDERS) {
-			return;
+		// Only worth counting distinct senders when this one is new, which forThisSender already
+		// answers: a sender that holds a stream is a sender that has been counted.
+		if (forThisSender == 0) {
+			std::set< unsigned int > senders;
+
+			for (const auto &entry : m_streams) {
+				senders.insert(entry.second.senderSession);
+			}
+
+			if (senders.size() >= MAX_SENDERS) {
+				return;
+			}
 		}
 	}
 

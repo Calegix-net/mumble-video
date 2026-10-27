@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 
 namespace MumbleCore {
 
@@ -50,6 +51,15 @@ namespace {
 	// on a value, and the static_assert above is what licenses it.
 	std::atomic< LogHandler > g_publicHandler = nullptr;
 
+	// Storing the handler and installing the trampoline are two steps, and two threads calling
+	// setLogHandler could interleave them so that the trampoline ended up installed with a null
+	// handler - logging silently dead, rather than either the handler one caller asked for or the
+	// stderr default the other did. The mutex makes the pair atomic with respect to each other.
+	// A message already inside dispatch() when the handler is cleared can still be dropped instead of
+	// reaching stderr; that is one message on an explicit teardown, which is not worth a lock on the
+	// logging path itself.
+	std::mutex g_handlerMutex;
+
 	void forwardToPublicHandler(Mumble::Core::LogLevel level, const char *message) {
 		const LogHandler handler = g_publicHandler.load(std::memory_order_acquire);
 
@@ -60,6 +70,8 @@ namespace {
 } // namespace
 
 void setLogHandler(LogHandler handler) {
+	const std::lock_guard< std::mutex > guard(g_handlerMutex);
+
 	// Stored before the trampoline is installed, so the core cannot call through to a null handler in
 	// between. Clearing it restores the core's own stderr default rather than a trampoline to nothing.
 	g_publicHandler.store(handler, std::memory_order_release);

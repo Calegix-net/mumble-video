@@ -202,10 +202,15 @@ if(MUMBLE_CORE_FUZZERS)
 	# following the code. fuzzer-no-link is the coverage instrumentation without libFuzzer's main(),
 	# which only the executables want.
 	#
-	# PUBLIC so the fuzz targets and the tests link against a library built the same way; mixing an
-	# instrumented library with an uninstrumented executable is how one gets link errors about missing
-	# sanitizer symbols.
-	target_compile_options(mumble-core PUBLIC
+	# The compile options are PRIVATE: they instrument this library and nothing else. They were PUBLIC,
+	# which in an in-tree build propagated AddressSanitizer and UndefinedBehaviorSanitizer to every
+	# consumer - the whole Qt client and the server - for an option whose description is about building
+	# the fuzz targets. That also quietly invalidates any benchmark run in such a tree.
+	#
+	# The link options stay PUBLIC, because an executable linking an instrumented library still has to
+	# pull in the sanitizer runtime, and leaving that out is how one gets undefined references to
+	# __asan_* instead of a working binary.
+	target_compile_options(mumble-core PRIVATE
 		-fsanitize=fuzzer-no-link,address,undefined
 		-fno-sanitize=vptr
 		-fno-sanitize-recover=undefined
