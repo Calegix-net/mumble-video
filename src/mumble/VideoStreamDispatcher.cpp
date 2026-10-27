@@ -7,8 +7,35 @@
 
 #include "Mumble.pb.h"
 
+#include <set>
+
 void VideoStreamDispatcher::setStreamCodec(unsigned int senderSession, unsigned int streamID, int codec) {
-	StreamInfo &info    = m_streams[streamKey(senderSession, streamID)];
+	const std::uint64_t key = streamKey(senderSession, streamID);
+
+	// Updating a stream already tracked is always allowed; it is only a new entry that can grow the map,
+	// so only a new entry has to be counted. See the caps in the header for what this is holding back.
+	if (m_streams.find(key) == m_streams.end()) {
+		std::size_t forThisSender = 0;
+		std::set< unsigned int > senders;
+
+		for (const auto &entry : m_streams) {
+			senders.insert(entry.second.senderSession);
+
+			if (entry.second.senderSession == senderSession) {
+				forThisSender++;
+			}
+		}
+
+		if (forThisSender >= MAX_STREAMS_PER_SENDER) {
+			return;
+		}
+
+		if (senders.find(senderSession) == senders.end() && senders.size() >= MAX_SENDERS) {
+			return;
+		}
+	}
+
+	StreamInfo &info   = m_streams[key];
 	info.senderSession = senderSession;
 	info.codec         = codec;
 }
