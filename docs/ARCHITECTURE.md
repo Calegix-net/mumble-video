@@ -235,12 +235,25 @@ way: pass things in, or emit a signal.
 Each surface estimates the smallest `(arrival − capture)` it has seen over a rolling ten-second window —
 which, because the capture timestamp is not a wall clock, is mostly the constant offset between the two
 processes' clocks plus the minimum transit. A decoded frame is then shown at
-`capture + offset + PLAYOUT_DELAY_MSEC`.
+`capture + offset + delay`, and `delay` is measured rather than fixed.
 
-`PLAYOUT_DELAY_MSEC` is a fixed 200 ms. Because the offset is a *minimum*, each frame waits roughly
-200 ms minus its own jitter — so on a clean link this is close to 200 ms of latency added
-unconditionally. It buys room for a retransmission to arrive before the frame was due. It is the largest
-single term in receiver latency and the obvious candidate for being made adaptive.
+The buffer exists to hold a frame long enough for a re-sent fragment to arrive before the frame was due.
+It used to be a flat 200 ms, charged to every frame of every stream whether anything had been lost or
+not — the largest single term in receiver latency, and on a clean link entirely wasted. The reason it
+can be measured instead is that **a retransmission is already visible in the arrival times**: a frame
+whose fragment had to be re-sent arrives late, and lateness is exactly `arrival − capture` relative to
+the minimum. So no round-trip estimate, no loss detection and no second mode is needed. See
+[`PlayoutDelay.h`](../src/mumble/PlayoutDelay.h):
+
+    delay = clamp(20 ms, p99(lateness) + 10 ms, 200 ms)
+
+over the same two ten-second windows, in a histogram that allocates nothing. The ceiling is the old
+constant, so a path that genuinely needs 200 ms still gets it. Three properties matter more than the
+formula: it **rises at once and falls slowly** (needing more buffer is urgent, needing less is not, and
+re-timing a picture under the viewer is the stutter the buffer exists to prevent); it **will not believe
+a percentile of three samples**, so there is a sixty-frame warm-up at the old 200 ms; and a **smaller
+minimum transit discards the histogram**, because a smaller minimum means the clock relationship changed
+and lateness measured against the old one is a measurement of nothing.
 
 ### Geometry from the wire is not trusted
 
