@@ -78,13 +78,19 @@ endif()
 # megabits a second; VP8 predicts each frame from the last. This is a real third-party dependency, and on
 # the platforms that ship a static binary it is a packaging commitment rather than just a build flag.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx)
+# Floor at 1.8.0 (2019): old enough to be packaged on everything we target, new enough to exclude the
+# pre-2019 libvpx builds that predate a decade of codec security fixes. A floor, not a recommendation;
+# packagers should ship a current libvpx (the dev box builds against 1.15).
+pkg_check_modules(VPX REQUIRED IMPORTED_TARGET vpx>=1.8.0)
 
 # H.264 for screen shares that move (films, games): hardware encoders through a minimal FFmpeg build
 # (docker/build-ffmpeg.sh), and FFmpeg's software decoder. Without it a screen share is TiledImage only.
 option(h264 "Build H.264 screen sharing (needs libavcodec, libavutil and libswscale)." ON)
 if(h264)
-	pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+	# Floor libavcodec at 58 (FFmpeg 4.0, 2018): the send_packet/receive_frame decode API this code uses,
+	# and the cutoff below which libav* carries many unpatched decoder CVEs. A floor, not a recommendation;
+	# packagers should ship a current FFmpeg (the dev box builds against libavcodec 61 / FFmpeg 7).
+	pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavcodec>=58 libavutil libswscale)
 endif()
 
 find_pkg(Qt6
