@@ -13,6 +13,7 @@
 #include "VersionNumber.h"
 #include "VideoReceiver.h"
 
+#include <atomic>
 #include <chrono>
 
 namespace MumbleCore {
@@ -34,9 +35,35 @@ static_assert(static_cast< int >(LogLevel::Info) == static_cast< int >(Mumble::C
 				  && static_cast< int >(LogLevel::Fatal) == static_cast< int >(Mumble::Core::LogLevel::Fatal),
 			  "LogLevel does not match the core's");
 
+namespace {
+	// The public handler, called through a fixed trampoline rather than by casting its pointer.
+	//
+	// This used to be a reinterpret_cast from LogHandler to Mumble::Core::LogHandler, justified by the
+	// static_assert above. The values do match, but that is not what makes a call legal: calling a
+	// function through a pointer to an incompatible type is undefined however the arguments are laid
+	// out, because the two LogLevels are distinct types. It worked, and UndefinedBehaviorSanitizer
+	// reports it on the first log message, which is enough on its own - a sanitizer finding in the
+	// public API is noise that hides real findings. It would also abort outright under control-flow
+	// integrity, which is a hardening flag this build should be able to turn on.
+	//
+	// The trampoline has the type the core actually calls, so the conversion is an ordinary static_cast
+	// on a value, and the static_assert above is what licenses it.
+	std::atomic< LogHandler > g_publicHandler = nullptr;
+
+	void forwardToPublicHandler(Mumble::Core::LogLevel level, const char *message) {
+		const LogHandler handler = g_publicHandler.load(std::memory_order_acquire);
+
+		if (handler) {
+			handler(static_cast< LogLevel >(level), message);
+		}
+	}
+} // namespace
+
 void setLogHandler(LogHandler handler) {
-	// Same signature but for the enum, whose values are checked above.
-	Mumble::Core::setLogHandler(reinterpret_cast< Mumble::Core::LogHandler >(handler));
+	// Stored before the trampoline is installed, so the core cannot call through to a null handler in
+	// between. Clearing it restores the core's own stderr default rather than a trampoline to nothing.
+	g_publicHandler.store(handler, std::memory_order_release);
+	Mumble::Core::setLogHandler(handler ? &forwardToPublicHandler : nullptr);
 }
 
 Bytes frameControlMessage(std::uint16_t type, ByteView payload) {
