@@ -1566,6 +1566,16 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		return;
 	}
 
+	// Whether this stream is sound rather than a picture, which decides whether the voice controls
+	// apply to it. Checked here, on every datagram, rather than only when the stream was announced,
+	// because mute and deafen are applied in the middle of a share: a moderator muting someone has to
+	// silence the share they are already sending, not merely prevent the next one.
+	const bool carriesAudio = videoStreamCarriesAudio(sender->uiSession, m_relayedVideo.stream_id());
+
+	if (carriesAudio && !mayTransmitStreamAudio(sender)) {
+		return;
+	}
+
 	const std::vector< unsigned int > recipients =
 		m_videoRouter.subscribersOf(sender->uiSession, m_relayedVideo.stream_id());
 
@@ -1608,6 +1618,12 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 			// watching a share in silence is the normal case, not the exception. A UDP-identified
 			// peer (sUdpSocket set) has already proven the path with encrypted pings, which is the
 			// most video can ask for given that it never falls back to TCP anyway.
+			continue;
+		}
+
+		if (carriesAudio && !mayHearStreamAudio(recipient)) {
+			// Deafened, by themselves or by a moderator. A deafened user hears no voice and must hear
+			// no share audio either, whatever they have subscribed to.
 			continue;
 		}
 
@@ -1738,6 +1754,26 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 
 	std::vector< Mumble::Protocol::byte > outgoing;
 	sendVideoPlaintext(sender, forwarded, outgoing);
+}
+
+bool Server::videoStreamCarriesAudio(unsigned int senderSession, unsigned int streamID) const {
+	const auto announcement = m_videoAnnouncements.find(std::make_pair(senderSession, streamID));
+
+	if (announcement == m_videoAnnouncements.end()) {
+		return false;
+	}
+
+	return announcement->second.codec() == MumbleProto::VideoState_Codec_OpusAudio;
+}
+
+bool Server::mayTransmitStreamAudio(const ServerUser *sender) {
+	// The same three flags Server::run checks before accepting a voice packet.
+	return sender && !sender->bMute && !sender->bSuppress && !sender->bSelfMute;
+}
+
+bool Server::mayHearStreamAudio(const ServerUser *subscriber) {
+	// The same two AudioReceiverBuffer checks before adding a voice receiver.
+	return subscriber && !subscriber->bDeaf && !subscriber->bSelfDeaf;
 }
 
 bool Server::mayShareVideo(unsigned int senderSession) {

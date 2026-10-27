@@ -32,6 +32,21 @@
  * running server, and so that the routing logic and the permission model can be reasoned about
  * separately.
  *
+ * ## One rule this class does not enforce
+ *
+ * A stream whose codec is OpusAudio carries sound rather than a picture, and sound is subject to the
+ * voice controls - a muted or suppressed sender may not transmit it, and a deafened subscriber may not
+ * receive it. None of that is checked here, because the authorizers are given a sender and a subscriber
+ * and not a codec, and a stream knows its codec only through the announcement the server keeps.
+ * Server::relayVideo applies it instead, on every datagram, using videoStreamCarriesAudio() with
+ * mayTransmitStreamAudio() and mayHearStreamAudio().
+ *
+ * That split is worth knowing about before adding a second caller of subscribersOf(): this class will
+ * hand back a deafened subscriber, and the rule that says not to send them a share's audio lives in the
+ * caller. The division is deliberate - it keeps a per-datagram codec lookup out of a class that has no
+ * business knowing about codecs - but it is exactly the sort of thing that gets lost and reintroduced
+ * as a bug, which is why it is written here rather than only there.
+ *
  * ## Locking
  *
  * **This class takes no locks. Every caller must already hold Server::qrwlVoiceThread** - the write

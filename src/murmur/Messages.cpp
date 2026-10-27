@@ -2672,6 +2672,17 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		msg.set_target_bandwidth(iVideoBandwidth);
 	}
 
+	// An OpusAudio stream is sound, so transmitting one is speaking and needs the right to speak. The
+	// relay re-checks this on every datagram, which is what actually enforces it while a share is
+	// running; refusing the announcement as well means a muted user is told so, instead of sharing
+	// apparently successfully and being silently dropped downstream.
+	if (msg.active() && msg.codec() == MumbleProto::VideoState_Codec_OpusAudio
+		&& !mayTransmitStreamAudio(uSource)) {
+		PERM_DENIED(uSource, uSource->cChannel, ChanACL::Speak);
+
+		return;
+	}
+
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are
 		// reported as a permission denial rather than distinguished, since the stream count is a server
