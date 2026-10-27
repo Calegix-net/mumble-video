@@ -354,7 +354,12 @@ void Server::msgAuthenticate(ServerUser *uSource, MumbleProto::Authenticate &msg
 		// Video is keyed from the same session key, with its own derived key and nonce bases, so no extra
 		// exchange is needed. See VideoCryptState::deriveFromSessionKey for why the key is derived rather
 		// than shared with audio.
-		uSource->videoCrypt.deriveFromSessionKey(uSource->csCrypt->getRawKey(), true);
+		if (!uSource->videoCrypt.deriveFromSessionKey(uSource->csCrypt->getRawKey(), true)) {
+			// Video is now silently off for this user for the whole connection - every datagram refuses to
+			// encrypt - so it is worth a line rather than nothing.
+			log(uSource, "Could not derive the video key from the session key; video will not work for this "
+						 "user");
+		}
 
 		MumbleProto::CryptSetup mpcrypt;
 		mpcrypt.set_key(uSource->csCrypt->getRawKey());

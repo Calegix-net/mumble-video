@@ -1127,7 +1127,13 @@ void MainWindow::msgCryptSetup(const MumbleProto::CryptSetup &msg) {
 		const std::string &server_nonce = msg.server_nonce();
 		// The client takes the opposite role, so the two ends pick opposite nonce bases from the same
 		// derivation.
-		c->videoCrypt.deriveFromSessionKey(key, false);
+		// Said out loud if it fails. It returns false for a key of the wrong length or a derivation that
+		// produced identical nonce bases, and the consequence is that video is silently off for the whole
+		// connection: every datagram refuses to encrypt and nothing reports why.
+		if (!c->videoCrypt.deriveFromSessionKey(key, false)) {
+			qWarning("Messages: could not derive the video key from the session key; video will not work on "
+					 "this connection");
+		}
 
 		if (!c->csCrypt->setKey(key, client_nonce, server_nonce)) {
 			qWarning("Messages: Cipher resync failed: Invalid key/nonce from the server!");
