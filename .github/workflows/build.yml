@@ -319,6 +319,51 @@ jobs:
           cmake --build core -j"$(sysctl -n hw.ncpu)"
           cd core && ctest --output-on-failure
 
+  # Fuzz the network parsers under AddressSanitizer and UndefinedBehaviorSanitizer. The linux job
+  # already runs the same four targets as corpus replayers, but those are built uninstrumented, so they
+  # catch only a hard crash - this catches a one-byte overread or an undefined shift, which is the bug
+  # class that actually lives in a parser. MUMBLE_CORE_FUZZERS=ON instruments the library as well as the
+  # harness and links libFuzzer, so each target first replays its committed corpus (the regression
+  # guard) and then fuzzes for a bounded time. Needs clang for -fsanitize=fuzzer.
+  #
+  # Not in the release gate: it is an extra net on top of the replayers that already gate, and a short
+  # fuzzing run is the kind of thing that can occasionally time out a runner without meaning the code
+  # is broken.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake make pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+
+      - name: Build the instrumented fuzzers
+        run: |
+          cmake -S src/mumble-core -B fuzzbuild -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DMUMBLE_CORE_TESTS=ON -DMUMBLE_CORE_FUZZERS=ON
+          # mumble-core first, so the generated protobuf headers exist before the targets that include
+          # them are compiled - they have no explicit ordering dependency on the generation step.
+          cmake --build fuzzbuild --target mumble-core -j"$(nproc)"
+          cmake --build fuzzbuild -j"$(nproc)"
+
+      - name: Replay the corpus, then fuzz each target briefly
+        run: |
+          set -e
+          for t in reassembly crypt demux receive; do
+            echo "::group::$t replay"
+            "fuzzbuild/fuzz/MumbleFuzz$t" src/mumble-core/fuzz/corpus/$t/*
+            echo "::endgroup::"
+            echo "::group::$t fuzz 90s"
+            "fuzzbuild/fuzz/MumbleFuzz$t" -max_total_time=90 -timeout=25 -rss_limit_mb=4096 \
+              src/mumble-core/fuzz/corpus/$t
+            echo "::endgroup::"
+          done
+
   # Two kinds of release. A v* tag publishes a proper versioned release. A push to main rolls the
   # dev-latest prerelease forward, so the Releases page always carries current artifacts without
   # anyone having to tag - CI artifacts expire and are buried behind a login; releases are neither.
