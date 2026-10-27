@@ -226,11 +226,21 @@ Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &conne
 						socklen_t len = sizeof(got);
 						if (getsockopt(sock, SOL_SOCKET, opt, reinterpret_cast< char * >(&got), &len) == 0
 							&& got < bufferBytes) {
-							log(QString::fromLatin1("Server: UDP %1 buffer for video is %2 bytes, wanted %3. Frame "
-													"bursts will overflow it and tiles will be dropped; raise "
-													"net.core.rmem_max/wmem_max to at least %3 on this host.")
+							// The number reported, not the number read back. On Linux the kernel returns
+							// twice the usable size - it counts its own per-skb bookkeeping - so printing
+							// `got` told an admin on a stock host that their buffer was 425984 bytes when
+							// what it actually holds is 212992. The comparison above is right either way,
+							// because it is against the request rather than against 2x it.
+#ifdef Q_OS_LINUX
+							const int effective = got / 2;
+#else
+							const int effective = got;
+#endif
+							log(QString::fromLatin1("Server: UDP %1 buffer for video holds %2 bytes, wanted %3. "
+													"Frame bursts will overflow it and tiles will be dropped; "
+													"raise net.core.rmem_max/wmem_max to at least %3 on this host.")
 									.arg(QLatin1String(name))
-									.arg(got)
+									.arg(effective)
 									.arg(bufferBytes));
 						}
 					}

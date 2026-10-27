@@ -1233,9 +1233,17 @@ void ServerHandler::serverConnectionConnected() {
 			   std::pair{ QAbstractSocket::SendBufferSizeSocketOption, "send" } }) {
 			const int got = qusUdp->socketOption(opt).toInt();
 			if (got > 0 && got < VIDEO_UDP_BUFFER_BYTES) {
-				qWarning("ServerHandler: UDP %s buffer for video is %d bytes, wanted %d (raise net.core.rmem_max/"
-						 "wmem_max on Linux); bursts of tiles may be dropped",
-						 name, got, VIDEO_UDP_BUFFER_BYTES);
+				// What it holds, not what the kernel reports: Linux returns twice the usable size, so the
+				// old message named a figure double the truth. The comparison is against the request, so
+				// it is unaffected either way.
+#ifdef Q_OS_LINUX
+				const int effective = got / 2;
+#else
+				const int effective = got;
+#endif
+				qWarning("ServerHandler: UDP %s buffer for video holds %d bytes, wanted %d (raise "
+						 "net.core.rmem_max/wmem_max on Linux); bursts of tiles may be dropped",
+						 name, effective, VIDEO_UDP_BUFFER_BYTES);
 			}
 		}
 
