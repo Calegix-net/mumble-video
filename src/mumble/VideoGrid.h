@@ -777,6 +777,13 @@ protected:
 	std::size_t m_pendingTileDecodes                      = 0;
 	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 
+	/// What to actually paint for a surface: its own picture, or, in the gap between a replacement being
+	/// announced and its first frame arriving, the picture of the stream it replaced. See
+	/// Surface::heldPicture.
+	static const QImage &displayImage(const Surface &surface) {
+		return surface.canvas.isNull() ? surface.heldPicture : surface.canvas;
+	}
+
 	/**
 	 * Whether a surface takes up a cell in the grid.
 	 *
@@ -795,13 +802,6 @@ protected:
 	 * the restarted share's first frame arrives, and it already has the previous stream's cell. Letting
 	 * it fall out and back in reflows the whole grid twice per rotation.
 	 */
-	/// What to actually paint for a surface: its own picture, or, in the gap between a replacement being
-	/// announced and its first frame arriving, the picture of the stream it replaced. See
-	/// Surface::heldPicture.
-	static const QImage &displayImage(const Surface &surface) {
-		return surface.canvas.isNull() ? surface.heldPicture : surface.canvas;
-	}
-
 	static bool occupiesCell(const Surface &surface) {
 		return !surface.poppedOut && !surface.hiddenByPreference
 			   && !(surface.watching && surface.canvas.isNull() && !surface.awaitingReplacementPicture);
@@ -946,11 +946,11 @@ protected:
 	/// The picture-in-picture windows, keyed by the surface each one currently shows.
 	std::map< std::uint64_t, PipWindow > m_pipWindows;
 
-	/// See setRemoteVideoHidden(). Applied to surfaces as they are announced, so a share that starts
-	/// while this is on is hidden too rather than appearing for a moment.
 	/// See dumpPaintedFrame(). Empty in every build that is not being benchmarked.
 	QString m_frameDumpDirectory = VideoFrameDump::receiverDirectory();
 
+	/// See setRemoteVideoHidden(). Applied to surfaces as they are announced, so a share that starts
+	/// while this is on is hidden too rather than appearing for a moment.
 	bool m_remoteVideoHidden = false;
 
 	/// What was being watched when hiding began, to start watching again when it ends.

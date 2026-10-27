@@ -65,8 +65,6 @@ public:
 	int codec() const { return m_codec; }
 	bool isScreenCodec() const;
 
-	TiledImageEncoder &tiledEncoder() { return m_encoder; }
-
 private:
 	TiledImageEncoder m_encoder;
 	VpxEncoder m_vpx;
@@ -189,9 +187,6 @@ public:
 	/// Forces the next frame to be sent in full, in response to a receiver asking for a keyframe or a
 	/// new subscriber arriving.
 	void requestKeyframe();
-
-	/// The tiled encoder, for tests. Only meaningful without threaded encoding.
-	TiledImageEncoder &encoder() { return m_core->tiledEncoder(); }
 
 	/// Which codec to encode with: CODEC_VP8 for cameras; CODEC_H264 (on a hardware encoder, only in a build
 	/// with USE_H264) or CODEC_VP9 for screens. CODEC_TILED is the old screen codec, kept for tests; 0 and 1
