@@ -526,6 +526,7 @@ private:
 		m_muteButton->setAutoRaise(true);
 		m_muteButton->setIconSize(QSize(20, 20));
 		m_muteButton->setFocusPolicy(Qt::NoFocus);
+		m_muteButton->setAccessibleName(tr("Mute this stream"));
 		layout->addWidget(m_muteButton);
 
 		m_volumeSlider = new StreamVolumeSlider(m_controls);
@@ -635,7 +636,9 @@ private:
 	/// Called for every value the slider passes through, so it does as little as it can get away with:
 	/// the icon and its tooltip only say muted or not, and only change when that does.
 	void showLevel(int value) {
-		m_volumeLabel->setText(tr("%1%").arg(value));
+		const QString level = tr("%1%").arg(value);
+		m_volumeLabel->setText(level);
+		m_volumeSlider->setLevelText(level);
 
 		const bool muted = value == 0;
 
@@ -1359,6 +1362,15 @@ void VideoGrid::setStreamCodec(unsigned int senderSession, unsigned int streamID
 		surface.vp8RequestedThrough = 0;
 		surface.canvas = QImage();
 		surface.vp8.reset();
+#ifdef USE_H264
+		// The same reasoning as surface.vp8 above, and it was missed here: an H264Decoder carries the
+		// previous content's SPS, PPS and reference frames, and a half-assembled frame's parts belong to
+		// a stream that no longer exists. A sender re-announcing one stream id as H.264, then VP9, then
+		// H.264 again - which a codec setting change does - got the first incarnation's decoder back.
+		surface.h264.reset();
+		surface.h264Parts = H264FrameAssembler();
+		surface.h264RecentPartCount = 1;
+#endif
 		++surface.decodeEpoch;
 		resetPlayout(surface);
 		surface.tileFrameNumbers.clear();
@@ -1596,6 +1608,15 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 	// VP9 (screen shares) goes through the same whole-frame path as VP8 (cameras): frame ordering, holding
 	// frames across a gap while it is retransmitted, and keyframe requests are the same for both.
 	if (surface.codec == MumbleProto::VideoState_Codec_VP8 || surface.codec == MumbleProto::VideoState_Codec_VP9) {
+		// A whole frame covers the surface, so its position is always the origin - every encoder here sets
+		// x and y to zero for these codecs. A peer sending anything else gets its frame painted into an
+		// oversized canvas instead of becoming the canvas: at the surface bound that is 33 MB held and a
+		// full-frame copy on the GUI thread for every frame of the share, from one field nobody validated.
+		// Refused rather than clamped, because a legitimate sender never sends it.
+		if (x != 0 || y != 0) {
+			return;
+		}
+
 		onVp8UnitReceived(existing->first, surface, frameNumber, isKeyframe, x, y, encodedTile);
 		return;
 	}
@@ -2510,6 +2531,9 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	controls->viewersButton->setFocusPolicy(Qt::NoFocus);
 	controls->viewersButton->setPopupMode(QToolButton::InstantPopup);
 	controls->viewersButton->setMenu(new QMenu(controls->viewersButton));
+	// Its text is an eye and a digit, which reads as nothing at all. refreshViewersButton() keeps the
+	// tooltip - the names and the level each one hears - in step with the menu.
+	controls->viewersButton->setAccessibleName(tr("Who is watching"));
 	layout->addWidget(controls->viewersButton);
 	refreshViewersButton(controls.get(),
 						 target == FocusTarget::SelfScreen ? m_ownScreenViewers : m_ownCameraViewers);
@@ -2524,6 +2548,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeOwnControlBar(FocusT
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
 	controls->fullscreenButton->setToolTip(tr("Fullscreen"));
+	controls->fullscreenButton->setAccessibleName(tr("Fullscreen"));
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, target]() {
@@ -2564,6 +2589,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		muteButton->setAutoRaise(true);
 		muteButton->setIconSize(QSize(16, 16));
 		muteButton->setFocusPolicy(Qt::NoFocus);
+		muteButton->setAccessibleName(tr("Mute this stream"));
 		layout->addWidget(muteButton);
 
 		auto *slider = new StreamVolumeSlider(controls->bar);
@@ -2595,8 +2621,10 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		// volumeBeforeMute is, and for the same reason.
 		auto shownAsMuted = std::make_shared< std::optional< bool > >();
 
-		const auto showLevel = [this, muteButton, label, shownAsMuted](int value) {
-			label->setText(tr("%1%").arg(value));
+		const auto showLevel = [this, muteButton, label, slider, shownAsMuted](int value) {
+			const QString level = tr("%1%").arg(value);
+			label->setText(level);
+			slider->setLevelText(level);
 
 			const bool muted = value == 0;
 
@@ -2648,6 +2676,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	controls->popOutButton->setAutoRaise(true);
 	controls->popOutButton->setText(QStringLiteral("❐"));
 	controls->popOutButton->setToolTip(tr("Show in its own window, outside the grid"));
+	controls->popOutButton->setAccessibleName(tr("Show in its own window"));
 	layout->addWidget(controls->popOutButton);
 
 	connect(controls->popOutButton, &QToolButton::clicked, this, [this, senderSession, streamID]() {
@@ -2662,6 +2691,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 	controls->fullscreenButton->setAutoRaise(true);
 	controls->fullscreenButton->setText(QStringLiteral("⛶"));
 	controls->fullscreenButton->setToolTip(tr("Fullscreen"));
+	controls->fullscreenButton->setAccessibleName(tr("Fullscreen"));
 	layout->addWidget(controls->fullscreenButton);
 
 	connect(controls->fullscreenButton, &QToolButton::clicked, this, [this, key]() {

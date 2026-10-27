@@ -115,6 +115,7 @@ private slots:
 	void tilesOutsideTheSurfaceBoundAreRefused();
 	void aVp8StreamIsDecoded();
 	void unitsForAnUnannouncedStreamAreDropped();
+	void aWholeFrameAwayFromTheOriginIsRefused();
 	void anUnknownCodecIsDropped();
 	void aSenderKeepsItsNameAcrossANewStream();
 	void aStuckDecoderAsksForAKeyframe();
@@ -498,6 +499,40 @@ void TestVideoGrid::aVp8StreamIsDecoded() {
 
 	VideoGrid grid;
 	deliverFrame(grid, units, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	QCOMPARE(grid.senderCount(), 1);
+	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));
+}
+
+// x and y come off the wire. For a whole-frame codec the frame covers the surface, so the only
+// legitimate value is the origin - and anything else is not merely wrong, it is expensive: the frame
+// gets painted into a canvas grown to fit the claimed position, which at the surface bound is 33 MB
+// held and a full-frame copy on the GUI thread for every frame of the share. One unvalidated field.
+void TestVideoGrid::aWholeFrameAwayFromTheOriginIsRefused() {
+	VpxEncoder encoder;
+	encoder.setBitrate(600);
+	encoder.setFramerate(30);
+
+	SyntheticVideoSource source(128, 128);
+	source.setChangeRatio(100);
+
+	const std::vector< EncodedVideoUnit > units = encoder.encode(source.render(0), STREAM, 0, 0, true);
+	QVERIFY(!units.empty());
+
+	VideoGrid grid;
+	announce(grid, SENDER, STREAM, MumbleProto::VideoState_Codec_VP8);
+
+	const QByteArray payload(reinterpret_cast< const char * >(units[0].payload.data()),
+							 static_cast< int >(units[0].payload.size()));
+
+	// The same frame the previous test decodes, claiming to belong at 1920,1080.
+	grid.onVideoUnitReceived(SENDER, STREAM, 0, true, 1920, 1080, payload);
+
+	QCOMPARE(grid.senderCount(), 0);
+	QVERIFY(grid.surfaceFor(SENDER, STREAM).isNull());
+
+	// And the surface is not left poisoned: the same stream still works once a well-formed unit arrives.
+	grid.onVideoUnitReceived(SENDER, STREAM, 1, true, 0, 0, payload);
 
 	QCOMPARE(grid.senderCount(), 1);
 	QCOMPARE(grid.surfaceFor(SENDER, STREAM).size(), QSize(128, 128));

@@ -6,8 +6,9 @@
 #ifndef MUMBLE_MUMBLE_STREAMVOLUMESLIDER_H_
 #define MUMBLE_MUMBLE_STREAMVOLUMESLIDER_H_
 
+#include "widgets/SemanticSlider.h"
+
 #include <QtCore/QRect>
-#include <QtWidgets/QSlider>
 
 /**
  * The volume slider on a screen share - on its tile, and on the bar in fullscreen and picture-in-picture.
@@ -25,12 +26,20 @@
  *
  * Only the left button does this. The middle and right buttons are left to QSlider, which ignores them, so a
  * right-click still reaches the tile underneath for its context menu.
+ *
+ * It derives from SemanticSlider so that a screen reader is told "150%" rather than "150" - the number on
+ * its own means nothing without the scale, and this one goes to 200. setLevelText() keeps that in step
+ * with the label beside it.
  */
-class StreamVolumeSlider : public QSlider {
+class StreamVolumeSlider : public SemanticSlider {
 	Q_OBJECT
 	Q_DISABLE_COPY(StreamVolumeSlider)
 public:
 	explicit StreamVolumeSlider(QWidget *parent = nullptr);
+
+	/// What a screen reader should read out for the current level, e.g. "150%". Set alongside the visible
+	/// label, so the two cannot drift apart.
+	void setLevelText(const QString &text);
 
 	/**
 	 * The value a press at @p x lands on, as a pure function of the geometry - the arithmetic of

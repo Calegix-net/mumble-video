@@ -9,7 +9,10 @@
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QStyleOptionSlider>
 
-StreamVolumeSlider::StreamVolumeSlider(QWidget *parent) : QSlider(Qt::Horizontal, parent) {
+StreamVolumeSlider::StreamVolumeSlider(QWidget *parent) : SemanticSlider(parent) {
+	// SemanticSlider's constructor takes no orientation, so it is set here rather than passed up.
+	setOrientation(Qt::Horizontal);
+
 	// The pointer is the only way to move this - the bar it lives on is revealed by hover and takes no
 	// keyboard focus - so say so, rather than leaving an arrow cursor that suggests nothing happens here.
 	setCursor(Qt::PointingHandCursor);
@@ -17,6 +20,10 @@ StreamVolumeSlider::StreamVolumeSlider(QWidget *parent) : QSlider(Qt::Horizontal
 	// Tracking is what makes the picture follow the drag instead of jumping when the button comes up.
 	// It is QSlider's default; set anyway, because everything else about this class depends on it.
 	setTracking(true);
+}
+
+void StreamVolumeSlider::setLevelText(const QString &text) {
+	m_semanticValue = text;
 }
 
 int StreamVolumeSlider::valueForPosition(int x, const QRect &groove, int handleWidth, int minimum, int maximum,
