@@ -297,6 +297,45 @@ CORE_TEST(reKeyingWithTheSameKeyKeepsTheSequence) {
 	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
 }
 
+// A plaintext OCB2 counter-cryptanalysis objects to is refused, not quietly altered.
+//
+// ocb_encrypt's default behaviour when the second-to-last block is fifteen zero bytes is to flip one
+// plaintext bit and fold the flip into the checksum, so the tag verifies against something the sender
+// did not send. Audio accepts that; video must not, because a silently altered compressed frame or
+// fragment header is not the same kind of harmless as an inaudible bit. MumbleFuzzcrypt found this by
+// breaking its own round-trip invariant.
+CORE_TEST(videoRefusesAPlaintextItCannotSendIntact) {
+	VideoCryptState sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	// 40 bytes, so ocb_encrypt examines the block starting at byte 16. Fifteen zeros there is the
+	// condition; the first byte is the message type, which is why a short plaintext cannot trigger it.
+	Bytes trigger(40, 0x5A);
+	trigger[0] = static_cast< byte >(UDPMessageType::Video);
+	for (std::size_t i = 16; i < 31; i++) {
+		trigger[i] = 0;
+	}
+
+	Bytes datagram;
+	CHECK(!sender.encrypt(trigger, datagram));
+	// Refused means nothing to send, rather than a datagram holding something else.
+	CHECK(datagram.empty());
+	// And the state is still usable afterwards: a refusal is not a broken connection.
+	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
+
+	// The invariant the fuzzer asserts, stated here as well: whatever does encrypt round-trips exactly.
+	Bytes ordinary(40, 0x5A);
+	ordinary[0] = static_cast< byte >(UDPMessageType::Video);
+	CHECK(sender.encrypt(ordinary, datagram));
+
+	Bytes out;
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK_EQ(out.size(), ordinary.size());
+	CHECK(out == ordinary);
+}
+
 // The receive half of the same thing: a repeat must not clear the replay window, or every datagram the
 // peer has already sent becomes acceptable again.
 CORE_TEST(reKeyingWithTheSameKeyKeepsTheReplayWindow) {

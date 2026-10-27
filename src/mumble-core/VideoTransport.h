@@ -157,9 +157,13 @@ namespace Protocol {
 		/**
 		 * Encrypts one plaintext into a complete datagram, ready for sendto().
 		 *
-		 * @returns false if the plaintext is too large, the state is not keyed, or the sequence space is
-		 *   exhausted. Exhaustion is not silently ignored: reusing a nonce would be a real break, so the
-		 *   state refuses to encrypt and the caller must rekey.
+		 * @returns false if the plaintext is too large, the state is not keyed, the sequence space is
+		 *   exhausted, or the plaintext is one of the rare shapes OCB2's counter-cryptanalysis rejects.
+		 *   Exhaustion is not silently ignored: reusing a nonce would be a real break, so the state
+		 *   refuses to encrypt and the caller must rekey. The counter-cryptanalysis case is a refusal
+		 *   here rather than the plaintext-altering workaround audio uses - see the implementation - so a
+		 *   caller must treat false as "this fragment was not sent" and let retransmission deal with it,
+		 *   never as "sent, probably".
 		 */
 		bool encrypt(std::span< const byte > plaintext, std::vector< byte > &datagram);
 

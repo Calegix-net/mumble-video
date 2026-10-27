@@ -150,8 +150,30 @@ namespace Protocol {
 
 		unsigned char tag[AES_BLOCK_SIZE];
 
+		// modifyPlainOnXEXStarAttack = false: video refuses to send such a packet rather than altering it.
+		//
+		// ocb_encrypt carries the counter-cryptanalysis from eprint 2019/311. When the plaintext's
+		// second-to-last block is fifteen zero bytes, the construction is attackable, and the default
+		// behaviour is to flip one bit of the plaintext and fold the same flip into the checksum. The tag
+		// then verifies against the altered plaintext, so the receiver cannot tell: it gets a packet that
+		// authenticates perfectly and differs from what was sent.
+		//
+		// For audio that was a considered trade - upstream notes digital silence produces such packets in
+		// quantity, and one bit in an Opus frame is inaudible. Video is not audio. A flipped bit lands in
+		// a compressed bitstream or in the Protobuf header of a fragment, where it is a silent
+		// corruption rather than a glitch nobody hears, and silent corruption is the wrong failure mode
+		// for a layer whose job is integrity. Refusing means the fragment is simply not sent, which the
+		// transport already has an answer for: the receiver notices the gap and asks for it again.
+		//
+		// Reachability is low and worth stating so nobody reads more into this than it deserves. The
+		// first plaintext byte is UDPMessageType::Video, which is 2, so for any plaintext of 17 to 32
+		// bytes the block examined is the one holding that byte and the condition cannot fire. It takes a
+		// plaintext over 32 bytes with fifteen zero bytes in exactly the second-to-last block, which
+		// compressed video and JPEG essentially never produce. A sender also only ever corrupts its own
+		// stream this way, so there is no attack here - which is why this refuses rather than being
+		// treated as urgent. It was found by MumbleFuzzcrypt, whose round-trip invariant it broke.
 		if (!m_ocb.ocb_encrypt(plaintext.data(), datagram.data() + VIDEO_HEADER_SIZE,
-							   static_cast< unsigned int >(plaintext.size()), nonce, tag)) {
+							   static_cast< unsigned int >(plaintext.size()), nonce, tag, false)) {
 			datagram.clear();
 
 			return false;
