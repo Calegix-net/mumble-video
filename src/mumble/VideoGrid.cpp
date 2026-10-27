@@ -45,27 +45,19 @@
 
 static QWidget *makeTileControlStrip(QWidget *parent);
 
-/**
- * The speaker icon for a stream at the given level, from a pair built once per style rather than per call.
- *
- * QStyle::standardIcon() is not a lookup; it builds a QIcon, and on some styles rasterises it. The level
- * label and this icon are refreshed together on every value the slider passes through, which during a drag
- * is every few pixels, on the GUI thread that is also decoding and painting video. Two icons for the two
- * states it can be in cost one build each for the life of the process.
- */
-static const QIcon &volumeIcon(QStyle *style, bool muted) {
-	static QIcon loud;
-	static QIcon silent;
-	static QStyle *builtWith = nullptr;
-
-	// Rebuilt if the theme changed under us, which is what swaps the QStyle instance.
-	if (builtWith != style) {
-		loud      = style->standardIcon(QStyle::SP_MediaVolume);
-		silent    = style->standardIcon(QStyle::SP_MediaVolumeMuted);
-		builtWith = style;
-	}
-
-	return muted ? silent : loud;
+/// The two speaker icons a stream's level can be drawn with, loud first.
+///
+/// Built once per control bar and held by it, rather than asked for on every value the slider passes
+/// through. QStyle::standardIcon() is not a lookup - it builds a QIcon and on some styles rasterises it -
+/// and the level is refreshed on every few pixels of a drag, on the GUI thread that is also decoding and
+/// painting video.
+///
+/// Deliberately not a function-local static pair. A static QIcon is destroyed after QApplication, and
+/// destroying the pixmaps inside one at that point is the classic Qt shutdown crash; this class has
+/// already produced two crashes of that family and does not need a third. QIcon is refcounted, so a copy
+/// per bar costs a pointer.
+static std::pair< QIcon, QIcon > volumeIcons(QStyle *style) {
+	return { style->standardIcon(QStyle::SP_MediaVolume), style->standardIcon(QStyle::SP_MediaVolumeMuted) };
 }
 
 namespace {
@@ -527,6 +519,7 @@ private:
 		m_muteButton->setIconSize(QSize(20, 20));
 		m_muteButton->setFocusPolicy(Qt::NoFocus);
 		m_muteButton->setAccessibleName(tr("Mute this stream"));
+		m_volumeIcons = volumeIcons(style());
 		layout->addWidget(m_muteButton);
 
 		m_volumeSlider = new StreamVolumeSlider(m_controls);
@@ -644,7 +637,7 @@ private:
 
 		if (m_shownAsMuted != muted) {
 			m_shownAsMuted = muted;
-			m_muteButton->setIcon(volumeIcon(style(), muted));
+			m_muteButton->setIcon(muted ? m_volumeIcons.second : m_volumeIcons.first);
 			m_muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
 		}
 	}
@@ -694,6 +687,9 @@ private:
 	/// What the speaker button is currently drawn as - see showLevel(), which only touches the icon when
 	/// this disagrees with the level. Starts as neither, so the first level sets it whichever way it goes.
 	std::optional< bool > m_shownAsMuted;
+
+	/// Loud and muted, built when the bar is built. See volumeIcons().
+	std::pair< QIcon, QIcon > m_volumeIcons;
 
 	/// Which presentation is showing. Fullscreen is the default, so the existing fullscreen button
 	/// behaves exactly as it did before the pop-out existed.
@@ -2621,7 +2617,11 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 		// volumeBeforeMute is, and for the same reason.
 		auto shownAsMuted = std::make_shared< std::optional< bool > >();
 
-		const auto showLevel = [this, muteButton, label, slider, shownAsMuted](int value) {
+		// Captured by value: QIcon is refcounted, and the pair must outlive this bar's widgets, which can
+		// be waiting on deleteLater() after the TileControlBar holding them is gone.
+		const std::pair< QIcon, QIcon > icons = volumeIcons(style());
+
+		const auto showLevel = [this, muteButton, label, slider, shownAsMuted, icons](int value) {
 			const QString level = tr("%1%").arg(value);
 			label->setText(level);
 			slider->setLevelText(level);
@@ -2630,7 +2630,7 @@ std::unique_ptr< VideoGrid::TileControlBar > VideoGrid::makeRemoteControlBar(uns
 
 			if (*shownAsMuted != muted) {
 				*shownAsMuted = muted;
-				muteButton->setIcon(volumeIcon(style(), muted));
+				muteButton->setIcon(muted ? icons.second : icons.first);
 				muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
 			}
 		};
