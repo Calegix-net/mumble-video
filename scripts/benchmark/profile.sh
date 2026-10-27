@@ -88,13 +88,34 @@ fi
 say "both running; settling"
 sleep 8
 
-# -g for call graphs; dwarf unwinding because Qt and FFmpeg are built without frame pointers, and
-# without it every stack stops at the first library.
+# How the stacks get unwound, which is not a free choice.
+#
+# --call-graph dwarf is the obvious answer, because it needs nothing of the binary under test. It is
+# also silently useless on a perf built without libunwind and libdw, which is what the WSL2 kernel
+# ships: perf accepts the option, records the stack bytes faithfully, and then unwinds none of them.
+# The flat report looks completely normal. Every call graph comes back empty, and the only hint is a
+# one-line warning you see solely if you ask for a graph. Two profiling runs were wasted on this.
+#
+# Frame-pointer unwinding is done by the kernel, so it works with any perf at all. The price is that
+# the binary must have frame pointers, which an -O2 build does not by default, so MUMBLE_BUILD has to
+# point at a build configured with -fno-omit-frame-pointer. Without that the stacks come back one or
+# two frames deep - which the check after the reports will tell you about rather than leaving you to
+# notice.
+#
+# MV_CALL_GRAPH=dwarf restores the other behaviour on a host whose perf can unwind it.
+CALL_GRAPH="${MV_CALL_GRAPH:-fp}"
+
+if ! grep -q "fno-omit-frame-pointer" "$MUMBLE_BUILD/CMakeCache.txt" 2>/dev/null && [ "$CALL_GRAPH" = "fp" ]; then
+    say "warning: $MUMBLE_BUILD was not configured with -fno-omit-frame-pointer, so frame-pointer"
+    say "         stacks will be shallow. Configure a build with it, or set MV_CALL_GRAPH=dwarf if"
+    say "         this host's perf can unwind DWARF."
+fi
+
 for pair in "sender:$SENDER_PID" "receiver:$RECEIVER_PID"; do
     name="${pair%%:*}"
     pid="${pair##*:}"
-    say "profiling $name ($pid) for ${SECONDS_TOTAL}s"
-    perf record -F 499 -g --call-graph dwarf,16384 -p "$pid" -o "$OUT/$name.data" \
+    say "profiling $name ($pid) for ${SECONDS_TOTAL}s, call graph $CALL_GRAPH"
+    perf record -F 499 -g --call-graph "$CALL_GRAPH" -p "$pid" -o "$OUT/$name.data" \
         -- sleep "$SECONDS_TOTAL" > "$OUT/$name.perf.log" 2>&1
     say "  perf record exit $?"
 done
@@ -115,6 +136,18 @@ for name in sender receiver; do
             { name_field = $2; sub(/\+0x[0-9a-f]+$/, "", name_field); f[++n] = name_field }
         ' | sort | uniq -c | sort -rn > "$OUT/$name.folded.txt"
     say "  $name: $(wc -l < "$OUT/$name.flat.txt") flat lines, $(wc -l < "$OUT/$name.folded.txt") unique stacks"
+done
+
+# A profile whose stacks are all one frame deep is a flat profile wearing a call graph's clothes. It
+# still answers "which library is hot" and it cannot answer "which of our call sites got us there",
+# so it should not be presented as if it could.
+for name in sender receiver; do
+    [ -f "$OUT/$name.folded.txt" ] || continue
+    deep=$(awk '$0 ~ /;/ { n++ } END { print n + 0 }' "$OUT/$name.folded.txt")
+    if [ "$deep" -eq 0 ]; then
+        say "warning: $name has no stack deeper than one frame; the call graph is empty. Treat"
+        say "         $name.flat.txt as the result and see the note above perf record."
+    fi
 done
 
 say "done; reports in $OUT"
