@@ -130,13 +130,26 @@ The harness runs a real server and two real clients, each on its own X server, i
 network namespace so that `tc netem` can shape the loopback without root. One client shares the mock
 desktop; the other watches it.
 
-It lives **outside this repository**, in `~/mv-bench/` on the Linux machine, because it carries client
-profiles with real certificates and a server database. The paths below are relative to that directory.
+It lives in [`scripts/benchmark/`](../scripts/benchmark). `setup-rig.sh` builds everything it needs
+from nothing - a server with a database, two client profiles with generated certificates, the mock
+desktop - so a contributor who has never seen the machine it was written on can reproduce any number
+in the changelog. `env.sh` holds every path and every default, and each one can be overridden from the
+environment. Its [README](../scripts/benchmark/README.md) explains why each part is built the way it
+is; read that rather than re-deriving it.
 
 ```sh
-run/setup-rig.sh                                  # once: server + two client profiles
-run/bench.sh <label> <seconds> <auto|vp9> clean loss2 delay100 bw2mbit bad
+scripts/benchmark/setup-rig.sh                    # once: server + two client profiles
+scripts/benchmark/bench.sh <label> <seconds> <auto|vp9> clean loss2 delay100 bw2mbit bad drop
 ```
+
+Runs land under `$MUMBLE_BENCH_WORK/out/<label>/`, which defaults to
+`~/.cache/mumble-video-bench/out`. The rig's working state stays out of the repository because it
+holds certificates and a server database.
+
+**A run asserts the commit it built, and you should trust nothing that does not.** One run silently
+measured a binary four commits stale - a fetch refspec without a leading `+`, an amended branch, a
+refused non-fast-forward fetch, and a checkout that quietly stayed put - and the afternoon spent
+investigating the quality regression it reported was spent on a bug that had already been fixed.
 
 Results land in `out/<label>/` as `summary.txt` (a table) and `results.json`. The scenarios are no
 impairment, 2% loss, 100 ms each way, a 2 Mbit/s cap, and all three at once.
@@ -157,9 +170,30 @@ What it reports, and where each number comes from:
 Two more scripts, for the questions a 40-second run cannot answer:
 
 ```sh
-run/profile.sh 25 out/profile    # perf, flat and folded stacks for sender and receiver
-run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per process
+scripts/benchmark/profile.sh 30 out/profile   # perf, flat and folded stacks for both ends
+scripts/benchmark/soak.sh 120 out/soak        # two hours, with a memory slope per process
 ```
+
+`profile.sh` records frame-pointer call graphs, which means **the build it profiles must be
+configured with `-fno-omit-frame-pointer`**, and `RelWithDebInfo` is a good choice for the rest:
+
+```sh
+cmake -S . -B build/profile -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_CXX_FLAGS=-fno-omit-frame-pointer -DCMAKE_C_FLAGS=-fno-omit-frame-pointer \
+      -Dtests=OFF -Dice=OFF -Doverlay=OFF -Dlto=OFF
+MUMBLE_BUILD=$PWD/build/profile scripts/benchmark/profile.sh 30 out/profile
+```
+
+DWARF unwinding would avoid that requirement, and `MV_CALL_GRAPH=dwarf` selects it, but only on a host
+whose `perf` was built against libunwind or libdw. One that was not - the WSL2 kernel's `perf`, for
+instance - accepts the option, records the stack bytes, unwinds none of them, and produces a flat
+profile that looks entirely normal beside a call graph that is silently empty. The script warns about
+both halves of this now; it did not always, and two profiling runs were lost to it.
+
+Expect most of either profile to be in libraries rather than in `mumble`: on a 1080p30 VP9 share,
+roughly a third of the sender is in Qt's image code and another third in libswscale, and nearly half
+the receiver is in libavcodec. Those are real findings, and the hexadecimal addresses beside them are
+simply what a system library without a debug package looks like.
 
 ## Add a feature
 
@@ -214,5 +248,10 @@ Kept here rather than in a stale issue tracker:
 - **No window sharing on the X11 fallback, and no region sharing through the portal.** No single
   Linux configuration offers both.
 - **The Windows CI job never runs a test.** It cross-compiles and uploads installers.
-- **No performance budget in CI.** Nothing measures latency, frame rate, CPU, memory or picture
-  quality, so a regression in any of them lands green.
+- **The performance budget in CI has never been seen to run.**
+  [`benchmark.yml`](../.github/workflows/benchmark.yml) builds the client, runs the rig and checks
+  `scripts/benchmark/budgets.json`, and every part of it is verified from an empty directory on a
+  machine that had never run it - but GitHub's runner is not, because Actions cannot be run from
+  there. Its header names the three places it is most likely to need a second attempt.
+- **Picture quality is not in the budget.** VMAF, PSNR and SSIM need a second run with frame dumping,
+  which roughly doubles the job; latency, frame rate, CPU and memory are checked, quality is not.

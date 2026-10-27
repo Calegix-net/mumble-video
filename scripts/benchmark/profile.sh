@@ -150,5 +150,34 @@ for name in sender receiver; do
     fi
 done
 
+# Names, where perf gives addresses. See resolve.py for why it has to be done outside perf; the short
+# version is that a perf built without libelf cannot read any symbol table at all and says nothing
+# about it. The per-library attribution in the flat report is the answer for the libraries, which have
+# no debug packages anyway; this is the answer for our own code, which is the part that can change.
+for name in sender receiver; do
+    [ -f "$OUT/$name.data" ] || continue
+    python3 "$(dirname "${BASH_SOURCE[0]}")/resolve.py" "$OUT/$name.data" "$MUMBLE_BUILD/mumble" \
+        --limit 15 > "$OUT/$name.ours.txt" 2>&1 \
+        || say "  $name: resolve.py failed; see $name.ours.txt"
+done
+
 say "done; reports in $OUT"
-head -40 "$OUT/sender.flat.txt" 2>/dev/null
+
+# What to read, in the order worth reading it. The flat report is per library and answers "where does
+# the time go"; the resolved report is per function of ours and answers "what of ours put it there".
+for name in sender receiver; do
+    [ -f "$OUT/$name.ours.txt" ] || continue
+    echo
+    echo "================ $name: by thread and library ================"
+    perf report -i "$OUT/$name.data" --stdio --no-children --sort comm,dso --percent-limit 1.0 \
+        2>/dev/null | grep -E '^ +[0-9]' | head -12
+    echo
+    echo "================ $name: our own functions ================"
+    cat "$OUT/$name.ours.txt"
+done
+
+# One thing to hold on to when reading the sender's numbers: the share the rig itself accounts for.
+# The sending client draws a synthetic desktop with QPainter rather than capturing a real one, so Qt's
+# image code is on the sender's profile for a reason that does not exist in production. The resolved
+# report names it - SyntheticVideoSource::render and renderScreenLike - and it is worth subtracting
+# before drawing any conclusion about the capture path.
