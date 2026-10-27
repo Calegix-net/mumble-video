@@ -30,6 +30,15 @@ namespace Protocol {
 
 	bool VideoCryptState::setKey(const std::string &key, const std::string &encryptNonceBase,
 								 const std::string &decryptNonceBase) {
+		// Whether this call re-installs the parameters already in force. Worked out before anything is
+		// overwritten, because the answer decides whether the sequence counter may restart.
+		const bool unchanged =
+			m_valid && key.size() == AES_KEY_SIZE_BYTES && m_ocb.getRawKey() == key
+			&& encryptNonceBase.size() == sizeof(m_encryptNonceBase)
+			&& decryptNonceBase.size() == sizeof(m_decryptNonceBase)
+			&& std::memcmp(m_encryptNonceBase, encryptNonceBase.data(), sizeof(m_encryptNonceBase)) == 0
+			&& std::memcmp(m_decryptNonceBase, decryptNonceBase.data(), sizeof(m_decryptNonceBase)) == 0;
+
 		m_valid = false;
 
 		if (key.size() != AES_KEY_SIZE_BYTES || encryptNonceBase.size() != sizeof(m_encryptNonceBase)
@@ -51,13 +60,37 @@ namespace Protocol {
 		std::memcpy(m_encryptNonceBase, encryptNonceBase.data(), sizeof(m_encryptNonceBase));
 		std::memcpy(m_decryptNonceBase, decryptNonceBase.data(), sizeof(m_decryptNonceBase));
 
-		m_nextSequence    = VIDEO_FIRST_SEQUENCE;
-		m_highestReceived = 0;
-		m_window.reset();
+		// Re-installing the same parameters must not restart the sequence, and this is the whole reason
+		// the comparison above exists.
+		//
+		// The nonce is the encrypt base followed by the sequence number, so for a fixed key the sequence
+		// is the entirety of the nonce's variability. Restarting it would encrypt new frames under nonces
+		// this state has already spent, and OCB does not merely weaken under nonce reuse: two ciphertexts
+		// sharing a nonce leak the XOR of their plaintexts, and the authentication tag stops being a
+		// forgery barrier at all. Video frames share header structure, so that XOR is close to plaintext.
+		//
+		// deriveFromSessionKey() makes this reachable rather than theoretical, because its output is a
+		// pure function of the session key: anything that delivers the same session key twice - a peer
+		// re-sending CryptSetup, through a bug or otherwise - lands here with every parameter identical.
+		// Audio does not have the problem, since there the peer supplies fresh random IVs and a repeat is
+		// a new nonce; video derives its base, so the sequence is the only thing standing between a
+		// redundant re-key and a total break.
+		//
+		// Keeping the counter where it is makes a redundant re-key harmless. A genuinely different key
+		// still gets a fresh counter, which is correct: that key's nonce space is untouched.
+		//
+		// The replay window is held for the same reason. Clearing it would re-admit every datagram the
+		// peer has already sent under this key, which is a replay window that has stopped preventing
+		// replay.
+		if (!unchanged) {
+			m_nextSequence    = VIDEO_FIRST_SEQUENCE;
+			m_highestReceived = 0;
+			m_window.reset();
 
-		m_replays      = 0;
-		m_tooOld       = 0;
-		m_authFailures = 0;
+			m_replays      = 0;
+			m_tooOld       = 0;
+			m_authFailures = 0;
+		}
 
 		m_valid = true;
 

@@ -263,6 +263,65 @@ CORE_TEST(videoReceiverPacesRetransmissionRequests) {
 	CHECK_EQ(later.packetsToSend.size(), VideoReceiver::MAX_NACK_MESSAGES_PER_SECOND);
 }
 
+// Re-delivering the session key must not restart the sequence counter.
+//
+// The nonce is the derived base followed by the sequence, and the base is a pure function of the key, so
+// a restart under an unchanged key would encrypt new frames under nonces already spent. For OCB that is
+// not a weakened mode, it is a broken one. The client re-derives on any CryptSetup carrying a key, so
+// this is reachable from the wire rather than hypothetical.
+CORE_TEST(reKeyingWithTheSameKeyKeepsTheSequence) {
+	VideoCryptState sender;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes first;
+	for (int i = 0; i < 10; i++) {
+		CHECK(sender.encrypt(plaintext, first));
+	}
+
+	const std::uint32_t reached = sender.nextSequence();
+	CHECK_EQ(reached, VIDEO_FIRST_SEQUENCE + 10);
+
+	// The same session key again, exactly as a repeated CryptSetup delivers it.
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK_EQ(sender.nextSequence(), reached);
+
+	// And the nonce really is fresh: the next datagram carries a sequence no earlier datagram used.
+	Bytes next;
+	CHECK(sender.encrypt(plaintext, next));
+	CHECK_EQ(next[VIDEO_SEQUENCE_OFFSET + 3], static_cast< byte >(reached & 0xFF));
+
+	// A genuinely different key is a different nonce space, so there the restart is correct.
+	CHECK(sender.deriveFromSessionKey("fedcba9876543210", false));
+	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
+}
+
+// The receive half of the same thing: a repeat must not clear the replay window, or every datagram the
+// peer has already sent becomes acceptable again.
+CORE_TEST(reKeyingWithTheSameKeyKeepsTheReplayWindow) {
+	VideoCryptState server;
+	VideoCryptState client;
+	CHECK(server.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(client.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	CHECK(server.encrypt(plaintext, datagram));
+
+	Bytes out;
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Replay);
+
+	// Re-key with the same key, then offer that same datagram once more.
+	CHECK(client.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Replay);
+
+	// A different key resets the window, which is right - but it also cannot decrypt the old datagram.
+	CHECK(client.deriveFromSessionKey("fedcba9876543210", false));
+	CHECK_EQ(client.highestReceived(), 0u);
+}
+
 // The public API end to end, against a server played by the core's own server-side pieces.
 CORE_TEST(mediaSessionTalksToAServer) {
 	CryptStateOCB2 serverAudio;

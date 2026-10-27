@@ -123,6 +123,12 @@ namespace Protocol {
 		 *
 		 * The two bases must differ, or the two directions would reuse nonces under the same key, which
 		 * is fatal for OCB. This is checked.
+		 *
+		 * Calling this again with the key and both bases already in force keeps the sequence counter and
+		 * the replay window exactly as they are, rather than restarting them. For a fixed key the
+		 * sequence is the whole of the nonce, so restarting it would spend nonces twice - see the
+		 * implementation for why that is a break rather than a weakness. A different key does restart
+		 * both, which is correct, its nonce space being untouched.
 		 */
 		bool setKey(const std::string &key, const std::string &encryptNonceBase, const std::string &decryptNonceBase);
 
@@ -135,6 +141,11 @@ namespace Protocol {
 		 * byte rolls, video's is a 12-byte base plus a counter - and for OCB a nonce collision is a total
 		 * break, not a weakness. Hashing with a distinct label per purpose keeps the two key streams
 		 * independent, and gives each direction its own nonce base as setKey requires.
+		 *
+		 * Because the result is a pure function of the session key, calling this twice with the same
+		 * session key reproduces the same key and the same nonce bases. setKey() is what makes that
+		 * safe: it recognises the repeat and leaves the sequence counter alone. A caller must not
+		 * reimplement the derivation and install it some other way.
 		 *
 		 * @param sessionKey The raw AES key from CryptSetup.
 		 * @param isServer Which end this is, so the two ends pick opposite nonce bases.
