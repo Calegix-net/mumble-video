@@ -130,6 +130,12 @@ public:
 	/// refuses what exceeds its bound rather than scaling it.
 	static constexpr int MAX_ENCODED_WIDTH  = 3840;
 	static constexpr int MAX_ENCODED_HEIGHT = 2160;
+	// "They must agree" is now enforced rather than asked for. The decoders refuse a frame larger than
+	// MAX_DECODED_FRAME_WIDTH, so raising the send cap without raising that one would make this client
+	// produce streams that other copies of itself drop in silence.
+	static_assert(MAX_ENCODED_WIDTH <= static_cast< int >(MAX_DECODED_FRAME_WIDTH)
+					  && MAX_ENCODED_HEIGHT <= static_cast< int >(MAX_DECODED_FRAME_HEIGHT),
+				  "the encoder may not produce a frame the decoders are built to refuse");
 	/// A VP9 screen share is scaled to fit 2560x1440. At the bitrates a home uplink carries, more pixels
 	/// do not make text sharper - they make every frame softer - and a 4K keyframe could exceed the
 	/// transport's largest unit (VideoFragmenter::maxUnitSize(), about 275 KB).

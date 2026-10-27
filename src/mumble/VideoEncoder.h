@@ -13,6 +13,27 @@
 #include <cstdint>
 #include <vector>
 
+// Largest decoded frame any receiver here will convert or display.
+//
+// A decoded frame is sized by the bitstream, not by anything the receiver chose, and the bitstream
+// comes from the network. VP9 carries its dimensions as two 16-bit fields and H.264 is no more modest,
+// so a few hundred bytes of solid-colour keyframe can declare 16384 by 16384: 400 MB of I420 inside
+// libvpx, then a 1 GB RGB32 image here, held for as long as the stream lives and smooth-scaled into a
+// grid cell on the GUI thread at every repaint. Neither decoder checked an upper bound - VpxDecoder
+// checked only that a frame came back, H264Decoder only that its dimensions were above zero - so the
+// ceiling was whatever the two libraries would agree to allocate.
+//
+// 3840 by 2160 because that is already the limit on both sides of this: VideoBroadcaster scales any
+// larger capture down before encoding (MAX_ENCODED_WIDTH, same numbers), and VideoGrid refuses a tile
+// that would grow a surface past MAX_SURFACE_WIDTH. A conforming sender therefore never produces a
+// frame this rejects, which is what makes it safe to reject rather than clamp: anything bigger did not
+// come from this software.
+//
+// Kept here rather than in either decoder because both need it and neither should depend on the other,
+// and deliberately not in VideoGrid.h, which a codec has no business including.
+constexpr unsigned int MAX_DECODED_FRAME_WIDTH  = 3840;
+constexpr unsigned int MAX_DECODED_FRAME_HEIGHT = 2160;
+
 /**
  * One encoded video unit, ready to hand to Mumble::Protocol::VideoFragmenter.
  */
