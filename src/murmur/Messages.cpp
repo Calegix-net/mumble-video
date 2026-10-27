@@ -2613,6 +2613,28 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	msg.set_session(uSource->uiSession);
 
+	// source_name is a label - a window title, a monitor name, a camera name - and purely
+	// informational: nothing on the receiving side reads it. Nothing bounded it either, so the only
+	// ceiling was the 8 MB control frame limit. One sender holding MAX_STREAMS_PER_SENDER streams could
+	// therefore park tens of megabytes of server memory in m_videoAnnouncements, have every byte of it
+	// re-serialised to every user permitted to see the stream, and have the whole lot replayed to each
+	// client that connected afterwards.
+	//
+	// Truncated rather than refused: an over-long label is not a reason to stop someone sharing their
+	// screen. The cut is moved back off any UTF-8 continuation byte, because a string chopped through
+	// the middle of a character is not valid UTF-8 and a proto2 string field is supposed to be.
+	if (msg.has_source_name() && msg.source_name().size() > MAX_VIDEO_SOURCE_NAME_BYTES) {
+		std::string name = msg.source_name();
+		std::size_t cut  = MAX_VIDEO_SOURCE_NAME_BYTES;
+
+		while (cut > 0 && (static_cast< unsigned char >(name[cut]) & 0xC0) == 0x80) {
+			cut--;
+		}
+
+		name.resize(cut);
+		msg.set_source_name(name);
+	}
+
 	const auto streamKey =
 		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
 

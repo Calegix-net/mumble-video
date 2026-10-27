@@ -866,7 +866,13 @@ message VideoState {
 	optional Codec codec = 4 [default = CODEC_UNKNOWN];
 	optional SourceKind source_kind = 5 [default = SOURCE_UNKNOWN];
 	// Human readable description of the source (camera name, monitor name, window title, application
-	// name). Purely informational. Subject to the server's ServerConfig.message_length limit.
+	// name). Purely informational; no receiver is required to read it, and this fork's client does not.
+	//
+	// The server truncates it to 512 bytes, on a UTF-8 character boundary, before storing or relaying
+	// it. Senders should not rely on more surviving. This is not the message_length limit the comment
+	// here used to claim: that limit was never applied to this field, which left the 8 MB control frame
+	// limit as the only bound on a string the server retains per stream and replays to every client
+	// that connects later.
 	optional string source_name = 6;
 
 	// Nominal frame dimensions in pixels. Advisory: receivers must still cope with the decoder

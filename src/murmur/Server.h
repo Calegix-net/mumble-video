@@ -213,6 +213,11 @@ public:
 	/// on the server was announced to every user on it, whichever room either of them was in.
 	bool mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession);
 
+	/// Longest VideoState.source_name the server will store and relay. It is a window title or a device
+	/// name, so this is generous; what it exists to stop is a sender parking megabytes of server memory
+	/// in an informational field that no receiver reads. Enforced in msgVideoState by truncation.
+	static constexpr std::size_t MAX_VIDEO_SOURCE_NAME_BYTES = 512;
+
 	/// Whether this stream carries Opus audio rather than a picture, according to the codec its sender
 	/// announced in VideoState. A stream nobody has announced reads as not carrying audio.
 	///
