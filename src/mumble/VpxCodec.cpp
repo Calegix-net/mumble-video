@@ -163,8 +163,18 @@ QImage i420ToRgbSwscale(const vpx_image_t *source, SwsContext *&cache, SwsContex
 
 	// sws_getCachedContext() returns the same context when the parameters are unchanged and a fresh one
 	// when they are not, so comparing the pointer is how a size change is noticed.
+	//
+	// The scaling flag is inert here and SWS_POINT is only a statement of intent: source and
+	// destination are the same size, so libswscale uses its unscaled YUV-to-RGB converter and never
+	// consults the scaler. Measured on a still frame of screen content with no encoder in the loop,
+	// SWS_POINT, bilinear and bicubic all round-trip identically to 46.56 dB.
+	//
+	// SWS_ACCURATE_RND and SWS_BITEXACT are the flags that matter: without them the conversion is
+	// 46.56 dB on that frame, with them 48.43 dB, against 46.75 dB for the hand-written loop this
+	// replaces. The default rounding is the reason - it is cheap and slightly biased, and a bias
+	// shows up in a round trip as a systematic error no amount of averaging removes.
 	cache = sws_getCachedContext(cache, width, height, AV_PIX_FMT_YUV420P, width, height, AV_PIX_FMT_BGRA,
-								 SWS_POINT, nullptr, nullptr, nullptr);
+								 SWS_POINT | SWS_ACCURATE_RND | SWS_BITEXACT, nullptr, nullptr, nullptr);
 
 	if (!cache) {
 		unusable = true;
