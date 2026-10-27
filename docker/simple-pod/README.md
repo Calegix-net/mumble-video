@@ -4,6 +4,13 @@ A self-contained image for the [mumble-video](https://github.com/Calegix-net/mum
 No compiling: it downloads the project's official prebuilt server (v1.10.0), verifies its checksum,
 and writes a working config on first start.
 
+## (optional) Download extract these files:
+
+```bash
+wget https://github.com/dawgydawgydawg/mumble-video/blob/readme/docker/simple-pod/mumble-video-container.tar.gz
+tar xzvf mumble-video-container.tar.gz
+```
+
 ## 1. Build the image (about a minute)
 
 Put `Containerfile` and `entrypoint.sh` in one folder, then from that folder:
