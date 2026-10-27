@@ -38,6 +38,10 @@ else()
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 	option(MUMBLE_CORE_TESTS "Build the core tests." ${PROJECT_IS_TOP_LEVEL})
+	# Off by default because it needs clang, and because fuzzing for the few seconds a build has is
+	# worth nothing. Off, the fuzz targets are still built and still run - as replayers over the
+	# committed corpus. See fuzz/CMakeLists.txt.
+	option(MUMBLE_CORE_FUZZERS "Build the fuzz targets as libFuzzer fuzzers rather than corpus replayers." OFF)
 	# Pre-1.5 servers and clients speak a UDP format of their own, encoded with PacketDataStream. The
 	# desktop always keeps it; a host that only ever talks to current servers can leave it out.
 	option(MUMBLE_CORE_LEGACY_UDP "Support the legacy (pre-Protobuf) UDP format." ON)
@@ -176,4 +180,7 @@ endif()
 
 if(MUMBLE_CORE_TESTS)
 	add_subdirectory(tests)
+	# Built with the tests, because by default they are tests: replayers for the corpus of inputs that
+	# have broken a network parser before. MUMBLE_CORE_FUZZERS turns the same sources into real fuzzers.
+	add_subdirectory(fuzz)
 endif()

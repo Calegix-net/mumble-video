@@ -95,6 +95,32 @@ Two things to know before adding a test:
   counter), `MUMBLE_VIDEO_STATS`, `MUMBLE_VIDEO_DUMP_TX`/`_RX`, and `mumble rpc sharescreen|watchall|…`
   to drive a client from a script.
 
+### Fuzz
+
+Three things read bytes a hostile peer chose: the reassembler, the video crypt state and the media
+demultiplexer. Each has a fuzz target in [`src/mumble-core/fuzz`](../src/mumble-core/fuzz), and on an
+ordinary build each one is compiled as a replayer that runs its committed corpus under `ctest` — so
+every input that has ever broken a parser is re-checked on every build, for milliseconds.
+
+To fuzz for real you need clang:
+
+```sh
+cmake -S src/mumble-core -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DMUMBLE_CORE_FUZZERS=ON
+cmake --build build-fuzz
+./build-fuzz/MumbleFuzzreassembly src/mumble-core/fuzz/corpus/reassembly -max_total_time=3600
+```
+
+**If you touch a wire format, regenerate the seeds** — they are produced by the real fragmenter, so
+stale seeds quietly stop being valid packets and the fuzzer goes back to failing the Protobuf parse a
+million times:
+
+```sh
+./build/tests/MumbleFuzzMakeSeeds src/mumble-core/fuzz/corpus
+```
+
+**If a fuzzer finds something, the input goes in the corpus** next to the seeds, renamed to say what
+it is. See [`corpus/README.md`](../src/mumble-core/fuzz/corpus/README.md).
+
 ## Benchmark
 
 **Measure before and after. A change to the pipeline that is not measured is not finished.**
@@ -155,7 +181,9 @@ run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per pro
    or a camera to test will not be tested.
 6. **Fuzz anything that parses the network.** `VideoReassembler::processPacket`,
    `VideoCryptState::decrypt`, `VideoReceiver::receive` and the server's `VideoNack` parse are the four
-   entry points for bytes someone else chose. None of them has a fuzz harness yet.
+   entry points for bytes someone else chose. The first two have targets, as does `MediaDemux` in front
+   of them; the other two do not yet. See [Fuzz](#fuzz) above for how to add one and why the corpus
+   matters more than the fuzzer.
 7. **Benchmark it**, as above, and put the before and after numbers in the commit message.
 8. **Say why, not what.** A comment that restates the code is noise; a comment explaining a
    trade-off, a workaround, a driver quirk or a measurement is what makes this code maintainable. Most
@@ -167,6 +195,11 @@ run/soak.sh 120 out/soak         # two hours, with a memory slope fitted per pro
 The repository's own history is the style guide. A video commit says what changed, **why** it was
 wrong before, what was measured, what was checked on the server side, and what is **not** verified.
 Claiming a test result you did not run is worse than claiming nothing.
+
+If the change is one a user would notice, add a line to [`CHANGELOG.md`](../CHANGELOG.md) under
+`Unreleased`, written for them rather than for us: what is different now, and the number if there is
+one. A changelog assembled from commit subjects at release time is how release notes come to say
+"refactor the frame path".
 
 ## What is known to be missing
 
