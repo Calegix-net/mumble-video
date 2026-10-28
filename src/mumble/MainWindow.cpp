@@ -870,6 +870,20 @@ static MumbleProto::VideoState_Codec announcedCodec(int codec) {
 	}
 }
 
+/// Sets VideoState.source_name for an announcement we are about to send - deliberately to nothing.
+///
+/// The name of a shared source is its window or application title, which is often sensitive: it reads
+/// "Firefox - Online Banking", "Signal - Mum", "Spotify" and the like. Today no receiving client ever
+/// displays it (the only reader is the server, which merely length-clamps and relays it), so putting it in
+/// the channel-wide VideoState announcement leaks it to everyone in the channel - watchers and
+/// non-watchers alike - and buys nothing. We therefore send no source name at all. Should a future
+/// "show what is being shared" feature want this label, it must relay it to that stream's subscribers
+/// only, never broadcast it channel-wide; centralising the decision here is what makes that a one-line
+/// change rather than a hunt through every announcement site.
+static void setPrivacySafeSourceName(MumbleProto::VideoState &) {
+	// Intentionally empty. See the comment above before adding anything here.
+}
+
 /// The codec a new screen share uses: H.264 when the settings allow it and a hardware encoder opens on this
 /// machine - the graphics card does the work, as with Discord's Go Live - and VP9 in its screen-content mode
 /// otherwise, which needs no graphics card and about half the bitrate for the same picture (see
@@ -911,7 +925,7 @@ void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKi
 	state.set_active(true);
 	state.set_codec(announcedCodec(broadcaster->codec()));
 	state.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
-	state.set_source_name(u8(broadcaster->describe()));
+	setPrivacySafeSourceName(state);
 	state.set_width(static_cast< unsigned int >(size.width()));
 	state.set_height(static_cast< unsigned int >(size.height()));
 	// Announce the replacement first so viewers can carry their watch choice across.
@@ -1129,7 +1143,7 @@ void MainWindow::setupScreenShare() {
 		state.set_active(true);
 		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(sourceKind);
-		state.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		setPrivacySafeSourceName(state);
 		state.set_width(static_cast< unsigned int >(frame.width()));
 		state.set_height(static_cast< unsigned int >(frame.height()));
 		Global::get().sh->sendMessage(state);
@@ -1278,7 +1292,7 @@ void MainWindow::toggleCameraShare(bool share) {
 	mpvs.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 	mpvs.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
 	mpvs.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
-	mpvs.set_source_name(u8(m_videoBroadcaster->describe()));
+	setPrivacySafeSourceName(mpvs);
 
 	Global::get().sh->sendMessage(mpvs);
 
@@ -1425,7 +1439,7 @@ void MainWindow::toggleScreenShare(bool share) {
 		state.set_active(true);
 		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
-		state.set_source_name(u8(description));
+		setPrivacySafeSourceName(state);
 		state.set_width(static_cast< unsigned int >(mockWidth));
 		state.set_height(static_cast< unsigned int >(mockHeight));
 		state.set_max_framerate(static_cast< unsigned int >(mockSettings.iScreenShareFramerate));
@@ -1728,7 +1742,7 @@ void MainWindow::toggleScreenShare(bool share) {
 			audioState.set_active(true);
 			audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 			audioState.set_source_kind(sourceKind);
-			audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+			setPrivacySafeSourceName(audioState);
 
 			Global::get().sh->sendMessage(audioState);
 		} else {
@@ -1743,7 +1757,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	videoState.set_active(true);
 	videoState.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 	videoState.set_source_kind(sourceKind);
-	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+	setPrivacySafeSourceName(videoState);
 
 	Global::get().sh->sendMessage(videoState);
 
@@ -1761,6 +1775,19 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		if (!sender) {
 			qWarning("MainWindow: screen-share audio unit for unknown session %u, dropped", senderSession);
 
+			return;
+		}
+
+		// Only decode audio for a stream this client actually subscribed to. The server is supposed to
+		// forward screen-share audio to subscribers alone, but that is the server's word for it; gating
+		// here on the client's own subscription set means a malicious or buggy server cannot make this
+		// client spin up an Opus decoder (and the resample buffers behind it) for a stream the user never
+		// chose to hear, nor exhaust memory by walking stream_id, since the number of live decoders is then
+		// bounded by the handful of streams the user is actually watching. A unit that arrives just after
+		// the user stopped watching - erased from the set in syncScreenShareAudioSubscription() - is
+		// dropped here too, which is exactly what stopping watching should do.
+		const std::uint64_t subscriptionKey = screenShareAudioKey(senderSession, streamID);
+		if (m_subscribedScreenAudio.find(subscriptionKey) == m_subscribedScreenAudio.end()) {
 			return;
 		}
 
@@ -1806,7 +1833,7 @@ void MainWindow::startScreenShareAudio(int sourceKind) {
 	audioState.set_active(true);
 	audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 	audioState.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
-	audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+	setPrivacySafeSourceName(audioState);
 
 	Global::get().sh->sendMessage(audioState);
 #else
@@ -5708,7 +5735,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		camera.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 		camera.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
 		camera.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
-		camera.set_source_name(u8(m_videoBroadcaster->describe()));
+		setPrivacySafeSourceName(camera);
 		Global::get().sh->sendMessage(camera);
 
 		m_videoBroadcaster->requestKeyframe();
@@ -5727,7 +5754,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 			audio.set_active(true);
 			audio.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 			audio.set_source_kind(sourceKind);
-			audio.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+			setPrivacySafeSourceName(audio);
 			Global::get().sh->sendMessage(audio);
 		}
 
@@ -5736,7 +5763,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		screen.set_active(true);
 		screen.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		screen.set_source_kind(sourceKind);
-		screen.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		setPrivacySafeSourceName(screen);
 		const QSize size = m_screenVideoBroadcaster->frameSize();
 		if (!size.isEmpty()) {
 			screen.set_width(static_cast< unsigned int >(size.width()));

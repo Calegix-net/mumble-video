@@ -1221,18 +1221,29 @@ void VideoGrid::flushPlayout() {
 		Surface &surface = entry.second;
 		auto &queue      = surface.playout.queue;
 
+		// Kept in step as frames are shown below, so the byte ceiling can be checked without re-summing the
+		// queue each iteration. The queue is small (bounded by the two caps), so the one-time sum is cheap.
+		std::size_t queuedBytes = 0;
+		for (const auto &q : queue) {
+			queuedBytes += static_cast< std::size_t >(q.second.image.sizeInBytes());
+		}
+
 		while (!queue.empty()) {
 			const auto front = queue.begin();
 
-			// Its time has come - or the queue is longer than any re-send can explain, and the oldest goes now
-			// rather than the picture falling further behind.
-			if (front->second.dueMsec > now && queue.size() <= MAX_PLAYOUT_QUEUE) {
+			// Its time has come - or the queue is longer, or heavier, than any re-send can explain, and the
+			// oldest goes now rather than the picture falling further behind or the buffered frames pinning
+			// an unbounded amount of memory (see MAX_PLAYOUT_QUEUE_BYTES).
+			if (front->second.dueMsec > now && queue.size() <= MAX_PLAYOUT_QUEUE
+				&& queuedBytes <= MAX_PLAYOUT_QUEUE_BYTES) {
 				nextDue = std::min(nextDue, front->second.dueMsec);
 				break;
 			}
 
 			const quint64 frameNumber               = front->first;
 			const Surface::Playout::Pending pending = front->second;
+			const std::size_t frameBytes            = static_cast< std::size_t >(pending.image.sizeInBytes());
+			queuedBytes -= std::min(queuedBytes, frameBytes);
 			queue.erase(front);
 
 			noteStatsPaint(surface, frameNumber);
@@ -2084,11 +2095,44 @@ void VideoGrid::onTiledImageTileDecoded(unsigned int senderSession, unsigned int
 	// N+1 landed first, and a region that had never been painted before stayed a black rectangle until
 	// the periodic refresh got round to it. Only a tile that a newer frame has actually painted at the
 	// same spot has anything to protect.
+	// Reject a tile that does not fit the surface before it can touch any per-position state. growToFit()
+	// in applyDecodedTile() already refuses these, but only after the watermark map below had recorded the
+	// position and the frame had been counted - so a sender walking x/y across the whole uint32 range
+	// could grow tileFrameNumbers without bound and inflate the frame counters, though not one of those
+	// tiles was ever painted. Same bound as growToFit(), checked so the additions cannot overflow.
+	const unsigned int maxSurfaceW = static_cast< unsigned int >(MAX_SURFACE_WIDTH);
+	const unsigned int maxSurfaceH = static_cast< unsigned int >(MAX_SURFACE_HEIGHT);
+	if (tile.width() <= 0 || tile.height() <= 0 || x > maxSurfaceW || y > maxSurfaceH
+		|| x + static_cast< unsigned int >(tile.width()) > maxSurfaceW
+		|| y + static_cast< unsigned int >(tile.height()) > maxSurfaceH) {
+		return;
+	}
+
 	const auto tileKey = (static_cast< std::uint64_t >(x) << 32) | y;
 	const auto painted = surface.tileFrameNumbers.find(tileKey);
 
 	if (painted != surface.tileFrameNumbers.end() && frameNumber < painted->second) {
 		return;
+	}
+
+	// Keep the per-position watermark map bounded. A conforming sender's working set stays well under the
+	// cap; a malicious one placing tiles at arbitrary sub-tile offsets would otherwise grow it without
+	// limit. A watermark only guards against a straggler still live in the reassembler (at most
+	// VIDEO_REASSEMBLY_TIMEOUT old), so once the map is full, entries far enough behind the newest frame
+	// are safe to drop; if that still leaves it full, reset outright - at worst a brief flicker of
+	// straggler protection on this one sender's surface.
+	if (painted == surface.tileFrameNumbers.end()
+		&& surface.tileFrameNumbers.size() >= MAX_TRACKED_TILE_POSITIONS) {
+		constexpr quint64 WATERMARK_PROTECT_WINDOW_FRAMES = 1024;
+		if (surface.lastFrameNumber > WATERMARK_PROTECT_WINDOW_FRAMES) {
+			const quint64 cutoff = surface.lastFrameNumber - WATERMARK_PROTECT_WINDOW_FRAMES;
+			for (auto it = surface.tileFrameNumbers.begin(); it != surface.tileFrameNumbers.end();) {
+				it = it->second < cutoff ? surface.tileFrameNumbers.erase(it) : std::next(it);
+			}
+		}
+		if (surface.tileFrameNumbers.size() >= MAX_TRACKED_TILE_POSITIONS) {
+			surface.tileFrameNumbers.clear();
+		}
 	}
 
 	surface.tileFrameNumbers[tileKey] = frameNumber;
@@ -3273,7 +3317,7 @@ void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector
 		return;
 	}
 
-	QStringList lines;
+	QStringList tipLines; // HTML-escaped copies of each line, for the rich-text tooltip below.
 	QMenu *menu = controls->viewersButton->menu();
 	menu->clear();
 
@@ -3281,7 +3325,7 @@ void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector
 		const QString line = viewer.volumePercent >= 0
 								 ? tr("%1 - hears you at %2%").arg(viewer.name).arg(viewer.volumePercent)
 								 : viewer.name;
-		lines << line;
+		tipLines << line.toHtmlEscaped();
 		// Enabled, though they do nothing: a disabled entry is greyed out and hard to read.
 		menu->addAction(line);
 	}
@@ -3291,8 +3335,18 @@ void VideoGrid::refreshViewersButton(TileControlBar *controls, const std::vector
 	}
 
 	controls->viewersButton->setText(QStringLiteral("👁 %1").arg(viewers.size()));
-	controls->viewersButton->setToolTip(viewers.empty() ? tr("Nobody is watching")
-														: tr("Watching:\n%1").arg(lines.join(QLatin1Char('\n'))));
+	// A viewer's display name is attacker-controlled. Left as a plain-text tooltip, Qt's rich-text
+	// autodetection would treat a name containing '<' as HTML - which not only breaks the layout but, for
+	// a name like "<img src=http://evil/x>", makes this (watched) user's client fetch an attacker URL the
+	// instant the tooltip appears, deanonymising them. Forcing rich text with an explicit <html> wrapper
+	// and HTML-escaping every name renders the names verbatim and inert; <br> replaces '\n' now that the
+	// tooltip is rich text.
+	if (viewers.empty()) {
+		controls->viewersButton->setToolTip(tr("Nobody is watching"));
+	} else {
+		controls->viewersButton->setToolTip(QStringLiteral("<html>%1<br>%2</html>")
+												.arg(tr("Watching:").toHtmlEscaped(), tipLines.join(QStringLiteral("<br>"))));
+	}
 }
 
 QString VideoGrid::ownWatcherBadge(bool screen) const {
