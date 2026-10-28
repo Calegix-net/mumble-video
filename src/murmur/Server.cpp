@@ -1649,10 +1649,24 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 			continue;
 		}
 
-		if (carriesAudio && !mayHearStreamAudio(recipient)) {
-			// Deafened, by themselves or by a moderator. A deafened user hears no voice and must hear
-			// no share audio either, whatever they have subscribed to.
-			continue;
+		if (carriesAudio) {
+			if (!mayHearStreamAudio(recipient)) {
+				// Deafened, by themselves or by a moderator. A deafened user hears no voice and must hear
+				// no share audio either, whatever they have subscribed to.
+				continue;
+			}
+
+			// Share audio is sound, so it obeys the same linked-channel Speak rule as voice. A listener in
+			// a channel other than the sender's is reachable only because the channels are linked and they
+			// may see the video (mayReceiveVideo checks Enter + ReceiveVideo in the sender's channel). Voice
+			// into a linked channel additionally requires the speaker to hold Speak there (see Server::run);
+			// without the same gate here, a user could route audio into a linked channel their voice could
+			// not reach. The sender's own channel needs no check: bSuppress already mirrors their Speak
+			// there, and mayTransmitStreamAudio() refused the stream above if it was unset.
+			if (recipient->cChannel != sender->cChannel
+				&& (!recipient->cChannel || !hasPermission(sender, recipient->cChannel, ChanACL::Speak))) {
+				continue;
+			}
 		}
 
 		sendVideoPlaintext(recipient, plaintext, outgoing);
