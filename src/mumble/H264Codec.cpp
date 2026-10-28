@@ -639,7 +639,12 @@ bool H264Decoder::decode(const QByteArray &accessUnit, QImage *image) {
 	while (avcodec_receive_frame(m_context, m_frame) == 0) {
 		const bool damaged = m_frame->decode_error_flags != 0 || (m_frame->flags & AV_FRAME_FLAG_CORRUPT) != 0;
 
-		decoded = !damaged && m_frame->width > 0 && m_frame->height > 0;
+		// The upper bounds matter as much as the lower ones: the frame's dimensions come from the
+		// bitstream, so they are network input. See MAX_DECODED_FRAME_WIDTH for what a frame declaring
+		// 16384 square would otherwise cost, and why refusing it cannot reject a conforming sender.
+		decoded = !damaged && m_frame->width > 0 && m_frame->height > 0
+				  && static_cast< unsigned int >(m_frame->width) <= MAX_DECODED_FRAME_WIDTH
+				  && static_cast< unsigned int >(m_frame->height) <= MAX_DECODED_FRAME_HEIGHT;
 
 		if (decoded && image) {
 			m_sws = sws_getCachedContext(m_sws, m_frame->width, m_frame->height,

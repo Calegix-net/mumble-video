@@ -15,6 +15,16 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${test-lto})
 # Set output directory
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
 
+# Qt's QTRY_* test macros expand their millisecond timeout as a chrono duration narrowed to int, which
+# -Wconversion rejects on newer gcc - which is what turned -Dwarnings-as-errors and -Dtests into an
+# either/or (every test using QTRY_COMPARE / QTRY_VERIFY_WITH_TIMEOUT failed to compile). The warning is
+# in Qt's own headers, not this project's test code, so it is demoted from an error for the whole test
+# tree here; product code keeps -Werror=conversion untouched because this applies only below src/tests.
+# Placed before the add_subdirectory() calls so it reaches every test target. gcc/clang only.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+	add_compile_options("-Wno-error=conversion")
+endif()
+
 if (static)
 	find_pkg(Qt6 VERSION 6 COMPONENTS Widgets REQUIRED)
 	if (NOT TARGET Qt6::QOffscreenIntegrationPlugin)

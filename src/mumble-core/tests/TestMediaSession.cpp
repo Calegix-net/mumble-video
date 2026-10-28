@@ -263,6 +263,292 @@ CORE_TEST(videoReceiverPacesRetransmissionRequests) {
 	CHECK_EQ(later.packetsToSend.size(), VideoReceiver::MAX_NACK_MESSAGES_PER_SECOND);
 }
 
+// Re-delivering the session key must not restart the sequence counter.
+//
+// The nonce is the derived base followed by the sequence, and the base is a pure function of the key, so
+// a restart under an unchanged key would encrypt new frames under nonces already spent. For OCB that is
+// not a weakened mode, it is a broken one. The client re-derives on any CryptSetup carrying a key, so
+// this is reachable from the wire rather than hypothetical.
+CORE_TEST(reKeyingWithTheSameKeyKeepsTheSequence) {
+	VideoCryptState sender;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes first;
+	for (int i = 0; i < 10; i++) {
+		CHECK(sender.encrypt(plaintext, first));
+	}
+
+	const std::uint32_t reached = sender.nextSequence();
+	CHECK_EQ(reached, VIDEO_FIRST_SEQUENCE + 10);
+
+	// The same session key again, exactly as a repeated CryptSetup delivers it.
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK_EQ(sender.nextSequence(), reached);
+
+	// And the nonce really is fresh: the next datagram carries a sequence no earlier datagram used.
+	Bytes next;
+	CHECK(sender.encrypt(plaintext, next));
+	CHECK_EQ(next[VIDEO_SEQUENCE_OFFSET + 3], static_cast< byte >(reached & 0xFF));
+
+	// A genuinely different key is a different nonce space, so there the restart is correct.
+	CHECK(sender.deriveFromSessionKey("fedcba9876543210", false));
+	CHECK_EQ(sender.nextSequence(), VIDEO_FIRST_SEQUENCE);
+}
+
+// A single packet at an implausible sequence must not end the stream.
+//
+// The replay window anchors to the highest sequence accepted. One forged packet carrying a sequence near
+// the top of the 32-bit space used to move that anchor there, after which every genuine packet was
+// TooOld for the rest of the connection - a permanent denial of video from one lucky packet, since the
+// authentication tag is only three bytes wide. MumbleFuzzcrypt produced exactly that, which is what
+// prompted this.
+CORE_TEST(oneHugeSequenceDoesNotLockOutTheSender) {
+	// A sender whose counter can be moved, which is what makes a forgery reproducible: the packet below
+	// is genuine and authenticates, and carries a sequence no honest sender would reach.
+	struct Settable : VideoCryptState {
+		void setNextSequence(std::uint32_t seq) { m_nextSequence = seq; }
+	};
+
+	Settable sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	Bytes out;
+
+	// Ordinary traffic first, so there is something to lock out.
+	CHECK(sender.encrypt(plaintext, datagram));
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+
+	// Now one authentic packet from far away.
+	sender.setNextSequence(0xFFFF0000u);
+	CHECK(sender.encrypt(plaintext, datagram));
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::TooFarAhead);
+	CHECK_EQ(receiver.tooFarAheadCount(), 1u);
+	CHECK_EQ(receiver.resyncCount(), 0u);
+
+	// The anchor did not move, so the genuine stream carries on exactly as before.
+	sender.setNextSequence(2);
+	int accepted = 0;
+	for (int i = 0; i < 50; i++) {
+		CHECK(sender.encrypt(plaintext, datagram));
+		if (receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok) {
+			accepted++;
+		}
+	}
+	CHECK_EQ(accepted, 50);
+}
+
+// But a sender that really has moved on must be able to re-anchor, or the bound above would be a
+// lockout of its own making: a long outage while the sender keeps encoding would end video for good.
+CORE_TEST(aRunOfAuthenticPacketsReAnchorsTheWindow) {
+	struct Settable : VideoCryptState {
+		void setNextSequence(std::uint32_t seq) { m_nextSequence = seq; }
+	};
+
+	Settable sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	Bytes out;
+
+	CHECK(sender.encrypt(plaintext, datagram));
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+
+	// Far beyond the jump bound, as after a long blackout.
+	sender.setNextSequence(5'000'000);
+
+	// The first VIDEO_RESYNC_PACKETS - 1 are refused, and say why.
+	for (unsigned int i = 0; i < VIDEO_RESYNC_PACKETS - 1; i++) {
+		CHECK(sender.encrypt(plaintext, datagram));
+		CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::TooFarAhead);
+		CHECK_EQ(receiver.resyncCount(), 0u);
+	}
+
+	// The next one completes the run, and the window moves to it.
+	CHECK(sender.encrypt(plaintext, datagram));
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK_EQ(receiver.resyncCount(), 1u);
+	CHECK_EQ(receiver.highestReceived(), 5'000'000u + VIDEO_RESYNC_PACKETS - 1);
+
+	// And it is a working connection again, not a one-off acceptance.
+	for (int i = 0; i < 20; i++) {
+		CHECK(sender.encrypt(plaintext, datagram));
+		CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	}
+}
+
+// The run has to be consecutive. Anything accepted normally in between resets it, which is what stops a
+// forger accumulating a re-anchor one lucky packet at a time while a stream is running.
+CORE_TEST(anInWindowPacketResetsTheResyncRun) {
+	struct Settable : VideoCryptState {
+		void setNextSequence(std::uint32_t seq) { m_nextSequence = seq; }
+	};
+
+	Settable sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	Bytes out;
+	std::uint32_t ordinary = VIDEO_FIRST_SEQUENCE;
+
+	// Alternate: one from far away, one ordinary, over and over. Far more than VIDEO_RESYNC_PACKETS of
+	// the former, but never two in a row, so the window must never re-anchor.
+	for (unsigned int i = 0; i < VIDEO_RESYNC_PACKETS * 4; i++) {
+		sender.setNextSequence(9'000'000 + i);
+		CHECK(sender.encrypt(plaintext, datagram));
+		CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::TooFarAhead);
+
+		sender.setNextSequence(ordinary++);
+		CHECK(sender.encrypt(plaintext, datagram));
+		CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	}
+
+	CHECK_EQ(receiver.resyncCount(), 0u);
+	CHECK(receiver.highestReceived() < 9'000'000u);
+}
+
+// A refused re-key must leave the state alone, sequence counter included.
+//
+// The refusal path used to clear m_valid before validating its arguments. That threw away the only
+// record of which key was installed, so the next call with that same key looked like a fresh key and
+// restarted the sequence - spending nonces a second time under a key that had already used them, which
+// is the break the test above this one exists to prevent. Found by review rather than by the fuzzer,
+// which cannot call setKey directly.
+CORE_TEST(aRefusedReKeyChangesNothing) {
+	const std::string key(AES_KEY_SIZE_BYTES, '\x2b');
+	const std::string baseA(12, '\x01');
+	const std::string baseB(12, '\x02');
+
+	VideoCryptState state;
+	CHECK(state.setKey(key, baseA, baseB));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	for (int i = 0; i < 5; i++) {
+		CHECK(state.encrypt(plaintext, datagram));
+	}
+
+	const std::uint32_t reached = state.nextSequence();
+	CHECK_EQ(reached, VIDEO_FIRST_SEQUENCE + 5);
+
+	// Refused three ways: equal nonce bases, a short key, a short base. None may disturb anything.
+	CHECK(!state.setKey(key, baseA, baseA));
+	CHECK(state.isValid());
+	CHECK_EQ(state.nextSequence(), reached);
+
+	CHECK(!state.setKey(std::string(4, '\x2b'), baseA, baseB));
+	CHECK(state.isValid());
+	CHECK_EQ(state.nextSequence(), reached);
+
+	CHECK(!state.setKey(key, std::string(4, '\x01'), baseB));
+	CHECK(state.isValid());
+	CHECK_EQ(state.nextSequence(), reached);
+
+	// And the key really is still the one that was installed: re-installing it is recognised as a
+	// repeat, so the counter stays put rather than restarting.
+	CHECK(state.setKey(key, baseA, baseB));
+	CHECK_EQ(state.nextSequence(), reached);
+
+	// It still encrypts, and with a sequence no earlier datagram used.
+	CHECK(state.encrypt(plaintext, datagram));
+	CHECK_EQ(datagram[VIDEO_SEQUENCE_OFFSET + 3], static_cast< byte >(reached & 0xFF));
+}
+
+// A plaintext OCB2 counter-cryptanalysis objects to is delivered, altered by exactly one bit, counted.
+//
+// ocb_encrypt flips one plaintext bit when the block before last is fifteen zero bytes, and folds the
+// flip into the checksum so the tag verifies against what it sent rather than what it was given. The
+// receiver therefore cannot detect it.
+//
+// This was briefly made a refusal instead, on the grounds that silent alteration is the wrong failure
+// mode for a layer that exists to provide integrity. The tests disagreed: 64 zero bytes trip the
+// condition, so three fixtures in TestVideoTransport stopped being sendable, and a payload with a zero
+// run at the wrong offset is not an exotic thing for a flat region of a screen to produce. Refusing is
+// deterministic for a given payload, so that region would have stopped updating for as long as it
+// looked that way. So it is delivered, and the counter is what makes the alteration explicable.
+CORE_TEST(videoCountsAFrameOcb2HadToAlter) {
+	VideoCryptState sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	// 40 bytes, so ocb_encrypt examines the block starting at byte 16. Fifteen zeros there is the
+	// condition; the first byte is the message type, which is why a short plaintext cannot trigger it.
+	Bytes trigger(40, 0x5A);
+	trigger[0] = static_cast< byte >(UDPMessageType::Video);
+	for (std::size_t i = 16; i < 31; i++) {
+		trigger[i] = 0;
+	}
+
+	Bytes datagram;
+	CHECK_EQ(sender.xexStarAlteredCount(), 0u);
+	CHECK(sender.encrypt(trigger, datagram));
+	CHECK_EQ(sender.xexStarAlteredCount(), 1u);
+
+	// It authenticates, because the tag was computed over what was actually sent.
+	Bytes out;
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK_EQ(out.size(), trigger.size());
+
+	// And differs from the input by exactly one bit. Stated as a number rather than described, because
+	// the whole point is that nothing downstream can tell.
+	CHECK(out != trigger);
+	int differingBits = 0;
+	for (std::size_t i = 0; i < out.size(); i++) {
+		for (int bit = 0; bit < 8; bit++) {
+			if (((out[i] ^ trigger[i]) >> bit) & 1) {
+				differingBits++;
+			}
+		}
+	}
+	CHECK_EQ(differingBits, 1);
+
+	// An ordinary payload is untouched and does not move the counter.
+	Bytes ordinary(40, 0x5A);
+	ordinary[0] = static_cast< byte >(UDPMessageType::Video);
+	CHECK(sender.encrypt(ordinary, datagram));
+	CHECK_EQ(sender.xexStarAlteredCount(), 1u);
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK(out == ordinary);
+}
+
+
+// The receive half of the same thing: a repeat must not clear the replay window, or every datagram the
+// peer has already sent becomes acceptable again.
+CORE_TEST(reKeyingWithTheSameKeyKeepsTheReplayWindow) {
+	VideoCryptState server;
+	VideoCryptState client;
+	CHECK(server.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(client.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	CHECK(server.encrypt(plaintext, datagram));
+
+	Bytes out;
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Replay);
+
+	// Re-key with the same key, then offer that same datagram once more.
+	CHECK(client.deriveFromSessionKey(SESSION_KEY, false));
+	CHECK(client.decrypt(datagram, out) == VideoCryptState::Result::Replay);
+
+	// A different key resets the window, which is right - but it also cannot decrypt the old datagram.
+	CHECK(client.deriveFromSessionKey("fedcba9876543210", false));
+	CHECK_EQ(client.highestReceived(), 0u);
+}
+
 // The public API end to end, against a server played by the core's own server-side pieces.
 CORE_TEST(mediaSessionTalksToAServer) {
 	CryptStateOCB2 serverAudio;

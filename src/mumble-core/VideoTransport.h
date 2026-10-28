@@ -76,6 +76,46 @@ namespace Protocol {
 	// Sequence 0 is never sent, so a receiver can use "highest seen == 0" to mean "nothing yet".
 	constexpr std::uint32_t VIDEO_FIRST_SEQUENCE = 1;
 
+	// How far ahead of everything accepted so far a sequence may be and still be taken at face value.
+	//
+	// This exists because the authentication tag is three bytes. A blind forgery therefore succeeds about
+	// once in 16.7 million attempts, which sounds remote until you notice it costs the attacker one UDP
+	// packet per attempt - and that the replay window anchors itself to the highest sequence ever
+	// accepted. Without a bound, one successful forgery carrying a sequence near the top of the 32-bit
+	// space moved that anchor there, and every genuine packet afterwards was rejected as TooOld for the
+	// rest of the connection. One lucky packet, video dead, no error anywhere. MumbleFuzzcrypt
+	// demonstrated it: see corpus/crypt/crypt-forged-sequence-jump.
+	//
+	// The size has to be read against VIDEO_REPLAY_WINDOW, and a generous value is no use at all.
+	//
+	// A forged packet accepted at the anchor plus N leaves every genuine packet still in flight N behind
+	// the anchor, and anything VIDEO_REPLAY_WINDOW or more behind is refused as TooOld. So a bound
+	// larger than the window does not prevent the lockout, it only changes how far the forger has to
+	// guess - which was the first mistake made here: 65536 looked conservative and left a single
+	// successful forgery able to strand the sender exactly as before. MumbleFuzzcrypt found that too,
+	// which is the second time this target has earned its keep.
+	//
+	// Half the window. A forgery can then displace the anchor by at most half of what the window
+	// tolerates, leaving the other half for the genuine packets already on their way - and half the
+	// window is also MAX_VIDEO_FRAGMENTS_PER_UNIT, so one whole unit may still arrive in any order.
+	constexpr std::uint32_t VIDEO_MAX_SEQUENCE_JUMP = VIDEO_REPLAY_WINDOW / 2;
+
+	// Consecutive authenticated packets beyond that jump after which the window re-anchors to them.
+	//
+	// A bound on its own would be a denial of service of its own making: if a sender ever did get more
+	// than VIDEO_MAX_SEQUENCE_JUMP ahead - and at half a window that takes only a burst of loss, not an
+	// outage - every later packet would be refused forever. So the receiver gives way, but only to
+	// evidence it cannot be fed:
+	// re-anchoring needs this many consecutive packets that authenticate, with no in-window packet
+	// between them, and anything accepted normally resets the count. Holding the key is the only way to
+	// produce one such packet; producing eight in a row without a genuine packet interrupting is not
+	// something a forger at one-in-16.7-million gets to do.
+	//
+	// Only ever forward. A sequence *behind* the window stays refused however often it is offered, and
+	// is refused without being decrypted, because a genuine sender's sequence only ever increases - so
+	// re-anchoring backwards could only ever serve a replay of captured traffic.
+	constexpr unsigned int VIDEO_RESYNC_PACKETS = 8;
+
 	/**
 	 * Encrypts and authenticates video datagrams on a sequence space of their own.
 	 *
@@ -110,6 +150,12 @@ namespace Protocol {
 			Replay,
 			/// Sequence number older than the replay window reaches.
 			TooOld,
+			/// Sequence number further ahead than VIDEO_MAX_SEQUENCE_JUMP allows, and not yet backed by
+			/// the VIDEO_RESYNC_PACKETS consecutive authenticated packets that would re-anchor the
+			/// window. Distinct from TooOld because it is the shape a forgery takes, and because an
+			/// endpoint seeing a run of these is looking at either an attack or an outage it will
+			/// recover from by itself.
+			TooFarAhead,
 			/// Authentication tag did not verify.
 			AuthenticationFailed,
 		};
@@ -123,6 +169,17 @@ namespace Protocol {
 		 *
 		 * The two bases must differ, or the two directions would reuse nonces under the same key, which
 		 * is fatal for OCB. This is checked.
+		 *
+		 * Calling this again with the key and both bases already in force keeps the sequence counter and
+		 * the replay window exactly as they are, rather than restarting them. For a fixed key the
+		 * sequence is the whole of the nonce, so restarting it would spend nonces twice - see the
+		 * implementation for why that is a break rather than a weakness. A different key does restart
+		 * both, which is correct, its nonce space being untouched.
+		 *
+		 * A refused call changes nothing: the key already in force stays in force and isValid() still
+		 * answers what it did before. That is deliberate, and not only so that a bad re-key leaves video
+		 * working - invalidating the state on refusal would also discard the record of which key is
+		 * installed, and the next call would then restart the sequence under a key it had already used.
 		 */
 		bool setKey(const std::string &key, const std::string &encryptNonceBase, const std::string &decryptNonceBase);
 
@@ -136,6 +193,11 @@ namespace Protocol {
 		 * break, not a weakness. Hashing with a distinct label per purpose keeps the two key streams
 		 * independent, and gives each direction its own nonce base as setKey requires.
 		 *
+		 * Because the result is a pure function of the session key, calling this twice with the same
+		 * session key reproduces the same key and the same nonce bases. setKey() is what makes that
+		 * safe: it recognises the repeat and leaves the sequence counter alone. A caller must not
+		 * reimplement the derivation and install it some other way.
+		 *
 		 * @param sessionKey The raw AES key from CryptSetup.
 		 * @param isServer Which end this is, so the two ends pick opposite nonce bases.
 		 */
@@ -146,9 +208,13 @@ namespace Protocol {
 		/**
 		 * Encrypts one plaintext into a complete datagram, ready for sendto().
 		 *
-		 * @returns false if the plaintext is too large, the state is not keyed, or the sequence space is
-		 *   exhausted. Exhaustion is not silently ignored: reusing a nonce would be a real break, so the
-		 *   state refuses to encrypt and the caller must rekey.
+		 * @returns false if the plaintext is too large, the state is not keyed, the sequence space is
+		 *   exhausted, or the plaintext is one of the rare shapes OCB2's counter-cryptanalysis rejects.
+		 *   Exhaustion is not silently ignored: reusing a nonce would be a real break, so the state
+		 *   refuses to encrypt and the caller must rekey. The counter-cryptanalysis case is a refusal
+		 *   here rather than the plaintext-altering workaround audio uses - see the implementation - so a
+		 *   caller must treat false as "this fragment was not sent" and let retransmission deal with it,
+		 *   never as "sent, probably".
 		 */
 		bool encrypt(std::span< const byte > plaintext, std::vector< byte > &datagram);
 
@@ -170,6 +236,16 @@ namespace Protocol {
 		std::uint64_t replayCount() const { return m_replays; }
 		std::uint64_t tooOldCount() const { return m_tooOld; }
 		std::uint64_t authFailureCount() const { return m_authFailures; }
+		/// Packets refused for being further ahead than VIDEO_MAX_SEQUENCE_JUMP, and times the window
+		/// re-anchored because VIDEO_RESYNC_PACKETS of them authenticated in a row. A non-zero forged
+		/// count with no resyncs is what an attempted lockout looks like from the inside.
+		std::uint64_t tooFarAheadCount() const { return m_tooFarAhead; }
+		std::uint64_t resyncCount() const { return m_resyncs; }
+		/// Frames OCB2's counter-cryptanalysis required altering by one bit before they could be sent.
+		/// See the implementation. Reported because the alteration is undetectable by the receiver - the
+		/// tag covers the altered plaintext - so without this number an artifact caused by it has no
+		/// explanation available anywhere.
+		std::uint64_t xexStarAlteredCount() const { return m_xexStarAltered; }
 
 	protected:
 		CryptStateOCB2 m_ocb;
@@ -189,8 +265,16 @@ namespace Protocol {
 		std::uint64_t m_replays      = 0;
 		std::uint64_t m_tooOld       = 0;
 		std::uint64_t m_authFailures = 0;
+		std::uint64_t m_xexStarAltered = 0;
+		std::uint64_t m_tooFarAhead  = 0;
+		std::uint64_t m_resyncs      = 0;
 
-		/// Checks a sequence against the replay window without modifying it.
+		// Consecutive authenticated packets beyond the jump bound. Reset by anything accepted normally,
+		// which is what stops a forger accumulating them one lucky packet at a time.
+		unsigned int m_aheadStreak = 0;
+
+		/// Checks a sequence against the replay window without modifying it. TooFarAhead means "do not
+		/// trust this yet", not "reject it": decrypt() verifies such a packet before deciding.
 		Result checkSequence(std::uint32_t sequence) const;
 
 		/// Records a sequence as accepted, sliding the window forward if necessary.

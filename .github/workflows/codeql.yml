@@ -1,0 +1,44 @@
+# CodeQL static analysis.
+#
+# Upstream Mumble runs CodeQL on every push and pull request; this fork had dropped it. Restored here,
+# but deliberately scoped to the Qt-free protocol core (src/mumble-core) rather than the whole client
+# and server. That core is where the security-critical code lives - the datagram parsers, the
+# reassembler, the OCB2 crypt - and it builds with only protobuf and OpenSSL, so the analysis builds
+# reliably on a plain runner instead of fighting the full Qt/ffmpeg/vpx dependency tree. Widening it to
+# the client and server is a reasonable later step once this is known good.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published CodeQL query still runs against code that has not changed.
+    - cron: "27 4 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze the protocol core (C/C++)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+
+      - name: Build the protocol core
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          cmake -S src/mumble-core -B cqbuild -DCMAKE_BUILD_TYPE=Release -DMUMBLE_CORE_TESTS=OFF
+          cmake --build cqbuild -j"$(nproc)"
+
+      - uses: github/codeql-action/analyze@v3

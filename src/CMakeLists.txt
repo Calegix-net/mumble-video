@@ -24,7 +24,12 @@ find_pkg(Qt6
 	REQUIRED
 )
 
+# Floor at 1.1.1: the first OpenSSL with the modern TLS 1.3 API this code targets, and old enough
+# (2018) to be present everywhere we build, while still refusing the long tail of 1.0.x/early-1.1.0
+# builds that carry unpatched CVEs. A floor, not a recommendation - packagers should track the
+# current stable series (the dev box builds against 3.x).
 find_pkg(OpenSSL
+	VERSION 1.1.1
 	COMPONENTS
 		Crypto
 		SSL

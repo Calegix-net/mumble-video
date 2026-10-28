@@ -89,26 +89,54 @@ elseif(UNIX OR MINGW)
 			add_link_options(
 				"-Wl,-z,relro"
 				"-Wl,-z,now"
+				# The stack must never be executable. This is normally the linker's default, but setting
+				# it is cheap insurance, and it is the one hardening flag that is always valid.
+				"-Wl,-z,noexecstack"
 			)
 		endif()
 
-		# Ensure _FORTIFY_SOURCE is not used in debug builds.
+		# Hardening for release builds.
 		#
-		# First, ensure _FORTIFY_SOURCE is undefined.
-		# Then -- and, only for release builds -- set _FORTIFY_SOURCE=2.
-		#
-		# We can't use _FORTIFY_SOURCE in debug builds (which are built with -O0) because _FORTIFY_SOURCE=1 requires -O1 and _FORTIFY_SOURCE=2 requires -O2.
-		# Modern GLIBCs warn about this since https://sourceware.org/bugzilla/show_bug.cgi?id=13979.
-		# In Mumble builds with warnings-as-errors, this will cause build failures.
+		# Everything here was previously coming in - if at all - only from the distribution's own gcc
+		# defaults, so a plainer gcc, a clang, or a non-Debian toolchain produced a softer binary. These
+		# make the protections explicit so the shipped binary does not depend on who built it. Each
+		# architecture-sensitive flag is probed with check_cxx_compiler_flag, so a compiler or target
+		# that does not support one skips it instead of failing to configure - the x86 CET flag in
+		# particular is not valid on ARM.
+		include(CheckCXXCompilerFlag)
+
+		# _FORTIFY_SOURCE adds bounds checks to libc calls whose sizes the compiler can see. It needs an
+		# optimised build, so it is undefined first (debug is -O0, where it only warns) and set only for
+		# non-debug. Level 3, which is the toolchain's own default at -O2, extends those checks to
+		# non-constant sizes - the shape of a packet length - where the previous explicit 2 silently
+		# downgraded them. An older glibc that predates level 3 clamps it back down rather than erroring.
 		add_compile_options("-U_FORTIFY_SOURCE")
+		add_compile_options($<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=3>)
 
 		if(NOT MINGW)
-			add_compile_options($<$<CONFIG:Debug>:-fstack-protector>)
-		endif()
+			# Stack-smashing canaries on every function with a buffer or a large local, rather than the
+			# narrow set plain -fstack-protector covers.
+			check_cxx_compiler_flag("-fstack-protector-strong" MUMBLE_HAVE_SSP_STRONG)
+			if(MUMBLE_HAVE_SSP_STRONG)
+				add_compile_options("-fstack-protector-strong")
+			else()
+				add_compile_options($<$<CONFIG:Debug>:-fstack-protector>)
+			endif()
 
-		add_compile_options(
-			$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
-		)
+			# Probe past the stack guard page on entry, so a huge variable-length allocation cannot jump
+			# over it into an adjacent mapping.
+			check_cxx_compiler_flag("-fstack-clash-protection" MUMBLE_HAVE_STACK_CLASH)
+			if(MUMBLE_HAVE_STACK_CLASH)
+				add_compile_options("-fstack-clash-protection")
+			endif()
+
+			# Control-flow integrity through the CPU's CET: a corrupted return address or indirect call
+			# target faults instead of being followed. x86 only, hence the probe.
+			check_cxx_compiler_flag("-fcf-protection=full" MUMBLE_HAVE_CF_PROTECTION)
+			if(MUMBLE_HAVE_CF_PROTECTION)
+				add_compile_options("-fcf-protection=full")
+			endif()
+		endif()
 
 		add_link_options(
 			$<$<CONFIG:Debug>:-Wl,--no-add-needed>

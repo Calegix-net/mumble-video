@@ -12,7 +12,17 @@ namespace Mumble {
 namespace Protocol {
 
 	std::vector< byte > encodeVideoNackPacket(const MumbleUDP::VideoNack &nack) {
-		std::vector< byte > packet(1 + nack.ByteSizeLong());
+		const std::size_t size = 1 + nack.ByteSizeLong();
+
+		// Must fit a single video datagram once the crypt header is added, the same as any other video
+		// packet. collectNacks() already batches so a message stays within this, but a message built any
+		// other way must not be put on the wire oversized to be IP-fragmented or dropped; the caller
+		// treats an empty return as "skip this one".
+		if (size > MAX_VIDEO_PLAINTEXT_SIZE) {
+			return {};
+		}
+
+		std::vector< byte > packet(size);
 		packet[0] = static_cast< byte >(UDPMessageType::VideoNack);
 		if (!nack.SerializeToArray(packet.data() + 1, static_cast< int >(packet.size() - 1))) {
 			return {};
@@ -100,22 +110,45 @@ namespace Protocol {
 		for (const VideoNackRequest &request : requests) {
 			std::vector< Batch > &forStream = batches[{ request.senderSession, request.streamID }];
 
-			if (forStream.empty() || forStream.back().message.units_size() >= MAX_VIDEO_NACK_UNITS) {
+			const auto addUnit = [&](Batch &b) {
+				MumbleUDP::VideoNack::Unit *unit = b.message.add_units();
+				unit->set_frame_number(request.frameNumber);
+				unit->set_unit_id(request.unitID);
+				unit->set_missing_fragments(request.missingFragments);
+				for (std::uint32_t index : request.missingIndices) {
+					unit->add_missing_indices(index);
+				}
+				b.requests.push_back(&request);
+			};
+			const auto newBatch = [&]() -> Batch & {
 				forStream.emplace_back();
 				forStream.back().message.set_sender_session(request.senderSession);
 				forStream.back().message.set_stream_id(request.streamID);
+				return forStream.back();
+			};
+
+			if (forStream.empty()) {
+				addUnit(newBatch());
+				continue;
 			}
 
-			Batch &batch                     = forStream.back();
-			MumbleUDP::VideoNack::Unit *unit = batch.message.add_units();
-			unit->set_frame_number(request.frameNumber);
-			unit->set_unit_id(request.unitID);
-			unit->set_missing_fragments(request.missingFragments);
-			for (std::uint32_t index : request.missingIndices) {
-				unit->add_missing_indices(index);
-			}
+			Batch &current = forStream.back();
+			addUnit(current);
 
-			batch.requests.push_back(&request);
+			// Start a new batch if that unit took this one over the unit cap or - the part the count cap
+			// alone misses - past what one datagram holds. A unit of more than 64 fragments carries a
+			// missing_indices list rather than the 64-bit mask, and a large keyframe lost in bulk can make
+			// that list long enough that even a handful of such units would not fit a single VideoNack
+			// datagram; left unsplit, encodeVideoNackPacket() would refuse the whole message and none of
+			// those units would be asked for. One unit always fits alone (its indices are fragment numbers
+			// below MAX_VIDEO_FRAGMENTS_PER_UNIT), so moving the last one out can never loop.
+			if ((current.message.units_size() > MAX_VIDEO_NACK_UNITS
+				 || 1 + current.message.ByteSizeLong() > MAX_VIDEO_PLAINTEXT_SIZE)
+				&& current.message.units_size() > 1) {
+				current.message.mutable_units()->RemoveLast();
+				current.requests.pop_back();
+				addUnit(newBatch());
+			}
 		}
 
 		for (const auto &entry : batches) {

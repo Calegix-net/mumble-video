@@ -180,7 +180,41 @@ endif()
 
 if(MUMBLE_CORE_TESTS)
 	add_subdirectory(tests)
-	# Built with the tests, because by default they are tests: replayers for the corpus of inputs that
-	# have broken a network parser before. MUMBLE_CORE_FUZZERS turns the same sources into real fuzzers.
+endif()
+
+# Built with the tests, because by default they are tests: replayers for the corpus of inputs that have
+# broken a network parser before. MUMBLE_CORE_FUZZERS turns the same sources into real fuzzers.
+#
+# Deliberately not nested inside the tests condition any more. It used to be, which meant
+# MUMBLE_CORE_FUZZERS=ON with MUMBLE_CORE_TESTS=OFF configured and built with no complaint and produced
+# no fuzzer at all - an hour of fuzzing that reported nothing found because nothing ran.
+if(MUMBLE_CORE_TESTS OR MUMBLE_CORE_FUZZERS)
 	add_subdirectory(fuzz)
+endif()
+
+if(MUMBLE_CORE_FUZZERS)
+	# The library under test has to be instrumented too, not just the harness.
+	#
+	# Putting the sanitizers only on the fuzz target gave up most of the value. The redzone checks of
+	# AddressSanitizer need instrumented loads and stores, so a read past the end of a fragment inside
+	# VideoFragmentation.cpp was caught only if it happened to pass through an intercepted libc call,
+	# and libFuzzer saw no coverage from the parser at all, which left it mutating blindly rather than
+	# following the code. fuzzer-no-link is the coverage instrumentation without libFuzzer's main(),
+	# which only the executables want.
+	#
+	# The compile options are PRIVATE: they instrument this library and nothing else. They were PUBLIC,
+	# which in an in-tree build propagated AddressSanitizer and UndefinedBehaviorSanitizer to every
+	# consumer - the whole Qt client and the server - for an option whose description is about building
+	# the fuzz targets. That also quietly invalidates any benchmark run in such a tree.
+	#
+	# The link options stay PUBLIC, because an executable linking an instrumented library still has to
+	# pull in the sanitizer runtime, and leaving that out is how one gets undefined references to
+	# __asan_* instead of a working binary.
+	target_compile_options(mumble-core PRIVATE
+		-fsanitize=fuzzer-no-link,address,undefined
+		-fno-sanitize=vptr
+		-fno-sanitize-recover=undefined
+		-fno-omit-frame-pointer
+	)
+	target_link_options(mumble-core PUBLIC -fsanitize=address,undefined)
 endif()

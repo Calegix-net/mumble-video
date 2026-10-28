@@ -54,6 +54,10 @@ std::string asString(const Bytes &bytes) {
 class SequencedVideoCryptState : public Mumble::Protocol::VideoCryptState {
 public:
 	void setNextSequence(std::uint32_t sequence) { m_nextSequence = sequence; }
+	/// Places the replay window's anchor, which only a test needs: a real receiver moves it by accepting
+	/// packets. Used below so a vector pinned at a deliberately high sequence can still be decrypted,
+	/// now that a receiver refuses a first packet implausibly far from where a sender starts.
+	void setHighestReceived(std::uint32_t sequence) { m_highestReceived = sequence; }
 };
 
 } // namespace
@@ -156,8 +160,20 @@ CORE_TEST(videoDatagramKnownAnswers) {
 		CHECK(sender.encrypt(plain, datagram));
 		CHECK(datagram == expected);
 
-		Mumble::Protocol::VideoCryptState receiver;
+		SequencedVideoCryptState receiver;
 		CHECK(receiver.deriveFromSessionKey(sessionKey, clientToServer));
+
+		// A receiver will not take a sequence more than VIDEO_MAX_SEQUENCE_JUMP beyond everything it has
+		// accepted, because that is the shape of a forged packet trying to strand the real sender - see
+		// VideoTransport.h. One of these vectors deliberately uses a high sequence to pin the big-endian
+		// nonce layout, which a real sender reaches only by having sent that many packets, so the anchor
+		// is placed where such a sender would have left it. The format assertion above is untouched.
+		const std::uint32_t sequence = c["sequence"].get< std::uint32_t >();
+
+		if (sequence > Mumble::Protocol::VIDEO_MAX_SEQUENCE_JUMP) {
+			receiver.setHighestReceived(sequence - 1);
+		}
+
 		Bytes decrypted;
 		CHECK(receiver.decrypt(expected, decrypted) == Mumble::Protocol::VideoCryptState::Result::Ok);
 		CHECK(decrypted == plain);

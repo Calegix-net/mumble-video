@@ -97,6 +97,15 @@ public:
 	static constexpr int MAX_SURFACE_WIDTH  = 3840;
 	static constexpr int MAX_SURFACE_HEIGHT = 2160;
 
+	/// Upper bound on how many distinct tile positions one surface's watermark map (tileFrameNumbers)
+	/// may track. A conforming TiledImage sender repaints a tile-grid-aligned set of positions; at the
+	/// smallest tile size it will use (16px, see VideoEncoder) a full 3840x2160 surface is 240x135 =
+	/// 32,400 of them, so this sits comfortably above any legitimate working set. A malicious sender can
+	/// instead place tiles at arbitrary sub-tile offsets - up to millions of distinct positions - which
+	/// without a bound would grow the map without limit; past this the map is pruned, and reset if that
+	/// does not free enough.
+	static constexpr std::size_t MAX_TRACKED_TILE_POSITIONS = 65536;
+
 	/// How many senders are drawn at once. Past this the cells are too small to be worth anything, and
 	/// each surface costs real memory.
 	static constexpr int MAX_SENDERS = 16;
@@ -665,6 +674,13 @@ protected:
 
 	/// Frames waiting in the playout queue, at most, before the oldest is shown regardless.
 	static constexpr std::size_t MAX_PLAYOUT_QUEUE = 30;
+	/// Bytes of decoded image the playout queue of one surface may hold before the oldest is shown
+	/// regardless - a memory ceiling the frame count alone does not give, since one frame is a tile for
+	/// TiledImage but a whole decoded picture (up to MAX_SURFACE_WIDTH x MAX_SURFACE_HEIGHT x 4, ~33 MB)
+	/// for VP8/VP9/H.264. At 30 frames that is ~1 GB per surface, so a few watched 4K shares could pin
+	/// many gigabytes. 256 MB keeps the full 30-frame depth for every resolution up to 1080p and caps a
+	/// 4K stream's buffer at ~8 frames, which is still a deeper jitter buffer than playout ever needs.
+	static constexpr std::size_t MAX_PLAYOUT_QUEUE_BYTES = 256 * 1024 * 1024;
 	QTimer *m_playoutTimer                         = nullptr;
 	/// Fails a decode: after KEYFRAME_REQUEST_AFTER_FAILURES in a row, asks for a keyframe.
 	void noteDecodeFailure(Surface &surface);

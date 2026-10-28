@@ -213,6 +213,34 @@ public:
 	/// on the server was announced to every user on it, whichever room either of them was in.
 	bool mayReceiveVideo(unsigned int subscriberSession, unsigned int senderSession);
 
+	/// Longest VideoState.source_name the server will store and relay. It is a window title or a device
+	/// name, so this is generous; what it exists to stop is a sender parking megabytes of server memory
+	/// in an informational field that no receiver reads. Enforced in msgVideoState by truncation.
+	static constexpr std::size_t MAX_VIDEO_SOURCE_NAME_BYTES = 512;
+
+	/// Whether this stream carries Opus audio rather than a picture, according to the codec its sender
+	/// announced in VideoState. A stream nobody has announced reads as not carrying audio.
+	///
+	/// Reads m_videoAnnouncements, so the caller must hold qrwlVoiceThread, which both the relay (read)
+	/// and msgVideoState (write) already do.
+	bool videoStreamCarriesAudio(unsigned int senderSession, unsigned int streamID) const;
+
+	/// Whether this user may currently transmit audio, and whether this one may hear it.
+	///
+	/// These are the voice rules, applied to the audio a screen share carries. VideoState.Codec
+	/// OpusAudio is sound, not a picture: it rides the video path so that a share and its audio get one
+	/// subscribe, one route and one crypto state. The consequence nobody had drawn is that the video
+	/// path enforced none of the controls a moderator expects over sound - mute, suppress and deafen are
+	/// applied to voice in Server::run and AudioReceiverBuffer and appear nowhere in the video code - so
+	/// a muted user could still be heard by announcing their microphone as a screen share, and a
+	/// deafened user still heard it.
+	///
+	/// bSuppress is the server's cached "may not speak in this channel", maintained wherever Speak is
+	/// re-evaluated, which is why these need no ACL walk of their own: they are a handful of bool reads
+	/// on the UDP thread, which is the only reason they are affordable per datagram.
+	static bool mayTransmitStreamAudio(const ServerUser *sender);
+	static bool mayHearStreamAudio(const ServerUser *subscriber);
+
 	/// Who may see what, involving one user, at one moment: the streams from other senders that user
 	/// may receive, and for each of the user's own streams, the sessions that may receive it. Captured
 	/// before and after a channel move so the two can be diffed - see syncVideoVisibility().

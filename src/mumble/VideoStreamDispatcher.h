@@ -9,6 +9,7 @@
 #include <QtCore/QByteArray>
 #include <QtCore/QObject>
 
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -34,10 +35,28 @@ class VideoStreamDispatcher : public QObject {
 public:
 	explicit VideoStreamDispatcher(QObject *parent = nullptr) : QObject(parent) {}
 
+	/// Most streams this will track for one sender, and most senders it will track at all.
+	///
+	/// Both mirror a limit that already exists elsewhere: the server refuses a sender more than
+	/// VideoRouter::MAX_STREAMS_PER_SENDER live streams, and VideoGrid tracks at most MAX_SENDERS of
+	/// them. Tracking more here than either of those permits could only ever be the result of a server
+	/// that is not playing by its own rules.
+	///
+	/// Without them this map grew by one permanent entry per VideoState announcement, with the stream id
+	/// chosen by the sender, so a server could spend about twenty bytes of wire on each entry it made a
+	/// client keep. audioStreamsOf() walks the whole map and runs once per announcement, which made the
+	/// cost quadratic in the number of announcements and put it on the GUI thread. With the map bounded
+	/// at MAX_SENDERS * MAX_STREAMS_PER_SENDER the scans are bounded too, which is why counting on
+	/// insert below is affordable.
+	static constexpr std::size_t MAX_STREAMS_PER_SENDER = 8;
+	static constexpr std::size_t MAX_SENDERS            = 16;
+
 	/**
 	 * Records the codec a sender's stream carries, from its VideoState announcement. Mirrors
 	 * VideoGrid::setStreamCodec, called alongside it so this class and the grid agree on what every
 	 * stream is.
+	 *
+	 * A stream beyond the caps above is ignored, as the grid ignores a sender beyond its own.
 	 *
 	 * @param codec A MumbleProto::VideoState::Codec value.
 	 */

@@ -109,6 +109,14 @@ QImage i420ToRgbScalar(const vpx_image_t *source) {
 
 	QImage image(width, height, QImage::Format_RGB32);
 
+	// A QImage whose allocation failed is null, and scanLine() on a null image returns nullptr without
+	// asserting in a release build. The loop below is bounded by the frame's height rather than by the
+	// image, so it would have written a whole frame through a null pointer. Both swscale failure paths
+	// fall back into this function, which is how an allocation failure reached it.
+	if (image.isNull()) {
+		return image;
+	}
+
 	for (int y = 0; y < height; ++y) {
 		QRgb *scan = reinterpret_cast< QRgb * >(image.scanLine(y));
 
@@ -601,6 +609,13 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 		return false;
 	}
 
+	// The bitstream declares these, so they are network input: see MAX_DECODED_FRAME_WIDTH. Refused
+	// before the colour conversion, which is what would do the allocating.
+	if (img->d_w == 0 || img->d_h == 0 || img->d_w > MAX_DECODED_FRAME_WIDTH
+		|| img->d_h > MAX_DECODED_FRAME_HEIGHT) {
+		return false;
+	}
+
 	// Decoding an inter-frame whose reference is missing does not fail - libvpx returns a plausible
 	// corrupted image. The frame-continuity tracking upstream is the real defence; this catches what
 	// it cannot: a keyframe that itself arrived damaged, or any bookkeeping slip. Costs one control
@@ -614,6 +629,13 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 
 	if (image) {
 		*image = i420ToRgb(img, m_sws, m_swsConfigured, m_swsUnusable);
+
+		// A conversion that could not allocate returns a null image. Reporting success with nothing in
+		// it would have the caller treat an empty frame as a decoded one, which is how a share goes
+		// black without anything saying why; H264Decoder::decode already answers false in this case.
+		if (image->isNull()) {
+			return false;
+		}
 	}
 
 	return true;
