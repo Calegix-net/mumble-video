@@ -1583,6 +1583,34 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		return;
 	}
 
+	// Enforce the per-stream bandwidth ceiling the server advertises (iVideoBandwidth). A sender's
+	// announced target_bandwidth is clamped to it (msgVideoState), but nothing stops a sender ignoring its
+	// own target and simply transmitting faster; without a meter here, the only bound on what one stream
+	// costs every viewer and the server's uplink was the sender behaving. A leaky bucket rather than bwr's
+	// sliding-sample average because a video frame's fragments arrive back to back - a keyframe is a burst
+	// by nature - so the rate must be judged over roughly a second, not per packet, or every keyframe would
+	// be dropped. The bucket drains at the byte rate and is deep enough to pass a keyframe burst yet cap how
+	// much a flood gets through before the drain catches up. Per stream, keyed by stream id, as the setting
+	// is: a user's camera, screen and screen-audio each get their own.
+	//
+	// Locking: this inserts into and mutates sender->m_videoStreamBandwidth from the UDP thread under the
+	// read lock. It is safe for the same reason noteRelayed() is (see VideoRouter.h): the only other
+	// accessors - msgVideoState, endStaleVideoStreams, removeUser - run on the main thread under the write
+	// lock, which excludes this thread, and the UDP thread is single, so no two inserts race.
+	if (iVideoBandwidth > 0) {
+		const unsigned int bytesPerSec = static_cast< unsigned int >(iVideoBandwidth / 8);
+		// At least half a megabyte of depth so a single large keyframe always clears even when the ceiling
+		// is set low, while the sustained rate still converges on bytesPerSec.
+		const unsigned int burst = std::max< unsigned int >(bytesPerSec, 512u * 1024u);
+		auto bucket              = sender->m_videoStreamBandwidth
+						  .try_emplace(static_cast< unsigned int >(m_relayedVideo.stream_id()), bytesPerSec, burst)
+						  .first;
+
+		if (bucket->second.ratelimit(static_cast< int >(len))) {
+			return;
+		}
+	}
+
 	// The liveness signal endStaleVideoStreams() judges silence against - see there and
 	// VideoRouter::noteRelayed(). Recorded only once there is actually somewhere to relay to, matching
 	// noteRelayed()'s own contract.
@@ -2816,6 +2844,11 @@ void Server::endStaleVideoStreams() {
 
 		m_videoRouter.announceStream(key.sender, key.streamID, false);
 		m_videoAnnouncements.erase(std::make_pair(key.sender, key.streamID));
+
+		// Drop the stream's bandwidth meter with it, as msgVideoState's own active=false handling does.
+		if (ServerUser *staleSender = qhUsers.value(key.sender)) {
+			staleSender->m_videoStreamBandwidth.erase(key.streamID);
+		}
 
 		// Ends the stream for everyone who could see it, exactly as msgVideoState's own active=false
 		// handling would - not only current subscribers, matching the class comment on VideoRouter about

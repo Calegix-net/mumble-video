@@ -2721,6 +2721,9 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		m_videoAnnouncements[streamKey] = msg;
 	} else {
 		m_videoAnnouncements.erase(streamKey);
+		// The stream is gone, so its bandwidth meter (Server::relayVideo) should be too, or a sender that
+		// cycles stream ids would leave a bucket behind for each.
+		uSource->m_videoStreamBandwidth.erase(static_cast< unsigned int >(msg.stream_id()));
 	}
 
 	// Relayed only to those who could actually subscribe. Announcing a stream to a user who is not
