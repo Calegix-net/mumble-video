@@ -1,0 +1,32 @@
+# Podman Quadlet unit: runs the server as a systemd service that starts on boot and restarts on crash.
+#
+# Install (rootless, as your normal user):
+#   mkdir -p ~/.config/containers/systemd ~/mumble-data
+#   cp mumble-video.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start mumble-video
+#   loginctl enable-linger "$USER"     # keep it running after you log out / start at boot
+
+[Unit]
+Description=Mumble Video server
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/mumble-video-server:latest
+ContainerName=mumble-video
+# Host networking, as the project's own deploy script uses: keeps clients' real UDP source
+# addresses intact, which the voice/video UDP channels depend on.
+Network=host
+Volume=%h/mumble-data:/data:Z
+# Optional, only used on the very first start (see entrypoint.sh):
+#Environment=SERVER_PASSWORD=changeme
+#Environment=WELCOME_TEXT=Welcome!
+# Applied on every start when set:
+#Environment=SUPERUSER_PASSWORD=choose-a-strong-one
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

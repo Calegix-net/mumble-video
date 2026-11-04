@@ -1,0 +1,38 @@
+# Mumble Video server — self-contained, one-command image.
+#
+# Based on the project's docker/Dockerfile.server, but instead of needing a local compile it downloads
+# the official prebuilt server binary from the GitHub release (the same binary the project's own CI
+# packages into its image), verifies its checksum, and generates a default config on first start.
+#
+# Build:   podman build -t mumble-video-server .
+# Update:  bump VERSION and SHA256 below (SHA256 is in the release's SHA256SUMS file), then rebuild.
+
+FROM fedora:42
+
+ARG VERSION=v1.10.0
+ARG SHA256=fd1817f0a2501757067bec44c55db90800bce187f2b09d8ba8606ff17f4341d9
+
+# Same runtime libraries as the upstream Dockerfile.server, plus tar/gzip for unpacking.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        qt6-qtbase qt6-qtbase-mysql qt6-qtbase-postgresql \
+        openssl protobuf boost-date-time libcap \
+        avahi-compat-libdns_sd libvpx \
+        mariadb-connector-c libpq sqlite \
+        tar gzip \
+    && dnf clean all
+
+# Download, verify, install. The final ldd check fails the build (instead of the container exiting
+# with code 127 at runtime) if any shared library the binary needs is missing.
+RUN curl -fsSL -o /tmp/server.tar.gz \
+        "https://github.com/Calegix-net/mumble-video/releases/download/${VERSION}/mumble-video-server-linux-x86_64.tar.gz" \
+    && echo "${SHA256}  /tmp/server.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/server.tar.gz -C /usr/local bin/mumble-server \
+    && rm /tmp/server.tar.gz \
+    && if ldd /usr/local/bin/mumble-server | grep "not found"; then exit 1; fi
+
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+VOLUME /data
+EXPOSE 64738/tcp 64738/udp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
