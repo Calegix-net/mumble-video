@@ -24,6 +24,10 @@ void VideoPreview::clear() {
 
 void VideoPreview::paintEvent(QPaintEvent *) {
 	QPainter painter(this);
+	// Smooth (bilinear) sampling rather than the default nearest-neighbour: the frame is scaled to the
+	// widget's actual pixel size below, which is rarely its own resolution, and nearest-neighbour makes
+	// that look blocky - the same fix applied to the remote-video surfaces in VideoGrid. A no-op at 1:1.
+	painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 	painter.fillRect(rect(), Qt::black);
 
 	if (m_frame.isNull()) {

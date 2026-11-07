@@ -70,6 +70,19 @@ public:
 	void setBitrate(unsigned int kbps);
 	unsigned int bitrate() const { return m_bitrate; }
 
+	/**
+	 * Changes the target bitrate of a RUNNING encoder in place, without tearing it down.
+	 *
+	 * setBitrate() above destroys the encoder so the new rate is picked up at the next configure(), which
+	 * forces a keyframe and resets the rate-control clock - fine for a one-off change from the config
+	 * dialog, ruinous for congestion control that nudges the rate every second (every nudge would be a
+	 * keyframe burst, exactly when the link is congested). This instead calls vpx_codec_enc_config_set(),
+	 * which libvpx applies live with no re-init and no keyframe. Falls back to the destructive path only if
+	 * libvpx refuses the live update. A no-op before the encoder has been configured; the pending value is
+	 * then used by the next configure().
+	 */
+	void setTargetBitrate(unsigned int kbps);
+
 	/// Longest run of frames before a keyframe is forced regardless.
 	void setKeyframeInterval(unsigned int frames);
 
@@ -112,6 +125,13 @@ public:
 protected:
 	vpx_codec_ctx *m_context = nullptr;
 	vpx_image *m_raw         = nullptr;
+
+	// A heap copy of the vpx_codec_enc_cfg_t the running encoder was initialised with, so setTargetBitrate()
+	// can modify one field and re-apply the whole config with vpx_codec_enc_config_set(). Held as void* (and
+	// allocated in configure(), freed in destroy()) so this header stays free of the libvpx encoder headers,
+	// the way it already forward-declares vpx_codec_ctx / vpx_image rather than including them. Null when no
+	// encoder is live.
+	void *m_encCfg = nullptr;
 
 	VpxContent m_content = VpxContent::Camera;
 

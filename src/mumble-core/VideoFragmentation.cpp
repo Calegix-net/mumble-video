@@ -208,6 +208,8 @@ namespace Protocol {
 			const std::uint64_t deadline = it->second.firstSeenUsec + VIDEO_REASSEMBLY_TIMEOUT_USEC;
 
 			if (nowUsec > deadline) {
+				// Unrecoverable: timed out still incomplete. This is the only loss the feedback counts.
+				noteExpired(it->first);
 				it = eraseUnit(it);
 			} else {
 				if (earliest == 0 || deadline < earliest) {
@@ -233,6 +235,29 @@ namespace Protocol {
 		while (it != end) {
 			it = eraseUnit(it);
 		}
+
+		// Drop the sender's loss counters too, so they do not accumulate across a session of senders.
+		std::lock_guard< std::mutex > lossLock(m_lossMutex);
+		m_streamLoss.erase(m_streamLoss.lower_bound({ senderSession, 0 }),
+						   m_streamLoss.upper_bound({ senderSession, std::numeric_limits< std::uint32_t >::max() }));
+	}
+
+	void VideoReassembler::noteCompleted(const UnitKey &key) {
+		std::lock_guard< std::mutex > lossLock(m_lossMutex);
+		StreamLoss &loss = m_streamLoss[{ key.senderSession, key.streamID }];
+		++loss.completed;
+		loss.maxCompleteFrame = std::max(loss.maxCompleteFrame, key.frameNumber);
+	}
+
+	void VideoReassembler::noteExpired(const UnitKey &key) {
+		std::lock_guard< std::mutex > lossLock(m_lossMutex);
+		++m_streamLoss[{ key.senderSession, key.streamID }].expired;
+	}
+
+	void VideoReassembler::streamLoss(std::uint32_t senderSession, std::uint32_t streamID, StreamLoss &out) const {
+		std::lock_guard< std::mutex > lossLock(m_lossMutex);
+		const auto it = m_streamLoss.find({ senderSession, streamID });
+		out            = it == m_streamLoss.end() ? StreamLoss{} : it->second;
 	}
 
 	void VideoReassembler::collectNacks(std::uint64_t nowUsec, std::vector< VideoNackRequest > &out) {
@@ -548,6 +573,7 @@ namespace Protocol {
 
 		eraseUnit(it);
 		rememberCompleted(key, nowUsec);
+		noteCompleted(key);
 
 		return VideoReassemblyResult::Complete;
 	}

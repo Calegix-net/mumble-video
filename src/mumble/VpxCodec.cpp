@@ -109,6 +109,14 @@ QImage i420ToRgbScalar(const vpx_image_t *source) {
 
 	QImage image(width, height, QImage::Format_RGB32);
 
+	// A QImage whose allocation failed is null, and scanLine() on a null image returns nullptr without
+	// asserting in a release build. The loop below is bounded by the frame's height rather than by the
+	// image, so it would have written a whole frame through a null pointer. Both swscale failure paths
+	// fall back into this function, which is how an allocation failure reached it.
+	if (image.isNull()) {
+		return image;
+	}
+
 	for (int y = 0; y < height; ++y) {
 		QRgb *scan = reinterpret_cast< QRgb * >(image.scanLine(y));
 
@@ -309,6 +317,9 @@ void VpxEncoder::destroy() {
 		m_raw = nullptr;
 	}
 
+	delete static_cast< vpx_codec_enc_cfg_t * >(m_encCfg);
+	m_encCfg = nullptr;
+
 	m_width  = 0;
 	m_height = 0;
 }
@@ -448,12 +459,37 @@ bool VpxEncoder::configure(int width, int height) {
 		return false;
 	}
 
+	// Keep a copy of the config this encoder was initialised with, so setTargetBitrate() can re-apply it
+	// with one field changed. Everything vpx_codec_control() set above is encoder state, not part of cfg, so
+	// cfg as passed to enc_init is exactly what a later enc_config_set must carry.
+	delete static_cast< vpx_codec_enc_cfg_t * >(m_encCfg);
+	m_encCfg = new vpx_codec_enc_cfg_t(cfg);
+
 	m_width         = width;
 	m_height        = height;
 	m_forceKeyframe = true;
 	m_pts           = 0;
 
 	return true;
+}
+
+void VpxEncoder::setTargetBitrate(unsigned int kbps) {
+	m_bitrate = std::clamp(kbps, 50u, 20000u);
+
+	if (!m_context || !m_encCfg) {
+		// Not running yet; the next configure() will use m_bitrate.
+		return;
+	}
+
+	auto *cfg             = static_cast< vpx_codec_enc_cfg_t * >(m_encCfg);
+	cfg->rc_target_bitrate = m_bitrate;
+
+	// Applied live: no re-init, no forced keyframe, rate-control clock undisturbed.
+	if (vpx_codec_enc_config_set(m_context, cfg) != VPX_CODEC_OK) {
+		// libvpx refused the live update; fall back to the destructive reconfigure (a keyframe on the next
+		// frame), which is still correct, just costlier. Rare in practice.
+		destroy();
+	}
 }
 
 std::vector< EncodedVideoUnit > VpxEncoder::encode(const QImage &frame, std::uint32_t streamID,
@@ -601,6 +637,13 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 		return false;
 	}
 
+	// The bitstream declares these, so they are network input: see MAX_DECODED_FRAME_WIDTH. Refused
+	// before the colour conversion, which is what would do the allocating.
+	if (img->d_w == 0 || img->d_h == 0 || img->d_w > MAX_DECODED_FRAME_WIDTH
+		|| img->d_h > MAX_DECODED_FRAME_HEIGHT) {
+		return false;
+	}
+
 	// Decoding an inter-frame whose reference is missing does not fail - libvpx returns a plausible
 	// corrupted image. The frame-continuity tracking upstream is the real defence; this catches what
 	// it cannot: a keyframe that itself arrived damaged, or any bookkeeping slip. Costs one control
@@ -614,6 +657,13 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 
 	if (image) {
 		*image = i420ToRgb(img, m_sws, m_swsConfigured, m_swsUnusable);
+
+		// A conversion that could not allocate returns a null image. Reporting success with nothing in
+		// it would have the caller treat an empty frame as a decoded one, which is how a share goes
+		// black without anything saying why; H264Decoder::decode already answers false in this case.
+		if (image->isNull()) {
+			return false;
+		}
 	}
 
 	return true;

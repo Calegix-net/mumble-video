@@ -96,6 +96,23 @@ void H264Encoder::setBitrate(unsigned int kbps) {
 	}
 }
 
+void H264Encoder::setTargetBitrate(unsigned int kbps) {
+	kbps      = std::max(100u, std::min(kbps, 50000u));
+	m_bitrate = kbps;
+
+	if (!m_context) {
+		// Not open yet; open() will use m_bitrate.
+		return;
+	}
+
+	// Poke the live context. libx264 picks this up for subsequent frames; VAAPI/NVENC were configured at
+	// open() and usually will not, so this is best effort - no re-open, no forced keyframe either way. The
+	// rc_buffer_size is left as it was sized at open: it only bounds burst, and keeping it steady avoids a
+	// rate-control discontinuity.
+	m_context->bit_rate   = static_cast< std::int64_t >(m_bitrate) * 1000;
+	m_context->rc_max_rate = m_context->bit_rate;
+}
+
 void H264Encoder::setFramerate(unsigned int fps) {
 	fps = std::max(1u, std::min(fps, 60u));
 	if (fps != m_framerate) {
@@ -639,7 +656,12 @@ bool H264Decoder::decode(const QByteArray &accessUnit, QImage *image) {
 	while (avcodec_receive_frame(m_context, m_frame) == 0) {
 		const bool damaged = m_frame->decode_error_flags != 0 || (m_frame->flags & AV_FRAME_FLAG_CORRUPT) != 0;
 
-		decoded = !damaged && m_frame->width > 0 && m_frame->height > 0;
+		// The upper bounds matter as much as the lower ones: the frame's dimensions come from the
+		// bitstream, so they are network input. See MAX_DECODED_FRAME_WIDTH for what a frame declaring
+		// 16384 square would otherwise cost, and why refusing it cannot reject a conforming sender.
+		decoded = !damaged && m_frame->width > 0 && m_frame->height > 0
+				  && static_cast< unsigned int >(m_frame->width) <= MAX_DECODED_FRAME_WIDTH
+				  && static_cast< unsigned int >(m_frame->height) <= MAX_DECODED_FRAME_HEIGHT;
 
 		if (decoded && image) {
 			m_sws = sws_getCachedContext(m_sws, m_frame->width, m_frame->height,

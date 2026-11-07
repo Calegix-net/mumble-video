@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <tuple>
 #include <vector>
 
 /**
@@ -31,6 +32,21 @@
  * Authorisation is injected rather than called directly so that this class can be tested without a
  * running server, and so that the routing logic and the permission model can be reasoned about
  * separately.
+ *
+ * ## One rule this class does not enforce
+ *
+ * A stream whose codec is OpusAudio carries sound rather than a picture, and sound is subject to the
+ * voice controls - a muted or suppressed sender may not transmit it, and a deafened subscriber may not
+ * receive it. None of that is checked here, because the authorizers are given a sender and a subscriber
+ * and not a codec, and a stream knows its codec only through the announcement the server keeps.
+ * Server::relayVideo applies it instead, on every datagram, using videoStreamCarriesAudio() with
+ * mayTransmitStreamAudio() and mayHearStreamAudio().
+ *
+ * That split is worth knowing about before adding a second caller of subscribersOf(): this class will
+ * hand back a deafened subscriber, and the rule that says not to send them a share's audio lives in the
+ * caller. The division is deliberate - it keeps a per-datagram codec lookup out of a class that has no
+ * business knowing about codecs - but it is exactly the sort of thing that gets lost and reintroduced
+ * as a bug, which is why it is written here rather than only there.
  *
  * ## Locking
  *
@@ -195,6 +211,18 @@ public:
 	bool admitKeyframeRequest(std::uint32_t requester, std::uint32_t sender, std::uint32_t streamID,
 							  std::int64_t nowMsec);
 
+	/// Shortest interval between two feedback reports from one receiver, for one stream, that the server
+	/// will relay to the sender. The receiver reports about once a second; this leaves slack for that while
+	/// bounding a receiver that tries to flood the sender with reports.
+	static constexpr std::int64_t FEEDBACK_RELAY_INTERVAL_MSEC = 450;
+
+	/// Whether a congestion-feedback report from @p reporter about @p sender's stream should be relayed to
+	/// the sender. Only an actual, still-permitted subscriber may report (so this is not a channel for an
+	/// outsider to reach a sender), and at most one report per FEEDBACK_RELAY_INTERVAL_MSEC per reporter per
+	/// stream. @param nowMsec caller-supplied, as for admitKeyframeRequest().
+	bool admitFeedbackRelay(std::uint32_t reporter, std::uint32_t sender, std::uint32_t streamID,
+							std::int64_t nowMsec);
+
 protected:
 	ReceiveAuthorizer m_mayReceive;
 	SendAuthorizer m_maySend;
@@ -216,6 +244,10 @@ protected:
 	// When each live stream last had a keyframe request admitted - see admitKeyframeRequest(). Forgotten
 	// with the stream, so a stream id that is ended and announced again starts with a clean slate.
 	std::map< StreamKey, std::int64_t > m_lastKeyframeRequestMsec;
+
+	// When each (reporter, sender, stream) triple last had a feedback report relayed - see
+	// admitFeedbackRelay(). Pruned in removeUser() for a leaving reporter or sender.
+	std::map< std::tuple< std::uint32_t, std::uint32_t, std::uint32_t >, std::int64_t > m_lastFeedbackRelayMsec;
 };
 
 #endif // MUMBLE_MURMUR_VIDEOROUTER_H_

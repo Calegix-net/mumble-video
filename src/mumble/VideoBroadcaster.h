@@ -56,6 +56,10 @@ public:
 	};
 
 	void configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality, int tileSize);
+	/// Changes the target bitrate of the running encoder in place (no teardown, no forced keyframe), for
+	/// congestion control. Dispatches to the active codec's non-destructive setter; a no-op for TiledImage,
+	/// which has no rate target.
+	void setBitrate(unsigned int bitrateKbps);
 	void setCodec(int codec);
 	/// Starts over at a keyframe. @p reopenHardware also closes the hardware H.264 encoder, which is slow
 	/// (a hundred milliseconds or more on some drivers) and only needed when a stream starts.
@@ -130,6 +134,12 @@ public:
 	/// refuses what exceeds its bound rather than scaling it.
 	static constexpr int MAX_ENCODED_WIDTH  = 3840;
 	static constexpr int MAX_ENCODED_HEIGHT = 2160;
+	// "They must agree" is now enforced rather than asked for. The decoders refuse a frame larger than
+	// MAX_DECODED_FRAME_WIDTH, so raising the send cap without raising that one would make this client
+	// produce streams that other copies of itself drop in silence.
+	static_assert(MAX_ENCODED_WIDTH <= static_cast< int >(MAX_DECODED_FRAME_WIDTH)
+					  && MAX_ENCODED_HEIGHT <= static_cast< int >(MAX_DECODED_FRAME_HEIGHT),
+				  "the encoder may not produce a frame the decoders are built to refuse");
 	/// A VP9 screen share is scaled to fit 2560x1440. At the bitrates a home uplink carries, more pixels
 	/// do not make text sharper - they make every frame softer - and a 4K keyframe could exceed the
 	/// transport's largest unit (VideoFragmenter::maxUnitSize(), about 275 KB).
@@ -207,6 +217,12 @@ public:
 	/// Applies the capture and quality settings. Called before start() so the first frame already uses
 	/// them; neither VP8 nor VP9 can change resolution mid-stream.
 	void configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality, int tileSize);
+
+	/// Changes the encoder's target bitrate mid-stream, in place, for congestion control. Marshalled onto
+	/// the encode thread (withCore), so it is ordered with the encode jobs and needs no locking. Unlike
+	/// configure(), it does not tear the encoder down or force a keyframe (VP8/VP9; best effort for H.264).
+	/// Safe to call at any cadence, though the controller keeps it to roughly once a second.
+	void setBitrate(unsigned int bitrateKbps);
 
 	/**
 	 * Encodes on a thread of its own instead of the caller's.

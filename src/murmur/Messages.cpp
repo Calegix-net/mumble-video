@@ -2613,6 +2613,28 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 
 	msg.set_session(uSource->uiSession);
 
+	// source_name is a label - a window title, a monitor name, a camera name - and purely
+	// informational: nothing on the receiving side reads it. Nothing bounded it either, so the only
+	// ceiling was the 8 MB control frame limit. One sender holding MAX_STREAMS_PER_SENDER streams could
+	// therefore park tens of megabytes of server memory in m_videoAnnouncements, have every byte of it
+	// re-serialised to every user permitted to see the stream, and have the whole lot replayed to each
+	// client that connected afterwards.
+	//
+	// Truncated rather than refused: an over-long label is not a reason to stop someone sharing their
+	// screen. The cut is moved back off any UTF-8 continuation byte, because a string chopped through
+	// the middle of a character is not valid UTF-8 and a proto2 string field is supposed to be.
+	if (msg.has_source_name() && msg.source_name().size() > MAX_VIDEO_SOURCE_NAME_BYTES) {
+		std::string name = msg.source_name();
+		std::size_t cut  = MAX_VIDEO_SOURCE_NAME_BYTES;
+
+		while (cut > 0 && (static_cast< unsigned char >(name[cut]) & 0xC0) == 0x80) {
+			cut--;
+		}
+
+		name.resize(cut);
+		msg.set_source_name(name);
+	}
+
 	const auto streamKey =
 		std::make_pair(static_cast< unsigned int >(uSource->uiSession), static_cast< unsigned int >(msg.stream_id()));
 
@@ -2672,6 +2694,17 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		msg.set_target_bandwidth(iVideoBandwidth);
 	}
 
+	// An OpusAudio stream is sound, so transmitting one is speaking and needs the right to speak. The
+	// relay re-checks this on every datagram, which is what actually enforces it while a share is
+	// running; refusing the announcement as well means a muted user is told so, instead of sharing
+	// apparently successfully and being silently dropped downstream.
+	if (msg.active() && msg.codec() == MumbleProto::VideoState_Codec_OpusAudio
+		&& !mayTransmitStreamAudio(uSource)) {
+		PERM_DENIED(uSource, uSource->cChannel, ChanACL::Speak);
+
+		return;
+	}
+
 	if (!m_videoRouter.announceStream(uSource->uiSession, msg.stream_id(), msg.active())) {
 		// Either the user may not share video here, or they already hold too many streams. Both are
 		// reported as a permission denial rather than distinguished, since the stream count is a server
@@ -2688,6 +2721,9 @@ void Server::msgVideoState(ServerUser *uSource, MumbleProto::VideoState &msg) {
 		m_videoAnnouncements[streamKey] = msg;
 	} else {
 		m_videoAnnouncements.erase(streamKey);
+		// The stream is gone, so its bandwidth meter (Server::relayVideo) should be too, or a sender that
+		// cycles stream ids would leave a bucket behind for each.
+		uSource->m_videoStreamBandwidth.erase(static_cast< unsigned int >(msg.stream_id()));
 	}
 
 	// Relayed only to those who could actually subscribe. Announcing a stream to a user who is not
@@ -2776,6 +2812,38 @@ void Server::msgVideoSubscribe(ServerUser *uSource, MumbleProto::VideoSubscribe 
 			request.set_request_keyframe(true);
 
 			sendMessage(senderUser, request);
+		}
+	}
+
+	// Relay the receiver's congestion-control feedback to the sender, independently of a keyframe request.
+	// Only a subscriber's feedback is forwarded (the subscription above was applied first), and only when
+	// at least one feedback field is present, so an ordinary subscribe or keyframe message costs nothing.
+	// Rate-limited per receiver per stream (admitFeedbackRelay). The sender aggregates whatever arrives;
+	// losing some reports is harmless - they are statistical.
+	if (msg.subscribe()
+		&& (msg.has_observed_loss_permille() || msg.has_last_complete_frame() || msg.has_preferred_bandwidth())) {
+		ServerUser *senderUser = qhUsers.value(sender);
+
+		if (senderUser
+			&& m_videoRouter.admitFeedbackRelay(uSource->uiSession, sender, msg.stream_id(),
+												tUptime.elapsed< std::chrono::milliseconds >().count())) {
+			MumbleProto::VideoSubscribe fb;
+			// session names the sender's own stream (as the keyframe relay does); subscribe stays true so a
+			// client predating feedback reads this as an idempotent re-subscribe, never an unsubscribe.
+			fb.set_session(sender);
+			fb.set_stream_id(msg.stream_id());
+			fb.set_subscribe(true);
+			if (msg.has_observed_loss_permille()) {
+				fb.set_observed_loss_permille(msg.observed_loss_permille());
+			}
+			if (msg.has_last_complete_frame()) {
+				fb.set_last_complete_frame(msg.last_complete_frame());
+			}
+			if (msg.has_preferred_bandwidth()) {
+				fb.set_preferred_bandwidth(msg.preferred_bandwidth());
+			}
+			fb.set_reporter_session(uSource->uiSession);
+			sendMessage(senderUser, fb);
 		}
 	}
 

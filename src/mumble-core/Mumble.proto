@@ -866,7 +866,13 @@ message VideoState {
 	optional Codec codec = 4 [default = CODEC_UNKNOWN];
 	optional SourceKind source_kind = 5 [default = SOURCE_UNKNOWN];
 	// Human readable description of the source (camera name, monitor name, window title, application
-	// name). Purely informational. Subject to the server's ServerConfig.message_length limit.
+	// name). Purely informational; no receiver is required to read it, and this fork's client does not.
+	//
+	// The server truncates it to 512 bytes, on a UTF-8 character boundary, before storing or relaying
+	// it. Senders should not rely on more surviving. This is not the message_length limit the comment
+	// here used to claim: that limit was never applied to this field, which left the 8 MB control frame
+	// limit as the only bound on a string the server retains per stream and replays to every client
+	// that connects later.
 	optional string source_name = 6;
 
 	// Nominal frame dimensions in pixels. Advisory: receivers must still cope with the decoder
@@ -913,6 +919,12 @@ message VideoSubscribe {
 	// Receiver's preferred ceiling in bits per second, for instance because it is displaying the stream
 	// as a small thumbnail. 0 means no preference.
 	optional uint32 preferred_bandwidth = 7;
+	// Session of the receiver this feedback came from. Left unset by a client; set by the SERVER when it
+	// relays a feedback report to the stream's sender, mirroring MumbleUDP.VideoNack.requester_session, so
+	// the sender can keep per-receiver rate-control state and age out a viewer that goes quiet. Unset when
+	// the relaying server predates this field: the sender then folds all feedback into one bucket, which
+	// degrades aggregation but stays correct.
+	optional uint32 reporter_session = 8;
 }
 
 // Describes a file held in the server's file store. Announced inside TextMessage and returned by the

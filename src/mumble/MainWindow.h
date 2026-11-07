@@ -15,6 +15,7 @@
 #include "AudioOutputToken.h"
 #include "CustomElements.h"
 #include "Log.h"
+#include "VideoCongestionController.h"
 #include "MUComboBox.h"
 #include "Mumble.pb.h"
 #include "MumbleProtocol.h"
@@ -394,6 +395,18 @@ protected:
 	/// at every step - the server allows only a few plugin messages a second.
 	std::set< unsigned int > m_volumeReportPending;
 	QTimer *m_volumeReportTimer = nullptr;
+
+	/// Video congestion control. One controller per active outgoing stream (camera, screen), keyed by
+	/// stream id, driven once a second by m_videoCongestionTimer: as a sender it folds the viewers' loss
+	/// feedback into the encoder bitrate; as a viewer the same tick reports this client's own reception loss
+	/// back to each stream's sender. m_videoLossSnapshot holds the previous (completed, expired) unit counts
+	/// per watched stream so the report can be a delta.
+	std::map< unsigned int, VideoCongestionController > m_videoCongestion;
+	std::map< std::uint64_t, std::pair< std::uint64_t, std::uint64_t > > m_videoLossSnapshot;
+	QTimer *m_videoCongestionTimer = nullptr;
+	void onVideoCongestionTick();
+	/// The controller for an outgoing stream if one is live, else nullptr (they are created in the tick).
+	VideoCongestionController *congestionControllerForStreamId(unsigned int streamID);
 
 	static std::uint64_t screenShareAudioKey(unsigned int senderSession, unsigned int streamID) {
 		return (static_cast< std::uint64_t >(senderSession) << 32) | streamID;

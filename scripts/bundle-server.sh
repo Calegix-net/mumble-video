@@ -2,13 +2,15 @@
 # Stages the built server binary into a directory that docker/Dockerfile.server can be built against.
 #
 # Run from inside the Linux build container (docker/Dockerfile), with the project already built at
-# BUILD_DIR. Produces OUT_DIR/bin/mumble-server and OUT_DIR/lib. The runtime image resolves most shared
-# libraries the binary needs from its own dnf packages; ZeroC Ice is not packaged by Fedora, so when the
-# server was built with Ice the libraries it links (from build-ice.sh) are staged into OUT_DIR/lib.
+# BUILD_DIR. Produces OUT_DIR/bin/mumble-server and OUT_DIR/lib, plus the runtime image's default config
+# and entrypoint copied from SRC_DIR/docker. The runtime image resolves most shared libraries the binary
+# needs from its own dnf packages; ZeroC Ice is not packaged by Fedora, so when the server was built with
+# Ice the libraries it links (from build-ice.sh) are staged into OUT_DIR/lib.
 set -euo pipefail
 
 BUILD_DIR="${1:-/build}"
 OUT_DIR="${2:-/out/server}"
+SRC_DIR="${3:-/src}"
 
 if [ ! -x "${BUILD_DIR}/mumble-server" ]; then
     echo "bundle-server: no mumble-server binary at ${BUILD_DIR}/mumble-server - was the project built with -Dserver=ON?" >&2
@@ -17,6 +19,11 @@ fi
 
 mkdir -p "${OUT_DIR}/bin" "${OUT_DIR}/lib"
 cp "${BUILD_DIR}/mumble-server" "${OUT_DIR}/bin/mumble-server"
+
+# The runtime image's default config and entrypoint (docker/Dockerfile.server COPYs these from the staging
+# dir, since its build context is OUT_DIR, not the source tree).
+cp "${SRC_DIR}/docker/mumble-server.docker.ini" "${OUT_DIR}/mumble-server.ini.default"
+cp "${SRC_DIR}/docker/docker-entrypoint.sh" "${OUT_DIR}/docker-entrypoint.sh"
 
 # Each libIce*.so.37 the binary resolves, copied under its soname. -L follows the soname symlink.
 ldd "${BUILD_DIR}/mumble-server" | awk '$1 ~ /^libIce/ && $3 ~ /^\// { print $3 }' | while read -r lib; do

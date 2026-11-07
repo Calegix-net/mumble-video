@@ -185,6 +185,14 @@ public:
 	void requestVideoUnitsRetransmission(unsigned int senderSession, unsigned int streamID, quint64 frameNumber,
 										 const QList< unsigned int > &unitIDs);
 
+	/// Snapshot of a watched stream's cumulative reassembly loss, for the congestion-control feedback a
+	/// viewer reports back to the sender. Thread-safe (the reassembler guards it); callable from the GUI
+	/// thread while the network thread writes.
+	void videoStreamLoss(unsigned int senderSession, unsigned int streamID,
+						 Mumble::Protocol::VideoReassembler::StreamLoss &out) const {
+		m_videoReceiver.reassembler().streamLoss(senderSession, streamID, out);
+	}
+
 protected:
 	/// Flag indicating whether the server we are currently connected to has
 	/// finished synchronizing already.

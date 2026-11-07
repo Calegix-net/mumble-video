@@ -141,6 +141,7 @@ private slots:
 	void bitrateControlIsRespected();
 	void resizingRestartsTheStream();
 	void resetForcesAKeyframe();
+	void setTargetBitrateDoesNotForceAKeyframe();
 	void aDecoderWithoutAKeyframeProducesNothing();
 	void garbageIsRejected();
 	void aScreenIsEncodedWithVp9();
@@ -495,6 +496,38 @@ void TestVpxCodec::resetForcesAKeyframe() {
 	const std::vector< EncodedVideoUnit > forced = encoder.encode(renderScene(320, 240, 2), 1, 2, 0);
 	QCOMPARE(forced.size(), static_cast< std::size_t >(1));
 	QVERIFY(forced[0].header.isKeyframe);
+}
+
+void TestVpxCodec::setTargetBitrateDoesNotForceAKeyframe() {
+	// The whole point of setTargetBitrate() (vs. the destructive setBitrate() above) is that congestion
+	// control can move the rate without a keyframe burst. This proves it: no keyframe across a change, and -
+	// for contrast - setBitrate() still does force one.
+	VpxEncoder encoder;
+	encoder.setKeyframeInterval(1000);   // so a periodic keyframe cannot be mistaken for one a rate change caused
+	encoder.setBitrate(2000);
+
+	encoder.encode(renderScene(320, 240, 0), 1, 0, 0, true);
+	for (std::uint64_t i = 1; i < 5; ++i) {
+		const std::vector< EncodedVideoUnit > u = encoder.encode(renderScene(320, 240, static_cast< int >(i)), 1, i, 0);
+		QVERIFY(!u.empty());
+		QVERIFY(!u[0].header.isKeyframe);
+	}
+
+	encoder.setTargetBitrate(500);
+	QCOMPARE(encoder.bitrate(), 500u);
+
+	for (std::uint64_t i = 5; i < 20; ++i) {
+		const std::vector< EncodedVideoUnit > u = encoder.encode(renderScene(320, 240, static_cast< int >(i)), 1, i, 0);
+		QVERIFY(!u.empty());
+		QVERIFY2(!u[0].header.isKeyframe,
+				 qPrintable(QStringLiteral("frame %1 after setTargetBitrate was an unexpected keyframe").arg(i)));
+	}
+
+	// Contrast: the destructive setBitrate() tears the encoder down, so the next frame is a keyframe.
+	encoder.setBitrate(1200);
+	const std::vector< EncodedVideoUnit > forcedKf = encoder.encode(renderScene(320, 240, 20), 1, 20, 0);
+	QVERIFY(!forcedKf.empty());
+	QVERIFY(forcedKf[0].header.isKeyframe);
 }
 
 void TestVpxCodec::aDecoderWithoutAKeyframeProducesNothing() {

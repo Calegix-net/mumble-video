@@ -3,23 +3,45 @@
 # that can be found in the LICENSE file at the root of the
 # Mumble source tree or at <https://www.mumble.info/LICENSE>.
 
-# Runtime image for the video-enabled server. Build the project first (see README.md), install it into
-# a staging directory, and pass that directory as the build context.
+# Runtime image for the video-enabled server. Build the project first (see README.md), then run
+# scripts/bundle-server.sh to produce the staging directory this is built against (it stages the binary,
+# the Ice libraries, and - for a usable-out-of-the-box image - this image's default config and entrypoint).
 FROM fedora:42
 
+LABEL org.opencontainers.image.title="Mumble video server" \
+      org.opencontainers.image.description="Low-latency voice + video/screen-share Mumble server (video-enabled fork)" \
+      org.opencontainers.image.source="https://github.com/Calegix-net/mumble-video" \
+      org.opencontainers.image.licenses="BSD-3-Clause"
+
+# Runtime shared libraries only. shadow-utils provides useradd/groupadd for the unprivileged user below.
+# (No libvpx: the server routes video packets but never encodes or decodes, so it links no vpx symbol.)
 RUN dnf install -y --setopt=install_weak_deps=False \
         qt6-qtbase qt6-qtbase-mysql qt6-qtbase-postgresql \
         openssl protobuf boost-date-time libcap \
-        avahi-compat-libdns_sd libvpx \
+        avahi-compat-libdns_sd \
         mariadb-connector-c libpq sqlite \
+        shadow-utils \
     && dnf clean all
+
+# An unprivileged user the server drops to (via the config's `uname` option). Its home is the data volume.
+RUN groupadd -r mumble && useradd -r -g mumble -d /data -s /sbin/nologin mumble
 
 COPY bin/mumble-server /usr/local/bin/mumble-server
 # ZeroC Ice for the Ice RPC interface (empty when the server was built without it).
 COPY lib/ /usr/local/lib64/
 RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/mumble-server.conf && ldconfig
 
+# The baked-in default config (seeded into /data on first run) and the entrypoint that seeds it.
+COPY mumble-server.ini.default /etc/mumble/mumble-server.ini.default
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# All server state (database + auto-generated certificate) lives here; mount a named volume to persist it.
+VOLUME ["/data"]
+WORKDIR /data
+
 EXPOSE 64738/tcp 64738/udp
 
-# --foreground keeps the process as PID 1; daemonising would fork and exit, stopping the container.
-ENTRYPOINT ["/usr/local/bin/mumble-server", "--foreground", "-i", "/data/mumble-server.ini"]
+# The entrypoint runs as root only long enough to seed /data/mumble-server.ini and make /data writable;
+# the server then drops to the unprivileged 'mumble' user via that config's `uname` option.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

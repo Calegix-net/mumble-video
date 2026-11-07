@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -290,6 +291,24 @@ namespace Protocol {
 		 */
 		std::size_t bufferedBytes() const { return m_bufferedBytes; }
 
+		/// Cumulative per-stream loss, the raw material for the receiver's congestion-control feedback.
+		struct StreamLoss {
+			/// Units fully reassembled.
+			std::uint64_t completed = 0;
+			/// Units given up on the reassembly *timeout* only - genuine unrecoverable loss. Deliberately
+			/// NOT the capacity evictions (enforceSenderLimit/Global/ByteBudget), which fire on a fast
+			/// sender over a GOOD link under burst reorder, nor Invalid discards, which are attacker-driven:
+			/// counting either would turn reordering or malformed packets into false congestion backoff.
+			std::uint64_t expired = 0;
+			/// Highest fully reassembled frame number, for VideoSubscribe.last_complete_frame.
+			std::uint64_t maxCompleteFrame = 0;
+		};
+
+		/// Thread-safe snapshot of a stream's cumulative loss (all zero if the stream is unknown). The
+		/// counters are written on the receive thread and read from the controller's (GUI) thread, so a
+		/// small mutex guards the map; the increments are per completed/expired unit, not per fragment.
+		void streamLoss(std::uint32_t senderSession, std::uint32_t streamID, StreamLoss &out) const;
+
 	protected:
 		struct UnitKey {
 			std::uint32_t senderSession;
@@ -346,6 +365,13 @@ namespace Protocol {
 		// Sum of totalBytes over every tracked unit, maintained incrementally so the memory bound can be
 		// checked without walking the map.
 		std::size_t m_bufferedBytes = 0;
+
+		// Per-(sender, stream) cumulative loss counters, guarded by m_lossMutex because streamLoss() reads
+		// them from another thread. Bounded by the number of live streams; pruned in removeSender().
+		mutable std::mutex m_lossMutex;
+		std::map< std::pair< std::uint32_t, std::uint32_t >, StreamLoss > m_streamLoss;
+		void noteCompleted(const UnitKey &key);
+		void noteExpired(const UnitKey &key);
 
 		MumbleUDP::Video m_message;
 

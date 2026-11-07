@@ -83,6 +83,9 @@ namespace Protocol {
 		std::uint64_t m_lastNackCollectUsec = 0;
 		std::uint64_t m_nackWindowStartUsec = 0;
 		unsigned int m_nackMessagesInWindow = 0;
+		/// Rotating start index across streams when the per-second message budget is tight, so that no one
+		/// stream (by session/stream-id order) is permanently served ahead of the others. See collectNacks().
+		unsigned int m_nackStreamRotation = 0;
 
 		void collectNacks(std::uint64_t nowUsec, VideoReceiveEvents &events);
 	};

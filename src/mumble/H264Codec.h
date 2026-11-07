@@ -59,6 +59,13 @@ public:
 	void setBitrate(unsigned int kbps);
 	unsigned int bitrate() const { return m_bitrate; }
 
+	/// Changes the target bitrate of a running encoder in place, without the teardown + forced keyframe
+	/// setBitrate() does - for congestion control, which nudges the rate often. Best effort: software
+	/// encoders (libx264) honour a live bit_rate change, but hardware encoders (VAAPI, NVENC) are
+	/// configured at open and commonly ignore it, so this is not guaranteed to take effect the way the
+	/// VP8/VP9 path is. A no-op before the encoder is open; the pending value is used at the next open.
+	void setTargetBitrate(unsigned int kbps);
+
 	void setFramerate(unsigned int fps);
 	unsigned int framerate() const { return m_framerate; }
 

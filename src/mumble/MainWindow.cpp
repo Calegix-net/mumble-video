@@ -736,6 +736,14 @@ void MainWindow::setupVideoGrid() {
 		m_volumeReportPending.clear();
 	});
 
+	// Congestion control runs once a second: as a sender it moves each outgoing stream's encoder bitrate to
+	// match the viewers' reported loss, and as a viewer it reports this client's own reception loss back to
+	// each watched stream's sender. Cheap when nothing is shared or watched, so it simply always runs.
+	m_videoCongestionTimer = new QTimer(this);
+	m_videoCongestionTimer->setInterval(1000);
+	connect(m_videoCongestionTimer, &QTimer::timeout, this, &MainWindow::onVideoCongestionTick);
+	m_videoCongestionTimer->start();
+
 	// A stream the grid gave up on for having gone silent too long - see VideoGrid's stale-stream
 	// watchdog. Ordinarily msgUserRemove is what withdraws a departed sender's subscription (see
 	// Messages.cpp); this exists specifically for the case that message never arrives at all - the
@@ -870,6 +878,20 @@ static MumbleProto::VideoState_Codec announcedCodec(int codec) {
 	}
 }
 
+/// Sets VideoState.source_name for an announcement we are about to send - deliberately to nothing.
+///
+/// The name of a shared source is its window or application title, which is often sensitive: it reads
+/// "Firefox - Online Banking", "Signal - Mum", "Spotify" and the like. Today no receiving client ever
+/// displays it (the only reader is the server, which merely length-clamps and relays it), so putting it in
+/// the channel-wide VideoState announcement leaks it to everyone in the channel - watchers and
+/// non-watchers alike - and buys nothing. We therefore send no source name at all. Should a future
+/// "show what is being shared" feature want this label, it must relay it to that stream's subscribers
+/// only, never broadcast it channel-wide; centralising the decision here is what makes that a one-line
+/// change rather than a hunt through every announcement site.
+static void setPrivacySafeSourceName(MumbleProto::VideoState &) {
+	// Intentionally empty. See the comment above before adding anything here.
+}
+
 /// The codec a new screen share uses: H.264 when the settings allow it and a hardware encoder opens on this
 /// machine - the graphics card does the work, as with Discord's Go Live - and VP9 in its screen-content mode
 /// otherwise, which needs no graphics card and about half the bitrate for the same picture (see
@@ -911,7 +933,7 @@ void MainWindow::announceVideoResize(VideoBroadcaster *broadcaster, int sourceKi
 	state.set_active(true);
 	state.set_codec(announcedCodec(broadcaster->codec()));
 	state.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
-	state.set_source_name(u8(broadcaster->describe()));
+	setPrivacySafeSourceName(state);
 	state.set_width(static_cast< unsigned int >(size.width()));
 	state.set_height(static_cast< unsigned int >(size.height()));
 	// Announce the replacement first so viewers can carry their watch choice across.
@@ -1129,7 +1151,7 @@ void MainWindow::setupScreenShare() {
 		state.set_active(true);
 		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(sourceKind);
-		state.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		setPrivacySafeSourceName(state);
 		state.set_width(static_cast< unsigned int >(frame.width()));
 		state.set_height(static_cast< unsigned int >(frame.height()));
 		Global::get().sh->sendMessage(state);
@@ -1278,7 +1300,7 @@ void MainWindow::toggleCameraShare(bool share) {
 	mpvs.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 	mpvs.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
 	mpvs.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
-	mpvs.set_source_name(u8(m_videoBroadcaster->describe()));
+	setPrivacySafeSourceName(mpvs);
 
 	Global::get().sh->sendMessage(mpvs);
 
@@ -1425,7 +1447,7 @@ void MainWindow::toggleScreenShare(bool share) {
 		state.set_active(true);
 		state.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		state.set_source_kind(MumbleProto::VideoState_SourceKind_Display);
-		state.set_source_name(u8(description));
+		setPrivacySafeSourceName(state);
 		state.set_width(static_cast< unsigned int >(mockWidth));
 		state.set_height(static_cast< unsigned int >(mockHeight));
 		state.set_max_framerate(static_cast< unsigned int >(mockSettings.iScreenShareFramerate));
@@ -1728,7 +1750,7 @@ void MainWindow::toggleScreenShare(bool share) {
 			audioState.set_active(true);
 			audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 			audioState.set_source_kind(sourceKind);
-			audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+			setPrivacySafeSourceName(audioState);
 
 			Global::get().sh->sendMessage(audioState);
 		} else {
@@ -1743,7 +1765,7 @@ void MainWindow::toggleScreenShare(bool share) {
 	videoState.set_active(true);
 	videoState.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 	videoState.set_source_kind(sourceKind);
-	videoState.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+	setPrivacySafeSourceName(videoState);
 
 	Global::get().sh->sendMessage(videoState);
 
@@ -1761,6 +1783,19 @@ void MainWindow::onScreenShareOpusUnitReceived(unsigned int senderSession, unsig
 		if (!sender) {
 			qWarning("MainWindow: screen-share audio unit for unknown session %u, dropped", senderSession);
 
+			return;
+		}
+
+		// Only decode audio for a stream this client actually subscribed to. The server is supposed to
+		// forward screen-share audio to subscribers alone, but that is the server's word for it; gating
+		// here on the client's own subscription set means a malicious or buggy server cannot make this
+		// client spin up an Opus decoder (and the resample buffers behind it) for a stream the user never
+		// chose to hear, nor exhaust memory by walking stream_id, since the number of live decoders is then
+		// bounded by the handful of streams the user is actually watching. A unit that arrives just after
+		// the user stopped watching - erased from the set in syncScreenShareAudioSubscription() - is
+		// dropped here too, which is exactly what stopping watching should do.
+		const std::uint64_t subscriptionKey = screenShareAudioKey(senderSession, streamID);
+		if (m_subscribedScreenAudio.find(subscriptionKey) == m_subscribedScreenAudio.end()) {
 			return;
 		}
 
@@ -1806,7 +1841,7 @@ void MainWindow::startScreenShareAudio(int sourceKind) {
 	audioState.set_active(true);
 	audioState.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 	audioState.set_source_kind(static_cast< MumbleProto::VideoState_SourceKind >(sourceKind));
-	audioState.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+	setPrivacySafeSourceName(audioState);
 
 	Global::get().sh->sendMessage(audioState);
 #else
@@ -5595,6 +5630,103 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	emit disconnectedFromServer();
 }
 
+VideoCongestionController *MainWindow::congestionControllerForStreamId(unsigned int streamID) {
+	const auto it = m_videoCongestion.find(streamID);
+	return it == m_videoCongestion.end() ? nullptr : &it->second;
+}
+
+void MainWindow::onVideoCongestionTick() {
+	ServerHandler *sh = Global::get().sh.get();
+	if (!sh) {
+		return;
+	}
+	const std::int64_t now  = QDateTime::currentMSecsSinceEpoch();
+	const Settings &s       = Global::get().s;
+	static const bool ccLog = !qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS");
+
+	// Sender side: for each active outgoing stream, update its controller's ceiling (settings or server
+	// cap may have changed) and apply the bitrate it decides. setBitrate is non-destructive, so this costs
+	// no keyframe.
+	const auto drive = [&](VideoBroadcaster *b, bool screen, unsigned int configuredKbps) {
+		if (!b || !b->isActive()) {
+			return;
+		}
+		const unsigned int streamID = b->streamID();
+		auto it                     = m_videoCongestion.find(streamID);
+		if (it == m_videoCongestion.end()) {
+			it = m_videoCongestion.try_emplace(streamID, screen).first;
+		}
+		it->second.setCeiling(clampToServerVideoBandwidth(configuredKbps));
+		const unsigned int target = it->second.tick(now);
+		b->setBitrate(target);
+		if (ccLog) {
+			qInfo("VideoCC tx stream=%u ceiling=%u floor=%u target=%u", streamID,
+				  clampToServerVideoBandwidth(configuredKbps), it->second.floor(), target);
+		}
+	};
+	drive(m_videoBroadcaster, false, static_cast< unsigned int >(s.iVideoBitrate));
+	if (m_screenVideoBroadcaster) {
+		drive(m_screenVideoBroadcaster, true, screenShareBitrate(s, m_screenVideoBroadcaster->codec()));
+	}
+
+	// Forget controllers whose stream is no longer being sent.
+	for (auto it = m_videoCongestion.begin(); it != m_videoCongestion.end();) {
+		const bool live =
+			(m_videoBroadcaster && m_videoBroadcaster->isActive() && m_videoBroadcaster->streamID() == it->first)
+			|| (m_screenVideoBroadcaster && m_screenVideoBroadcaster->isActive()
+				&& m_screenVideoBroadcaster->streamID() == it->first);
+		it = live ? std::next(it) : m_videoCongestion.erase(it);
+	}
+
+	// Receiver side: report this client's reception loss for each stream it is watching, as a delta over the
+	// last second, so the sender's controller can react.
+	if (!m_videoGrid) {
+		return;
+	}
+	std::set< std::uint64_t > watchedKeys;
+	for (const auto &key : m_videoGrid->watchedStreamKeys()) {
+		const unsigned int sender   = key.first;
+		const unsigned int streamID = key.second;
+		const std::uint64_t mapKey  = (static_cast< std::uint64_t >(sender) << 32) | streamID;
+		watchedKeys.insert(mapKey);
+
+		Mumble::Protocol::VideoReassembler::StreamLoss loss;
+		sh->videoStreamLoss(sender, streamID, loss);
+
+		const auto prevIt = m_videoLossSnapshot.find(mapKey);
+		if (prevIt == m_videoLossSnapshot.end()) {
+			// First look at this stream: record a baseline and skip. A delta needs two samples, and this
+			// also sidesteps the keyframe-join loss spike a freshly watched stream reports.
+			m_videoLossSnapshot[mapKey] = { loss.completed, loss.expired };
+			continue;
+		}
+
+		const std::uint64_t dComp = loss.completed - prevIt->second.first;
+		const std::uint64_t dExp  = loss.expired - prevIt->second.second;
+		prevIt->second            = { loss.completed, loss.expired };
+
+		const std::uint64_t denom   = dComp + dExp;
+		const unsigned int permille = denom == 0 ? 0u : static_cast< unsigned int >((1000 * dExp) / denom);
+
+		MumbleProto::VideoSubscribe fb;
+		fb.set_session(sender);
+		fb.set_stream_id(streamID);
+		fb.set_subscribe(true);   // a feedback report must not read as an unsubscribe (subscribe defaults false)
+		fb.set_observed_loss_permille(permille);
+		fb.set_last_complete_frame(loss.maxCompleteFrame);
+		sh->sendMessage(fb);
+		if (ccLog) {
+			qInfo("VideoCC rx-report sender=%u stream=%u permille=%u dExp=%llu dComp=%llu", sender, streamID,
+				  permille, static_cast< unsigned long long >(dExp), static_cast< unsigned long long >(dComp));
+		}
+	}
+
+	// Forget snapshots for streams no longer watched.
+	for (auto it = m_videoLossSnapshot.begin(); it != m_videoLossSnapshot.end();) {
+		it = watchedKeys.count(it->first) ? std::next(it) : m_videoLossSnapshot.erase(it);
+	}
+}
+
 void MainWindow::onVideoNackReceived(const QByteArray &serializedNack) {
 	MumbleUDP::VideoNack nack;
 	if (!Global::get().sh
@@ -5604,6 +5736,11 @@ void MainWindow::onVideoNackReceived(const QByteArray &serializedNack) {
 
 	if (nack.sender_session() == Global::get().uiSession) {
 		Global::get().sh->resendVideoUnits(nack);
+
+		// A NACK for one of our streams is a congestion signal: feed it to that stream's controller.
+		if (VideoCongestionController *cc = congestionControllerForStreamId(nack.stream_id())) {
+			cc->onNack(nack.requester_session(), QDateTime::currentMSecsSinceEpoch());
+		}
 	}
 }
 
@@ -5708,7 +5845,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		camera.set_height(static_cast< unsigned int >(settings.iVideoHeight));
 		camera.set_max_framerate(static_cast< unsigned int >(settings.iVideoFramerate));
 		camera.set_source_kind(MumbleProto::VideoState_SourceKind_Camera);
-		camera.set_source_name(u8(m_videoBroadcaster->describe()));
+		setPrivacySafeSourceName(camera);
 		Global::get().sh->sendMessage(camera);
 
 		m_videoBroadcaster->requestKeyframe();
@@ -5727,7 +5864,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 			audio.set_active(true);
 			audio.set_codec(MumbleProto::VideoState_Codec_OpusAudio);
 			audio.set_source_kind(sourceKind);
-			audio.set_source_name(u8(m_screenAudioBroadcaster->describe()));
+			setPrivacySafeSourceName(audio);
 			Global::get().sh->sendMessage(audio);
 		}
 
@@ -5736,7 +5873,7 @@ void MainWindow::reannounceSharesAfterReconnect() {
 		screen.set_active(true);
 		screen.set_codec(announcedCodec(m_screenVideoBroadcaster->codec()));
 		screen.set_source_kind(sourceKind);
-		screen.set_source_name(u8(m_screenVideoBroadcaster->describe()));
+		setPrivacySafeSourceName(screen);
 		const QSize size = m_screenVideoBroadcaster->frameSize();
 		if (!size.isEmpty()) {
 			screen.set_width(static_cast< unsigned int >(size.width()));

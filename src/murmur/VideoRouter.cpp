@@ -272,6 +272,13 @@ void VideoRouter::removeUser(std::uint32_t session) {
 		m_lastKeyframeRequestMsec.erase(key);
 		it = m_streams.erase(it);
 	}
+
+	// Drop feedback-relay timestamps this user appears in, as reporter or as sender.
+	for (auto fbIt = m_lastFeedbackRelayMsec.begin(); fbIt != m_lastFeedbackRelayMsec.end();) {
+		fbIt = (std::get< 0 >(fbIt->first) == session || std::get< 1 >(fbIt->first) == session)
+				   ? m_lastFeedbackRelayMsec.erase(fbIt)
+				   : std::next(fbIt);
+	}
 }
 
 void VideoRouter::noteRelayed(std::uint32_t sender, std::uint32_t streamID, std::int64_t nowMsec) {
@@ -307,6 +314,34 @@ bool VideoRouter::admitKeyframeRequest(std::uint32_t requester, std::uint32_t se
 	}
 
 	m_lastKeyframeRequestMsec[key] = nowMsec;
+
+	return true;
+}
+
+bool VideoRouter::admitFeedbackRelay(std::uint32_t reporter, std::uint32_t sender, std::uint32_t streamID,
+									 std::int64_t nowMsec) {
+	const StreamKey key{ sender, streamID };
+
+	const auto streamIt = m_streams.find(key);
+
+	// Only an actual subscriber of this stream may report feedback for it, re-checked for permission the
+	// same way admitKeyframeRequest() does: feedback is a channel to the sender, and an outsider must not
+	// have one.
+	if (streamIt == m_streams.end() || streamIt->second.find(reporter) == streamIt->second.end()) {
+		return false;
+	}
+	if (!m_maySend(sender) || !m_mayReceive(reporter, sender)) {
+		return false;
+	}
+
+	const auto tupleKey = std::make_tuple(reporter, sender, streamID);
+	const auto lastIt   = m_lastFeedbackRelayMsec.find(tupleKey);
+
+	if (lastIt != m_lastFeedbackRelayMsec.end() && nowMsec - lastIt->second < FEEDBACK_RELAY_INTERVAL_MSEC) {
+		return false;
+	}
+
+	m_lastFeedbackRelayMsec[tupleKey] = nowMsec;
 
 	return true;
 }

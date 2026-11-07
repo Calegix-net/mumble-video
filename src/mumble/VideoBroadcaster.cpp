@@ -47,6 +47,14 @@ void VideoEncodeCore::configure(int codec, unsigned int bitrateKbps, unsigned in
 	m_encoder.setTileSize(tileSize);
 }
 
+void VideoEncodeCore::setBitrate(unsigned int bitrateKbps) {
+	// The running encoder's rate, changed in place. TiledImage has no rate target, so it is left alone.
+	m_vpx.setTargetBitrate(bitrateKbps);
+#ifdef USE_H264
+	m_h264.setTargetBitrate(bitrateKbps);
+#endif
+}
+
 void VideoEncodeCore::reset(bool reopenHardware) {
 	m_encoder.reset();
 	m_vpx.reset();
@@ -378,6 +386,10 @@ void VideoBroadcaster::configure(int codec, unsigned int bitrateKbps, unsigned i
 	withCore([effective, bitrateKbps, framerate, tileQuality, tileSize](VideoEncodeCore &core) {
 		core.configure(effective, bitrateKbps, framerate, tileQuality, tileSize);
 	});
+}
+
+void VideoBroadcaster::setBitrate(unsigned int bitrateKbps) {
+	withCore([bitrateKbps](VideoEncodeCore &core) { core.setBitrate(bitrateKbps); });
 }
 
 void VideoBroadcaster::onFrameReady(const QImage &sourceFrame, std::uint64_t captureTimestampUsec) {

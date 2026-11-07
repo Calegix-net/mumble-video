@@ -1474,6 +1474,25 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 		return;
 	}
 
+	// Congestion-control feedback about one of our own streams, relayed from a viewer. It arrives as a
+	// subscribe=true message (so it is not read as an unsubscribe), so it must be handled before the
+	// subscribe early-return below. Fed to that stream's controller, which moves the encoder bitrate on its
+	// next tick.
+	if (msg.has_session() && msg.session() == Global::get().uiSession
+		&& (msg.has_observed_loss_permille() || msg.has_last_complete_frame())) {
+		VideoCongestionController *cc = congestionControllerForStreamId(msg.stream_id());
+		if (cc) {
+			cc->onFeedback(msg.reporter_session(), msg.observed_loss_permille(), msg.last_complete_frame(),
+						   QDateTime::currentMSecsSinceEpoch());
+		}
+		if (!qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS")) {
+			qInfo("VideoCC feedback-in stream=%u reporter=%u permille=%u controller=%s", msg.stream_id(),
+				  msg.reporter_session(), msg.observed_loss_permille(), cc ? "yes" : "NONE");
+		}
+
+		return;
+	}
+
 	if (msg.subscribe() || !msg.has_session()) {
 		return;
 	}
