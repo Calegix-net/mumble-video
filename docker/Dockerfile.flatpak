@@ -11,3 +11,12 @@ FROM fedora:42
 RUN dnf install -y --setopt=install_weak_deps=False \
         flatpak flatpak-builder git git-lfs zip elfutils \
     && dnf clean all
+
+# Prefer IPv4 when resolving download hosts. GitHub Actions' Docker bridge network has no working
+# IPv6, but some source hosts publish a native AAAA record - media.xiph.org, which serves the rnnoise
+# model the mumble-video module downloads, is one (ffmpeg.org and github are IPv4-only, which is why
+# they succeed here). glibc prefers IPv6 by default, so without this the build tries xiph's IPv6
+# address, the connection black-holes, and flatpak-builder times the download out after 60s
+# ("Connection timed out after 60002 milliseconds") - failing the build within a minute regardless of
+# the code. Raising the precedence of IPv4-mapped addresses makes getaddrinfo return IPv4 first.
+RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
