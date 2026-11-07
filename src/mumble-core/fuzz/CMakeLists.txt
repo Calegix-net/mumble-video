@@ -45,8 +45,24 @@ function(mumble_core_add_fuzz_target name source)
 	if(MUMBLE_CORE_FUZZERS)
 		# Address sanitizer alongside the fuzzer: most of what a fuzzer finds in code like this is a read
 		# or a write just past the end of something, which without ASan is a pass.
-		target_compile_options(${target} PRIVATE -fsanitize=fuzzer,address -fno-omit-frame-pointer)
-		target_link_options(${target} PRIVATE -fsanitize=fuzzer,address)
+		#
+		# UndefinedBehaviorSanitizer as well, because ASan does not look for the other half of what this
+		# code could plausibly get wrong: overflow and sign conversion in a length or an offset, a shift
+		# past the width of its type, a misaligned load of a packet field, or pointer arithmetic that
+		# leaves its object. Finding one of those was not hypothetical - enabling it here is what turned
+		# up out-of-bounds pointer arithmetic in the AES wrapper that had been running on every packet.
+		#
+		# -fno-sanitize-recover makes undefined behaviour abort rather than print and continue, which is
+		# what gets libFuzzer to stop and write a reproducer instead of burying the report in the log.
+		# vptr is left out: it needs every translation unit instrumented, which the system libraries are
+		# not, and so reports nothing but false positives here.
+		target_compile_options(${target} PRIVATE
+			-fsanitize=fuzzer,address,undefined
+			-fno-sanitize=vptr
+			-fno-sanitize-recover=undefined
+			-fno-omit-frame-pointer
+		)
+		target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
 	else()
 		target_sources(${target} PRIVATE "ReplayMain.cpp")
 

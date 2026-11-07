@@ -274,23 +274,61 @@ static void inline ZERO(keyblock &block) {
 		block[i] = 0;
 }
 
-#define AESencrypt_ctx(src, dst, key, enc_ctx)                                                      \
-	{                                                                                               \
-		int outlen = 0;                                                                             \
-		EVP_EncryptInit_ex(enc_ctx, EVP_aes_128_ecb(), NULL, key, NULL);                            \
-		EVP_CIPHER_CTX_set_padding(enc_ctx, 0);                                                     \
-		EVP_EncryptUpdate(enc_ctx, reinterpret_cast< unsigned char * >(dst), &outlen,               \
-						  reinterpret_cast< const unsigned char * >(src), AES_BLOCK_SIZE);          \
-		EVP_EncryptFinal_ex(enc_ctx, reinterpret_cast< unsigned char * >((dst) + outlen), &outlen); \
+// Moves one cipher block between a packet buffer and an aligned keyblock.
+//
+// The block operations above work on subblock, which is a 64-bit integer on LP64, so they require
+// 8-byte alignment. The buffers they were being pointed at are packet buffers at an odd offset:
+// CryptStateOCB2::decrypt hands ocb_decrypt "source + 4", and this fork's media channel byte shifts
+// that by one more, so a reinterpret_cast to subblock* produced a 64-bit load from an address 5 modulo
+// 8. That is undefined behaviour, and it was happening on every audio packet on both the client and the
+// server, which UndefinedBehaviorSanitizer reports as a misaligned load the moment it is switched on.
+//
+// It did no harm on x86-64, where unaligned integer loads are permitted and fast. It is not safe to
+// leave: nothing stops the compiler vectorising these loops into instructions that do require
+// alignment, and Mumble runs on ARM - the Android client, and increasingly the server. The video path
+// happens to be exempt, its header being 8 bytes, which is why this surfaces as an audio problem.
+//
+// memcpy of a fixed 16 bytes is the portable spelling and compiles to the same one or two moves the
+// cast did. A loaded copy is also immune to the plain and encrypted buffers overlapping, which the
+// original was not: ocb_encrypt wrote one block of output before reading the matching input again.
+static void inline loadBlock(keyblock &dst, const unsigned char *src) {
+	memcpy(dst, src, AES_BLOCK_SIZE);
+}
+
+static void inline storeBlock(unsigned char *dst, const keyblock &src) {
+	memcpy(dst, src, AES_BLOCK_SIZE);
+}
+
+// The offset is added to the cast pointer, not to dst.
+//
+// dst is a keyblock, which is subblock[BLOCKSIZE] - uint64_t[2] on LP64, sixteen bytes in total. Adding
+// outlen to it before the cast advances in units of subblock, and after EVP_EncryptUpdate has consumed a
+// full AES block with padding disabled outlen is 16, so "(dst) + outlen" addressed 128 bytes past the
+// end of a sixteen-byte stack array. Every AES block operation in the audio and video paths, on both the
+// client and the server, formed that pointer.
+//
+// Nothing was written through it: with ECB and padding disabled, EVP_EncryptFinal_ex emits no bytes and
+// reports outlen 0. So this was undefined behaviour rather than a live stack overflow - but the distance
+// between the two is one change to the cipher or the padding setting, in a function whose job is to be
+// trustworthy, and UndefinedBehaviorSanitizer reports it on every packet, which makes the sanitizer
+// unusable on exactly the code that most wants it.
+#define AESencrypt_ctx(src, dst, key, enc_ctx)                                                        \
+	{                                                                                                 \
+		int outlen = 0;                                                                               \
+		EVP_EncryptInit_ex(enc_ctx, EVP_aes_128_ecb(), NULL, key, NULL);                              \
+		EVP_CIPHER_CTX_set_padding(enc_ctx, 0);                                                       \
+		EVP_EncryptUpdate(enc_ctx, reinterpret_cast< unsigned char * >(dst), &outlen,                 \
+						  reinterpret_cast< const unsigned char * >(src), AES_BLOCK_SIZE);            \
+		EVP_EncryptFinal_ex(enc_ctx, reinterpret_cast< unsigned char * >(dst) + outlen, &outlen);     \
 	}
-#define AESdecrypt_ctx(src, dst, key, dec_ctx)                                                      \
-	{                                                                                               \
-		int outlen = 0;                                                                             \
-		EVP_DecryptInit_ex(dec_ctx, EVP_aes_128_ecb(), NULL, key, NULL);                            \
-		EVP_CIPHER_CTX_set_padding(dec_ctx, 0);                                                     \
-		EVP_DecryptUpdate(dec_ctx, reinterpret_cast< unsigned char * >(dst), &outlen,               \
-						  reinterpret_cast< const unsigned char * >(src), AES_BLOCK_SIZE);          \
-		EVP_DecryptFinal_ex(dec_ctx, reinterpret_cast< unsigned char * >((dst) + outlen), &outlen); \
+#define AESdecrypt_ctx(src, dst, key, dec_ctx)                                                        \
+	{                                                                                                 \
+		int outlen = 0;                                                                               \
+		EVP_DecryptInit_ex(dec_ctx, EVP_aes_128_ecb(), NULL, key, NULL);                              \
+		EVP_CIPHER_CTX_set_padding(dec_ctx, 0);                                                       \
+		EVP_DecryptUpdate(dec_ctx, reinterpret_cast< unsigned char * >(dst), &outlen,                 \
+						  reinterpret_cast< const unsigned char * >(src), AES_BLOCK_SIZE);            \
+		EVP_DecryptFinal_ex(dec_ctx, reinterpret_cast< unsigned char * >(dst) + outlen, &outlen);     \
 	}
 
 #define AESencrypt(src, dst, key) AESencrypt_ctx(src, dst, key, enc_ctx_ocb_enc)
@@ -329,14 +367,18 @@ bool CryptStateOCB2::ocb_encrypt(const unsigned char *plain, unsigned char *encr
 			}
 		}
 
+		keyblock plainBlock, encryptedBlock;
+		loadBlock(plainBlock, plain);
+
 		S2(delta);
-		XOR(tmp, delta, reinterpret_cast< const subblock * >(plain));
+		XOR(tmp, delta, plainBlock);
 		if (flipABit) {
 			*reinterpret_cast< unsigned char * >(tmp) ^= 1;
 		}
 		AESencrypt(tmp, tmp, raw_key);
-		XOR(reinterpret_cast< subblock * >(encrypted), delta, tmp);
-		XOR(checksum, checksum, reinterpret_cast< const subblock * >(plain));
+		XOR(encryptedBlock, delta, tmp);
+		storeBlock(encrypted, encryptedBlock);
+		XOR(checksum, checksum, plainBlock);
 		if (flipABit) {
 			*reinterpret_cast< unsigned char * >(checksum) ^= 1;
 		}
@@ -351,12 +393,19 @@ bool CryptStateOCB2::ocb_encrypt(const unsigned char *plain, unsigned char *encr
 	tmp[BLOCKSIZE - 1] = SWAPPED(len * 8);
 	XOR(tmp, tmp, delta);
 	AESencrypt(tmp, pad, raw_key);
-	memcpy(tmp, plain, len);
+	// Guarded because len reaches here as 0 for an empty payload, and memcpy with a null pointer is
+	// undefined even for a length of zero - the parameters are declared non-null. Nothing was being
+	// copied either way; the call itself was the defect, and the sanitizer flags it.
+	if (len > 0) {
+		memcpy(tmp, plain, len);
+	}
 	memcpy(reinterpret_cast< unsigned char * >(tmp) + len, reinterpret_cast< const unsigned char * >(pad) + len,
 		   AES_BLOCK_SIZE - len);
 	XOR(checksum, checksum, tmp);
 	XOR(tmp, pad, tmp);
-	memcpy(encrypted, tmp, len);
+	if (len > 0) {
+		memcpy(encrypted, tmp, len);
+	}
 
 	S3(delta);
 	XOR(tmp, delta, checksum);
@@ -381,11 +430,17 @@ bool CryptStateOCB2::ocb_decrypt(const unsigned char *encrypted, unsigned char *
 	ZERO(checksum);
 
 	while (len > AES_BLOCK_SIZE) {
+		keyblock encryptedBlock, plainBlock;
+		loadBlock(encryptedBlock, encrypted);
+
 		S2(delta);
-		XOR(tmp, delta, reinterpret_cast< const subblock * >(encrypted));
+		XOR(tmp, delta, encryptedBlock);
 		AESdecrypt(tmp, tmp, raw_key);
-		XOR(reinterpret_cast< subblock * >(plain), delta, tmp);
-		XOR(checksum, checksum, reinterpret_cast< const subblock * >(plain));
+		XOR(plainBlock, delta, tmp);
+		storeBlock(plain, plainBlock);
+		// plainBlock is exactly what was just written to plain, so the checksum is unchanged from
+		// re-reading the output buffer the way this used to.
+		XOR(checksum, checksum, plainBlock);
 		len -= AES_BLOCK_SIZE;
 		plain += AES_BLOCK_SIZE;
 		encrypted += AES_BLOCK_SIZE;
@@ -397,10 +452,16 @@ bool CryptStateOCB2::ocb_decrypt(const unsigned char *encrypted, unsigned char *
 	XOR(tmp, tmp, delta);
 	AESencrypt(tmp, pad, raw_key);
 	memset(tmp, 0, AES_BLOCK_SIZE);
-	memcpy(tmp, encrypted, len);
+	// Guarded for the same reason as in ocb_encrypt: len is 0 for an empty payload, and a zero-length
+	// memcpy from a null pointer is still undefined.
+	if (len > 0) {
+		memcpy(tmp, encrypted, len);
+	}
 	XOR(tmp, tmp, pad);
 	XOR(checksum, checksum, tmp);
-	memcpy(plain, tmp, len);
+	if (len > 0) {
+		memcpy(plain, tmp, len);
+	}
 
 	// Counter-cryptanalysis described in section 9 of https://eprint.iacr.org/2019/311
 	// In an attack, the decrypted last block would need to equal `delta ^ len(128)`.

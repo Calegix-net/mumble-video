@@ -28,6 +28,7 @@
 #endif
 
 #include <atomic>
+#include <map>
 #include <vector>
 
 // Unfortunately, this needs to be "large enough" to hold
@@ -160,6 +161,13 @@ public:
 	SOCKET sUdpSocket;
 #endif
 	BandwidthRecord bwr;
+	/// Per-video-stream bandwidth meters, keyed by stream id. One leaky bucket each, so a keyframe's burst
+	/// of back-to-back fragments passes while the sustained rate is held under the server's per-stream
+	/// ceiling (Meta::iVideoBandwidth). A plain sliding-sample average like bwr above would throttle every
+	/// keyframe, since unlike paced voice frames a video frame's fragments all arrive at once. Created
+	/// lazily by Server::relayVideo on the UDP thread and erased when the stream ends; the read/write-lock
+	/// discipline that makes that safe is documented at the relayVideo call site. Empty for a non-sender.
+	std::map< unsigned int, LeakyBucket > m_videoStreamBandwidth;
 	struct sockaddr_storage saiUdpAddress;
 	struct sockaddr_storage saiTcpLocalAddress;
 	ServerUser(Server *parent, QSslSocket *socket);

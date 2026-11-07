@@ -13,7 +13,9 @@
 #include "VersionNumber.h"
 #include "VideoReceiver.h"
 
+#include <atomic>
 #include <chrono>
+#include <mutex>
 
 namespace MumbleCore {
 
@@ -34,9 +36,46 @@ static_assert(static_cast< int >(LogLevel::Info) == static_cast< int >(Mumble::C
 				  && static_cast< int >(LogLevel::Fatal) == static_cast< int >(Mumble::Core::LogLevel::Fatal),
 			  "LogLevel does not match the core's");
 
+namespace {
+	// The public handler, called through a fixed trampoline rather than by casting its pointer.
+	//
+	// This used to be a reinterpret_cast from LogHandler to Mumble::Core::LogHandler, justified by the
+	// static_assert above. The values do match, but that is not what makes a call legal: calling a
+	// function through a pointer to an incompatible type is undefined however the arguments are laid
+	// out, because the two LogLevels are distinct types. It worked, and UndefinedBehaviorSanitizer
+	// reports it on the first log message, which is enough on its own - a sanitizer finding in the
+	// public API is noise that hides real findings. It would also abort outright under control-flow
+	// integrity, which is a hardening flag this build should be able to turn on.
+	//
+	// The trampoline has the type the core actually calls, so the conversion is an ordinary static_cast
+	// on a value, and the static_assert above is what licenses it.
+	std::atomic< LogHandler > g_publicHandler = nullptr;
+
+	// Storing the handler and installing the trampoline are two steps, and two threads calling
+	// setLogHandler could interleave them so that the trampoline ended up installed with a null
+	// handler - logging silently dead, rather than either the handler one caller asked for or the
+	// stderr default the other did. The mutex makes the pair atomic with respect to each other.
+	// A message already inside dispatch() when the handler is cleared can still be dropped instead of
+	// reaching stderr; that is one message on an explicit teardown, which is not worth a lock on the
+	// logging path itself.
+	std::mutex g_handlerMutex;
+
+	void forwardToPublicHandler(Mumble::Core::LogLevel level, const char *message) {
+		const LogHandler handler = g_publicHandler.load(std::memory_order_acquire);
+
+		if (handler) {
+			handler(static_cast< LogLevel >(level), message);
+		}
+	}
+} // namespace
+
 void setLogHandler(LogHandler handler) {
-	// Same signature but for the enum, whose values are checked above.
-	Mumble::Core::setLogHandler(reinterpret_cast< Mumble::Core::LogHandler >(handler));
+	const std::lock_guard< std::mutex > guard(g_handlerMutex);
+
+	// Stored before the trampoline is installed, so the core cannot call through to a null handler in
+	// between. Clearing it restores the core's own stderr default rather than a trampoline to nothing.
+	g_publicHandler.store(handler, std::memory_order_release);
+	Mumble::Core::setLogHandler(handler ? &forwardToPublicHandler : nullptr);
 }
 
 Bytes frameControlMessage(std::uint16_t type, ByteView payload) {

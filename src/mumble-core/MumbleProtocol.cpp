@@ -554,18 +554,34 @@ namespace Protocol {
 
 			m_byteBuffer.resize(packetSize);
 
+			// Written field by field with memcpy rather than through a pointer to the field's type.
+			//
+			// The timestamp is a uint64 at byte offset 4 of the packet, so writing it through a
+			// uint64_t* was a misaligned store: undefined behaviour, which UndefinedBehaviorSanitizer
+			// reports. It is harmless on x86-64 and not guaranteed anywhere else, and the layout cannot
+			// move because it is the wire format of a legacy ping. memcpy expresses the same bytes
+			// without claiming an alignment the buffer does not have, and compiles to the same store.
+			//
+			// The uint32 fields go the same way for consistency, and because nothing promises the
+			// buffer is 4-aligned either.
 			if (writeAdditionalInformation) {
-				std::uint32_t *dataArray = reinterpret_cast< std::uint32_t * >(m_byteBuffer.data());
 				// Legacy pings expect the version to be encoded using the old (legacy) format
-				dataArray[0] = Mumble::toBigEndian32(Version::toLegacyVersion(data.serverVersion));
-				// dataArray[1] and dataArray[2] together hold the timestamp (written below)
-				dataArray[3] = Mumble::toBigEndian32(data.userCount);
-				dataArray[4] = Mumble::toBigEndian32(data.maxUserCount);
-				dataArray[5] = Mumble::toBigEndian32(data.maxBandwidthPerUser);
+				const std::uint32_t fields[] = {
+					Mumble::toBigEndian32(Version::toLegacyVersion(data.serverVersion)),
+					Mumble::toBigEndian32(data.userCount),
+					Mumble::toBigEndian32(data.maxUserCount),
+					Mumble::toBigEndian32(data.maxBandwidthPerUser),
+				};
+
+				std::memcpy(m_byteBuffer.data(), &fields[0], sizeof(std::uint32_t));
+				// Entries 1 and 2 together hold the timestamp, written below.
+				std::memcpy(m_byteBuffer.data() + 3 * sizeof(std::uint32_t), &fields[1], sizeof(std::uint32_t));
+				std::memcpy(m_byteBuffer.data() + 4 * sizeof(std::uint32_t), &fields[2], sizeof(std::uint32_t));
+				std::memcpy(m_byteBuffer.data() + 5 * sizeof(std::uint32_t), &fields[3], sizeof(std::uint32_t));
 			}
 
 			// Leave four empty bytes up front and then write the uint64 timestamp to the remaining 8 bytes
-			*reinterpret_cast< std::uint64_t * >(m_byteBuffer.data() + sizeof(std::uint32_t)) = data.timestamp;
+			std::memcpy(m_byteBuffer.data() + sizeof(std::uint32_t), &data.timestamp, sizeof(data.timestamp));
 
 			actualSize = packetSize;
 		} else {
@@ -755,18 +771,27 @@ namespace Protocol {
 				// Client-specific code
 				static_assert(6 * sizeof(std::uint32_t) == 24, "Unexpected size of uint32_t");
 				if (data.size() == 6 * sizeof(std::uint32_t)) {
-					// Extended ping containing meta-information
-					const std::uint32_t *dataArray = reinterpret_cast< const std::uint32_t * >(data.data());
+					// Extended ping containing meta-information.
+					//
+					// Copied out field by field rather than read through a pointer to the field's type.
+					// data points into a receive buffer at whatever offset the datagram landed, and the
+					// timestamp sits at byte 4, so reading it through a uint64_t* was a misaligned load
+					// of attacker-supplied bytes - undefined behaviour on every extended ping the server
+					// answers. memcpy reads the same bytes without asserting an alignment that is not
+					// there.
+					std::uint32_t fields[6];
+					std::memcpy(fields, data.data(), sizeof(fields));
 
 					// Legacy pings only support the version to be encoded using the old (legacy) format
-					m_pingData.serverVersion = Version::fromLegacyVersion(Mumble::fromBigEndian32(dataArray[0]));
+					m_pingData.serverVersion = Version::fromLegacyVersion(Mumble::fromBigEndian32(fields[0]));
 
 					// Virtual array entries 1 and 2 are actually a single uint64. Note that the timestamp is
 					// whatever the client sent to the server and thus it does not require an endian-transformation
-					m_pingData.timestamp           = *reinterpret_cast< const std::uint64_t * >(&dataArray[1]);
-					m_pingData.userCount           = Mumble::fromBigEndian32(dataArray[3]);
-					m_pingData.maxUserCount        = Mumble::fromBigEndian32(dataArray[4]);
-					m_pingData.maxBandwidthPerUser = Mumble::fromBigEndian32(dataArray[5]);
+					std::memcpy(&m_pingData.timestamp, data.data() + sizeof(std::uint32_t),
+								sizeof(m_pingData.timestamp));
+					m_pingData.userCount           = Mumble::fromBigEndian32(fields[3]);
+					m_pingData.maxUserCount        = Mumble::fromBigEndian32(fields[4]);
+					m_pingData.maxBandwidthPerUser = Mumble::fromBigEndian32(fields[5]);
 
 					return true;
 				} else {

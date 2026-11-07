@@ -1566,11 +1566,49 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 		return;
 	}
 
+	// Whether this stream is sound rather than a picture, which decides whether the voice controls
+	// apply to it. Checked here, on every datagram, rather than only when the stream was announced,
+	// because mute and deafen are applied in the middle of a share: a moderator muting someone has to
+	// silence the share they are already sending, not merely prevent the next one.
+	const bool carriesAudio = videoStreamCarriesAudio(sender->uiSession, m_relayedVideo.stream_id());
+
+	if (carriesAudio && !mayTransmitStreamAudio(sender)) {
+		return;
+	}
+
 	const std::vector< unsigned int > recipients =
 		m_videoRouter.subscribersOf(sender->uiSession, m_relayedVideo.stream_id());
 
 	if (recipients.empty()) {
 		return;
+	}
+
+	// Enforce the per-stream bandwidth ceiling the server advertises (iVideoBandwidth). A sender's
+	// announced target_bandwidth is clamped to it (msgVideoState), but nothing stops a sender ignoring its
+	// own target and simply transmitting faster; without a meter here, the only bound on what one stream
+	// costs every viewer and the server's uplink was the sender behaving. A leaky bucket rather than bwr's
+	// sliding-sample average because a video frame's fragments arrive back to back - a keyframe is a burst
+	// by nature - so the rate must be judged over roughly a second, not per packet, or every keyframe would
+	// be dropped. The bucket drains at the byte rate and is deep enough to pass a keyframe burst yet cap how
+	// much a flood gets through before the drain catches up. Per stream, keyed by stream id, as the setting
+	// is: a user's camera, screen and screen-audio each get their own.
+	//
+	// Locking: this inserts into and mutates sender->m_videoStreamBandwidth from the UDP thread under the
+	// read lock. It is safe for the same reason noteRelayed() is (see VideoRouter.h): the only other
+	// accessors - msgVideoState, endStaleVideoStreams, removeUser - run on the main thread under the write
+	// lock, which excludes this thread, and the UDP thread is single, so no two inserts race.
+	if (iVideoBandwidth > 0) {
+		const unsigned int bytesPerSec = static_cast< unsigned int >(iVideoBandwidth / 8);
+		// At least half a megabyte of depth so a single large keyframe always clears even when the ceiling
+		// is set low, while the sustained rate still converges on bytesPerSec.
+		const unsigned int burst = std::max< unsigned int >(bytesPerSec, 512u * 1024u);
+		auto bucket              = sender->m_videoStreamBandwidth
+						  .try_emplace(static_cast< unsigned int >(m_relayedVideo.stream_id()), bytesPerSec, burst)
+						  .first;
+
+		if (bucket->second.ratelimit(static_cast< int >(len))) {
+			return;
+		}
 	}
 
 	// The liveness signal endStaleVideoStreams() judges silence against - see there and
@@ -1609,6 +1647,26 @@ void Server::relayVideo(ServerUser *sender, const Mumble::Protocol::byte *datagr
 			// peer (sUdpSocket set) has already proven the path with encrypted pings, which is the
 			// most video can ask for given that it never falls back to TCP anyway.
 			continue;
+		}
+
+		if (carriesAudio) {
+			if (!mayHearStreamAudio(recipient)) {
+				// Deafened, by themselves or by a moderator. A deafened user hears no voice and must hear
+				// no share audio either, whatever they have subscribed to.
+				continue;
+			}
+
+			// Share audio is sound, so it obeys the same linked-channel Speak rule as voice. A listener in
+			// a channel other than the sender's is reachable only because the channels are linked and they
+			// may see the video (mayReceiveVideo checks Enter + ReceiveVideo in the sender's channel). Voice
+			// into a linked channel additionally requires the speaker to hold Speak there (see Server::run);
+			// without the same gate here, a user could route audio into a linked channel their voice could
+			// not reach. The sender's own channel needs no check: bSuppress already mirrors their Speak
+			// there, and mayTransmitStreamAudio() refused the stream above if it was unset.
+			if (recipient->cChannel != sender->cChannel
+				&& (!recipient->cChannel || !hasPermission(sender, recipient->cChannel, ChanACL::Speak))) {
+				continue;
+			}
 		}
 
 		sendVideoPlaintext(recipient, plaintext, outgoing);
@@ -1724,6 +1782,15 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 		return;
 	}
 
+	// And "actually receiving" has to mean the same thing here as in relayVideo, or the rule leaks through
+	// this path. A deafened subscriber is sent none of a stream's audio fragments, so every unit of it has
+	// a permanent gap and its receiver asks for all of them, forever. The sender would re-send, and
+	// relayVideo would hand the duplicates to every other subscriber - a request for something the
+	// requester is not allowed to have, answered at everyone else's expense.
+	if (videoStreamCarriesAudio(senderSession, m_relayedNack.stream_id()) && !mayHearStreamAudio(requester)) {
+		return;
+	}
+
 	// Bounds what one request can make a sender re-send; the sender enforces the same limit.
 	while (m_relayedNack.units_size() > Mumble::Protocol::MAX_VIDEO_NACK_UNITS) {
 		m_relayedNack.mutable_units()->RemoveLast();
@@ -1738,6 +1805,26 @@ void Server::relayVideoNack(ServerUser *requester, const std::vector< Mumble::Pr
 
 	std::vector< Mumble::Protocol::byte > outgoing;
 	sendVideoPlaintext(sender, forwarded, outgoing);
+}
+
+bool Server::videoStreamCarriesAudio(unsigned int senderSession, unsigned int streamID) const {
+	const auto announcement = m_videoAnnouncements.find(std::make_pair(senderSession, streamID));
+
+	if (announcement == m_videoAnnouncements.end()) {
+		return false;
+	}
+
+	return announcement->second.codec() == MumbleProto::VideoState_Codec_OpusAudio;
+}
+
+bool Server::mayTransmitStreamAudio(const ServerUser *sender) {
+	// The same three flags Server::run checks before accepting a voice packet.
+	return sender && !sender->bMute && !sender->bSuppress && !sender->bSelfMute;
+}
+
+bool Server::mayHearStreamAudio(const ServerUser *subscriber) {
+	// The same two AudioReceiverBuffer checks before adding a voice receiver.
+	return subscriber && !subscriber->bDeaf && !subscriber->bSelfDeaf;
 }
 
 bool Server::mayShareVideo(unsigned int senderSession) {
@@ -2771,6 +2858,11 @@ void Server::endStaleVideoStreams() {
 
 		m_videoRouter.announceStream(key.sender, key.streamID, false);
 		m_videoAnnouncements.erase(std::make_pair(key.sender, key.streamID));
+
+		// Drop the stream's bandwidth meter with it, as msgVideoState's own active=false handling does.
+		if (ServerUser *staleSender = qhUsers.value(key.sender)) {
+			staleSender->m_videoStreamBandwidth.erase(key.streamID);
+		}
 
 		// Ends the stream for everyone who could see it, exactly as msgVideoState's own active=false
 		// handling would - not only current subscribers, matching the class comment on VideoRouter about
