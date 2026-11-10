@@ -790,6 +790,11 @@ protected:
 	/// is already a couple of full 1080p frames behind; letting it grow further only makes the picture
 	/// lag further behind the sender rather than recover.
 	static constexpr std::size_t MAX_PENDING_TILE_DECODES = 256;
+	/// Whole frames of one stream waiting for the decode thread before the stream is frozen until a
+	/// keyframe. Each is held in memory until its turn, and the thread already stops converting frames
+	/// at eight behind (see decodeVp8Unit()), so this is only reached by a stream that costs more to
+	/// decode than to send - two seconds of it, at thirty frames a second.
+	static constexpr int MAX_DECODES_IN_FLIGHT = 64;
 	std::size_t m_pendingTileDecodes                      = 0;
 	void applyReadyTiles(unsigned int senderSession, unsigned int streamID);
 

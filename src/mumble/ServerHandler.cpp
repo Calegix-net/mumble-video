@@ -671,12 +671,32 @@ void ServerHandler::handleVideoDatagram(std::span< const Mumble::Protocol::byte 
 	}
 
 	for (const Mumble::Protocol::VideoUnit &unit : events.units) {
+		const qint64 size = static_cast< qint64 >(unit.payload.size());
+
+		if (m_queuedVideoBytes->load() + size > MAX_QUEUED_VIDEO_BYTES) {
+			// The GUI thread is not keeping up. To the viewer this unit was lost, and is recovered the
+			// way a lost one is.
+			continue;
+		}
+		m_queuedVideoBytes->fetch_add(size);
+
 		emit videoUnitReceived(
 			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,
 			unit.header.x, unit.header.y,
 			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())),
 			unit.header.captureTimestampUsec);
+
+		// Posted to the same thread after the unit, and events to one thread are delivered in order, so
+		// this runs once the unit has been handed over.
+		QMetaObject::invokeMethod(
+			QCoreApplication::instance(), [queued = m_queuedVideoBytes, size]() { queued->fetch_sub(size); },
+			Qt::QueuedConnection);
 	}
+}
+
+void ServerHandler::removeVideoSender(unsigned int senderSession) {
+	QMetaObject::invokeMethod(
+		this, [this, senderSession]() { m_videoReceiver.removeSender(senderSession); }, Qt::QueuedConnection);
 }
 
 void ServerHandler::sendProtoMessage(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType type) {

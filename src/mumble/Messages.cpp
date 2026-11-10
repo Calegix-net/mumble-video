@@ -912,6 +912,10 @@ void MainWindow::msgUserRemove(const MumbleProto::UserRemove &msg) {
 			m_videoStreamDispatcher->removeSender(pDst->uiSession);
 		}
 
+		if (Global::get().sh) {
+			Global::get().sh->removeVideoSender(pDst->uiSession);
+		}
+
 		removeScreenShareAudioBuffersForSender(pDst->uiSession);
 
 		pmModel->removeUser(pDst);

@@ -8,6 +8,7 @@
 
 #include "VideoEncoder.h"
 
+#include <atomic>
 #include <QtGui/QImage>
 
 #include <cstdint>
@@ -204,8 +205,13 @@ public:
 	/// Releases the colour-conversion context. Called by the destructor.
 	void releaseConverter();
 
+	/// Creates and destroys the libvpx context. Apart, so that decode() can throw one away: see there.
+	void open();
+	void close();
+
 protected:
-	vpx_codec_ctx *m_context = nullptr;
+	// Atomic because decode() replaces it on the decode thread while isValid() is asked on the GUI's.
+	std::atomic< vpx_codec_ctx * > m_context{ nullptr };
 	VpxCodec m_codec         = VpxCodec::VP8;
 
 	/// A cached libswscale context for I420 to RGB32, kept across frames because building one costs far

@@ -78,6 +78,15 @@ namespace Protocol {
 	// TCP, whose own retransmission timeout is 200 ms at the least.
 	constexpr std::uint64_t VIDEO_REASSEMBLY_TIMEOUT_USEC = 1000 * 1000;
 
+	// Streams whose loss counters are kept, per sender and in total. The stream ID is the sender's to
+	// choose and the counters are created by the first unit of a stream, so without a bound a sender
+	// that never reuses an ID adds an entry per unit for as long as it is connected. Far above what a
+	// conforming sender has live at once (a camera and a screen share), so the entries dropped are only
+	// ever those of streams that are over, or of a sender doing this on purpose - and then only its own.
+	constexpr std::size_t MAX_TRACKED_LOSS_STREAMS_PER_SENDER = 64;
+	// The total is what holds when the session numbers themselves cannot be trusted either.
+	constexpr std::size_t MAX_TRACKED_LOSS_STREAMS_TOTAL = 4096;
+
 	// Retransmission (MumbleProto::VideoNack). A unit still incomplete this long after its first fragment
 	// arrived is asked for again: long enough that fragments merely reordered behind it have turned up,
 	// short against the round trip the retransmission itself costs.
@@ -309,6 +318,9 @@ namespace Protocol {
 		/// small mutex guards the map; the increments are per completed/expired unit, not per fragment.
 		void streamLoss(std::uint32_t senderSession, std::uint32_t streamID, StreamLoss &out) const;
 
+		/// How many streams have loss counters at the moment. Thread-safe, like streamLoss().
+		std::size_t trackedLossStreams() const;
+
 	protected:
 		struct UnitKey {
 			std::uint32_t senderSession;
@@ -367,11 +379,14 @@ namespace Protocol {
 		std::size_t m_bufferedBytes = 0;
 
 		// Per-(sender, stream) cumulative loss counters, guarded by m_lossMutex because streamLoss() reads
-		// them from another thread. Bounded by the number of live streams; pruned in removeSender().
+		// them from another thread. Bounded by MAX_TRACKED_LOSS_STREAMS_*; pruned in removeSender().
 		mutable std::mutex m_lossMutex;
 		std::map< std::pair< std::uint32_t, std::uint32_t >, StreamLoss > m_streamLoss;
 		void noteCompleted(const UnitKey &key);
 		void noteExpired(const UnitKey &key);
+		/// The counters for a unit's stream, created within the MAX_TRACKED_LOSS_STREAMS_* bounds if
+		/// they are new. Call with m_lossMutex held.
+		StreamLoss &lossFor(const UnitKey &key);
 
 		MumbleUDP::Video m_message;
 

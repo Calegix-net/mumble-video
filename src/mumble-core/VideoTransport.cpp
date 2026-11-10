@@ -355,12 +355,15 @@ namespace Protocol {
 			}
 
 			// A run this long, with nothing in-window arriving in between, is a sender that really has
-			// moved on. Re-anchor to it: the window is cleared because nothing it held is relevant to
-			// the new position.
+			// moved on. Re-anchor to it, which commitSequence() below does by itself: it slides the
+			// window forward, and clears it only when the jump is a whole window or more.
+			//
+			// The window is not cleared here. The jump that brings a packet to this point is anything
+			// past VIDEO_MAX_SEQUENCE_JUMP, which is half the window, so the new anchor can still be
+			// within a window of sequences already accepted. Clearing forgot those, and each of them
+			// could then be replayed once.
 			m_resyncs++;
-			m_aheadStreak     = 0;
-			m_highestReceived = 0;
-			m_window.reset();
+			m_aheadStreak = 0;
 		}
 
 		// Anything accepted normally is evidence the anchor is right, so the run has to start over.

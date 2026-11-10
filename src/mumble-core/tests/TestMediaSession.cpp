@@ -452,6 +452,109 @@ CORE_TEST(aRunOfAuthenticPacketsReAnchorsTheWindow) {
 	}
 }
 
+// A re-anchor that lands within a window of what was already accepted must not forget it. The jump that
+// triggers one starts at half the window, so this is the ordinary case after a burst of loss, and the
+// window used to be cleared: every sequence still inside it could be replayed once.
+CORE_TEST(reAnchoringKeepsWhatTheWindowStillCovers) {
+	struct Settable : VideoCryptState {
+		void setNextSequence(std::uint32_t seq) { m_nextSequence = seq; }
+	};
+
+	Settable sender;
+	VideoCryptState receiver;
+	CHECK(sender.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(receiver.deriveFromSessionKey(SESSION_KEY, false));
+
+	const Bytes plaintext = { static_cast< byte >(UDPMessageType::Video), 0x08, 0x01 };
+	Bytes datagram;
+	Bytes out;
+
+	std::vector< Bytes > accepted;
+	for (int i = 0; i < 10; i++) {
+		CHECK(sender.encrypt(plaintext, datagram));
+		CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+		accepted.push_back(datagram);
+	}
+	const std::uint32_t before = receiver.highestReceived();
+
+	// Past the jump bound, but by less than the window.
+	sender.setNextSequence(before + VIDEO_MAX_SEQUENCE_JUMP + 40);
+	std::vector< Bytes > run;
+	for (unsigned int i = 0; i < VIDEO_RESYNC_PACKETS; i++) {
+		CHECK(sender.encrypt(plaintext, datagram));
+		const VideoCryptState::Result result = receiver.decrypt(datagram, out);
+		CHECK(result == (i + 1 < VIDEO_RESYNC_PACKETS ? VideoCryptState::Result::TooFarAhead
+													   : VideoCryptState::Result::Ok));
+		run.push_back(datagram);
+	}
+	CHECK_EQ(receiver.resyncCount(), 1u);
+	CHECK(receiver.highestReceived() - before < VIDEO_REPLAY_WINDOW);
+
+	// Everything accepted before the jump is still known, and so is the packet that completed the run.
+	const std::uint64_t replaysBefore = receiver.replayCount();
+	for (const Bytes &old : accepted) {
+		CHECK(receiver.decrypt(old, out) == VideoCryptState::Result::Replay);
+	}
+	CHECK(receiver.decrypt(run.back(), out) == VideoCryptState::Result::Replay);
+	CHECK_EQ(receiver.replayCount(), replaysBefore + accepted.size() + 1);
+
+	// The packets of the run that were refused were never delivered, so each is still good exactly once.
+	CHECK(receiver.decrypt(run.front(), out) == VideoCryptState::Result::Ok);
+	CHECK(receiver.decrypt(run.front(), out) == VideoCryptState::Result::Replay);
+
+	// And the stream carries on.
+	CHECK(sender.encrypt(plaintext, datagram));
+	CHECK(receiver.decrypt(datagram, out) == VideoCryptState::Result::Ok);
+}
+
+// The loss counters are keyed by a stream ID the sender picks, so they are bounded per sender and in
+// total, and a sender that runs through IDs displaces only its own.
+CORE_TEST(lossCountersAreBounded) {
+	VideoCryptState server;
+	VideoCryptState client;
+	CHECK(server.deriveFromSessionKey(SESSION_KEY, true));
+	CHECK(client.deriveFromSessionKey(SESSION_KEY, false));
+
+	VideoReceiver receiver;
+	VideoReceiveEvents events;
+	std::uint64_t now = 1000;
+
+	const auto deliver = [&](std::uint32_t sender, std::uint32_t stream) {
+		for (const Bytes &datagram : relayedUnit(server, sender, stream, 1, 16)) {
+			receiver.receive(client, datagram, now++, events);
+		}
+		events.units.clear();
+	};
+
+	// A well-behaved sender, whose counters must survive what follows.
+	deliver(3, 1);
+	VideoReassembler::StreamLoss loss;
+	receiver.reassembler().streamLoss(3, 1, loss);
+	CHECK_EQ(loss.completed, 1u);
+
+	// One sender, a new stream ID for every unit.
+	for (std::uint32_t stream = 0; stream < 4 * MAX_TRACKED_LOSS_STREAMS_PER_SENDER; stream++) {
+		deliver(7, stream);
+	}
+	CHECK_EQ(receiver.reassembler().trackedLossStreams(), MAX_TRACKED_LOSS_STREAMS_PER_SENDER + 1);
+	receiver.reassembler().streamLoss(3, 1, loss);
+	CHECK_EQ(loss.completed, 1u);
+	// The newest of its streams is the one still counted.
+	receiver.reassembler().streamLoss(7, 4 * MAX_TRACKED_LOSS_STREAMS_PER_SENDER - 1, loss);
+	CHECK_EQ(loss.completed, 1u);
+
+	// Session numbers nobody vouches for: the total holds too.
+	for (std::uint32_t sender = 100; sender < 100 + MAX_TRACKED_LOSS_STREAMS_TOTAL + 50; sender++) {
+		deliver(sender, 1);
+	}
+	CHECK_EQ(receiver.reassembler().trackedLossStreams(), MAX_TRACKED_LOSS_STREAMS_TOTAL);
+
+	// And a sender that leaves takes its counters with it.
+	receiver.removeSender(7);
+	receiver.reassembler().streamLoss(7, 4 * MAX_TRACKED_LOSS_STREAMS_PER_SENDER - 1, loss);
+	CHECK_EQ(loss.completed, 0u);
+}
+
 // The run has to be consecutive. Anything accepted normally in between resets it, which is what stops a
 // forger accumulating a re-anchor one lucky packet at a time while a stream is running.
 CORE_TEST(anInWindowPacketResetsTheResyncRun) {

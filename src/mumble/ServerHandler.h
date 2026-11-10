@@ -119,6 +119,14 @@ protected:
 	/// from anything the TCP tunnel might later use, because the two are driven from different threads.
 	Mumble::Protocol::VideoReceiver m_videoReceiver;
 
+	/// Payload bytes of the video units handed to the GUI thread that it has not got to yet. Units are
+	/// queued to it as events, and nothing else limits how many wait when it is busy or stuck. Shared
+	/// with the events themselves, which can outlive this handler.
+	std::shared_ptr< std::atomic< qint64 > > m_queuedVideoBytes = std::make_shared< std::atomic< qint64 > >(0);
+	/// Beyond this, units are dropped as if lost on the way. Several seconds of the heaviest stream the
+	/// sender side will produce, so not something a GUI thread that is merely busy runs into.
+	static constexpr qint64 MAX_QUEUED_VIDEO_BYTES = 64 * 1024 * 1024;
+
 	/// Decrypts and reassembles one inbound video datagram.
 	void handleVideoDatagram(std::span< const Mumble::Protocol::byte > datagram);
 
@@ -256,6 +264,10 @@ public:
 	/// nothing is sent on UDP and voice goes through the TCP tunnel, which needs no framing.
 	enum class MediaFraming { Undecided, Plain, ChannelByte };
 	void setMediaFraming(MediaFraming framing);
+
+	/// Drops what the video receiver holds for a user who has left: partly reassembled units and loss
+	/// counters. Callable from any thread; the receiver is this handler's own, so it is done there.
+	void removeVideoSender(unsigned int senderSession);
 	MediaFraming mediaFraming() const;
 
 protected:
