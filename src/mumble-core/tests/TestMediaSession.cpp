@@ -91,6 +91,73 @@ CORE_TEST(demuxPlainFramingIsAllAudio) {
 	CHECK_EQ(d.payload.size(), datagram.size());
 }
 
+// GHSA-57w8-4vhq-v3ff. The socket reads datagrams as large as video's, but audio is decrypted into the
+// decoder's MAX_UDP_PACKET_SIZE buffer, and OCB2 writes the plaintext before it checks the tag.
+CORE_TEST(demuxDropsAudioTooLargeForTheDecoder) {
+	UDPDecoder< Role::Client > decoder(PROTOBUF_INTRODUCTION_VERSION);
+	const std::size_t bufferSize = decoder.getBuffer().size();
+	CHECK_EQ(bufferSize, MAX_UDP_PACKET_SIZE);
+	CHECK_EQ(MAX_AUDIO_PAYLOAD_SIZE, bufferSize + 4);
+
+	const MediaDemux plain(MediaDemux::Framing::Plain);
+	const MediaDemux framed;
+
+	// The largest that fits is still audio.
+	const Bytes plainFits(MAX_AUDIO_PAYLOAD_SIZE, 0);
+	const Bytes framedFits(MAX_AUDIO_PAYLOAD_SIZE + 1, MEDIA_CHANNEL_AUDIO);
+	CHECK(plain.classify(plainFits).channel == MediaChannel::Audio);
+	CHECK(framed.classify(framedFits).channel == MediaChannel::Audio);
+	CHECK_EQ(framed.classify(framedFits).payload.size(), MAX_AUDIO_PAYLOAD_SIZE);
+
+	// Every size past it that the socket will read is dropped, in both framings.
+	for (std::size_t size = MAX_AUDIO_PAYLOAD_SIZE + 1; size <= MAX_MEDIA_DATAGRAM_SIZE; ++size) {
+		const Bytes plainDatagram(size, 0);
+		CHECK(plain.classify(plainDatagram).channel == MediaChannel::Unknown);
+		CHECK(!audioPayloadFits(size, bufferSize));
+
+		const Bytes framedDatagram(size + 1, MEDIA_CHANNEL_AUDIO);
+		CHECK(framed.classify(framedDatagram).channel == MediaChannel::Unknown);
+	}
+
+	// Video is not held to audio's limit.
+	const Bytes video(MAX_VIDEO_DATAGRAM_SIZE, MEDIA_CHANNEL_VIDEO);
+	CHECK(framed.classify(video).channel == MediaChannel::Video);
+
+	// The check the buffer's owner makes itself.
+	CHECK(!audioPayloadFits(0, bufferSize));
+	CHECK(!audioPayloadFits(3, bufferSize));
+	CHECK(audioPayloadFits(4, bufferSize));
+	CHECK(audioPayloadFits(bufferSize + 4, bufferSize));
+	CHECK(!audioPayloadFits(bufferSize + 5, bufferSize));
+}
+
+// The same datagrams through the public API, for a sanitizer build to catch if either check goes.
+CORE_TEST(mediaSessionDropsOversizedAudio) {
+	CryptStateOCB2 serverAudio;
+	serverAudio.genKey();
+
+	MumbleCore::MediaSession session;
+	MumbleCore::MediaEvents events;
+	MumbleProto::CryptSetup setup;
+	setup.set_key(serverAudio.getRawKey());
+	setup.set_client_nonce(serverAudio.getDecryptIV());
+	setup.set_server_nonce(serverAudio.getEncryptIV());
+	const std::string setupBytes = setup.SerializeAsString();
+	CHECK(session.handleCryptSetup(
+		std::span< const std::uint8_t >(reinterpret_cast< const std::uint8_t * >(setupBytes.data()), setupBytes.size()),
+		events));
+
+	// Encrypted by the server with the real key, so that only its size is wrong.
+	const Bytes plaintext(MAX_MEDIA_DATAGRAM_SIZE - 5, 0x41);
+	Bytes datagram(MAX_MEDIA_DATAGRAM_SIZE);
+	datagram[0] = MEDIA_CHANNEL_AUDIO;
+	CHECK(serverAudio.encrypt(plaintext.data(), datagram.data() + 1, static_cast< unsigned int >(plaintext.size())));
+
+	session.receiveDatagram(datagram, 1000, events);
+	CHECK(events.audio.empty());
+	CHECK(events.controlToSend.empty());
+}
+
 CORE_TEST(controlHeaderLayout) {
 	const Bytes payload = { 0xAA, 0xBB, 0xCC };
 	const Bytes framed  = ControlFramer::frame(static_cast< std::uint16_t >(TCPMessageType::CryptSetup), payload);

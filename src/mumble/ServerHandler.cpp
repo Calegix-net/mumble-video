@@ -296,8 +296,12 @@ void ServerHandler::udpReady() {
 
 		std::span< Mumble::Protocol::byte > buffer = m_udpDecoder.getBuffer();
 
-		// 4 bytes is the overhead of the encryption
-		assert(buffer.size() >= buflen - 4);
+		// The datagram was read into a buffer sized for video, which is larger than the decoder's. Decrypting
+		// writes the whole plaintext before the tag is checked, so this has to hold before decrypt() is
+		// called and has to hold in a release build, which an assert does not.
+		if (!Mumble::Protocol::audioPayloadFits(buflen, buffer.size())) {
+			continue;
+		}
 
 		if (!connection->csCrypt->decrypt(audio, buffer.data(), buflen)) {
 			if (connection->csCrypt->tLastGood.elapsed() > std::chrono::seconds(5)) {

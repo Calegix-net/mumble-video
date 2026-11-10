@@ -14,8 +14,24 @@
 namespace Mumble {
 namespace Protocol {
 
+	// What OCB2 puts in front of the audio ciphertext: the IV byte and three bytes of the tag.
+	constexpr std::size_t AUDIO_CRYPT_OVERHEAD = 4;
+
+	// The largest audio payload classify() hands out: one whose plaintext still fits the buffer every
+	// UDPDecoder decrypts into, which is MAX_UDP_PACKET_SIZE bytes. The socket reads up to
+	// MAX_MEDIA_DATAGRAM_SIZE because video needs it, and OCB2 writes the whole plaintext before it
+	// checks the tag, so anything longer would be written past the end of that buffer whether or not the
+	// sender held the key.
+	constexpr std::size_t MAX_AUDIO_PAYLOAD_SIZE = MAX_UDP_PACKET_SIZE + AUDIO_CRYPT_OVERHEAD;
+
+	/// Whether an audio payload can be decrypted into a buffer of that size. For the caller that owns the
+	/// buffer to ask before it decrypts, rather than trusting what classify() let through.
+	constexpr bool audioPayloadFits(std::size_t payloadSize, std::size_t bufferSize) {
+		return payloadSize >= AUDIO_CRYPT_OVERHEAD && payloadSize - AUDIO_CRYPT_OVERHEAD <= bufferSize;
+	}
+
 	enum class MediaChannel {
-		/// Too short to be anything, or a channel byte nobody uses. Drop it.
+		/// Too short or too long to be anything, or a channel byte nobody uses. Drop it.
 		Unknown,
 		Audio,
 		Video,
