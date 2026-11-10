@@ -739,6 +739,14 @@ protected:
 		int rows       = 0;
 		int cellWidth  = 0;
 		int cellHeight = 0;
+
+		// Spotlight layout (a tile enlarged in place): the slot that fills the top area, and the bottom
+		// thumbnail strip the rest share. -1 leaves the ordinary square grid above. See currentLayout().
+		int spotlightSlot  = -1;
+		int areaWidth      = 0;
+		int bigHeight      = 0;
+		int stripHeight    = 0;
+		int stripCellWidth = 0;
 	};
 
 	Layout currentLayout() const;
@@ -867,6 +875,31 @@ protected:
 	/// Surface, so nothing has to reset it defensively - the enum tag is the source of truth for whether
 	/// it means anything right now.
 	std::uint64_t m_focusedSurfaceKey = 0;
+
+	/// Spotlight: a tile the viewer single-clicked to enlarge in place. It fills the top of the grid while the
+	/// rest shrink into a thumbnail strip along the bottom (Discord's focus view). Independent of m_focus, which
+	/// is the separate fullscreen/pop-out window; None is the ordinary equal grid. The surface key is meaningful
+	/// only when m_spotlight == Surface, like m_focusedSurfaceKey above.
+	FocusTarget m_spotlight             = FocusTarget::None;
+	std::uint64_t m_spotlightSurfaceKey = 0;
+
+	/// A single click spotlights and a double click fullscreens, and the first of a double click arrives as a
+	/// single click - so a click's spotlight is deferred by the double-click interval and cancelled if a double
+	/// click follows (see mouseReleaseEvent()/mouseDoubleClickEvent()). What the deferred click would spotlight.
+	QTimer *m_spotlightClickTimer       = nullptr;
+	FocusTarget m_pendingSpotlight      = FocusTarget::None;
+	std::uint64_t m_pendingSpotlightKey = 0;
+
+	/// The slot the spotlighted tile occupies in the current walk order, or -1 if nothing is spotlighted or the
+	/// spotlighted tile is gone. Drives the spotlight branch of currentLayout(), cellRect() and slotAt().
+	int spotlightSlotIndex() const;
+
+	/// The spotlight identity - the focus tag and, for a surface, its key - of the tile at the given slot.
+	void spotlightTileAtSlot(int slot, FocusTarget &target, std::uint64_t &key) const;
+
+	/// Applies the single click deferred in mouseReleaseEvent(): spotlights m_pendingSpotlight, or clears the
+	/// spotlight if that tile is already the one spotlighted.
+	void applyPendingSpotlight();
 
 	/// See setOverlaySupport(). Both null unless an owner supplied them.
 	OverlayItemFactory m_overlayFactory;

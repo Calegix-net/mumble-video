@@ -124,6 +124,9 @@ private:
 
 	// Mainloop thread only.
 	std::map< std::uint32_t, std::string > m_sinkMonitors;
+	/// Each sink's own (master) volume as a linear gain, re-read on every sink change, so the broadcast of a
+	/// stream playing to it tracks the streamer's master slider. Keyed by sink index. See sinkInfoCallback().
+	std::map< std::uint32_t, float > m_sinkGain;
 	std::map< std::uint32_t, std::uint32_t > m_seenSinkInputs;
 	std::map< std::uint32_t, Capture > m_captures;
 	std::uint64_t m_mixStartUsec = 0;

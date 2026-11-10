@@ -301,13 +301,18 @@ struct Settings {
 	/// 2 = H.264 (VP9 when no hardware encoder opens - in effect the same as automatic). 1 meant TiledImage
 	/// in earlier versions; VP9 replaced it as the codec that needs no graphics card.
 	int screenShareCodec = 0;
-	/// H.264 screen-share target bitrate, kbit/s. Separate from iVideoBitrate, which is a camera's.
-	int iScreenShareBitrate = 6000;
-	/// VP9 screen-share target bitrate, kbit/s. VP9 needs about half what a hardware H.264 encoder does for
-	/// the same picture: 3 Mbit/s held text sharp and a playing video smooth at 1080p in measurement.
-	int iScreenShareVp9Bitrate = 3000;
-	/// Screen-share frame rate, either codec.
-	int iScreenShareFramerate = 30;
+	/// H.264 screen-share target bitrate, kbit/s. Separate from iVideoBitrate, which is a camera's. This is
+	/// a ceiling the per-viewer congestion control backs off from, not a fixed rate, so a generous default
+	/// is safe: a viewer on a thin link is dialled down on its own while everyone else keeps the full picture.
+	int iScreenShareBitrate = 20000;
+	/// VP9 screen-share target bitrate, kbit/s. VP9 reaches the same picture for roughly half the bits of a
+	/// hardware H.264 encoder, so it could run lower; it is kept level with H.264 by default so that
+	/// switching codec does not change the quality a share aims for.
+	int iScreenShareVp9Bitrate = 20000;
+	/// Screen-share frame rate, either codec. 60 by default - the ceiling the rest of the pipeline supports,
+	/// since viewers repaint at most 60 times a second - so scrolling and motion are smooth out of the box.
+	/// It is only a ceiling: a frame is sent when the screen changes, so a still screen spends almost nothing.
+	int iScreenShareFramerate = 60;
 
 	/// Whether the Mumble overlay - the same talking-user list it draws over a fullscreen game - is drawn
 	/// over video being watched fullscreen or popped out. Off by default: it is the overlay's own

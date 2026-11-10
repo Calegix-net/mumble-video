@@ -130,9 +130,9 @@ void VideoConfigDialog::buildUi() {
 	m_screenVp9Bitrate->setRange(500, 20000);
 	m_screenVp9Bitrate->setSingleStep(250);
 	m_screenVp9Bitrate->setSuffix(tr(" kbit/s"));
-	m_screenVp9Bitrate->setToolTip(tr("VP9 target bitrate. 3000 keeps text sharp and video smooth at 1080p; raise "
-									  "it for fast-moving content if your upload allows, lower it if viewers see "
-									  "stutter."));
+	m_screenVp9Bitrate->setToolTip(tr("VP9 target bitrate. VP9 reaches the same picture for about half the bits "
+									  "of H.264, so it can run lower; lower it if viewers see stutter, raise it for "
+									  "fast-moving content if your upload allows."));
 	screenLayout->addRow(tr("VP&9 bitrate"), m_screenVp9Bitrate);
 
 	m_screenFramerate = new QSpinBox(screenBox);

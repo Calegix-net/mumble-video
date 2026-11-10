@@ -344,6 +344,26 @@ void PulseLoopbackSource::sinkInfoCallback(pa_context *, const pa_sink_info *inf
 	if (info->monitor_source_name) {
 		self->m_sinkMonitors[info->index] = info->monitor_source_name;
 	}
+
+	// The sink's own (master) volume, as the cubic linear gain PulseAudio itself applies for a software
+	// volume, so the broadcast tracks the streamer's master slider: lowering or muting it does the same to
+	// what viewers hear. Re-read on every sink change (subscribeCallback -> refresh), so it follows the
+	// slider live. Per-sink-input monitoring captures a stream after its own app volume but before this
+	// master, which is why the master had no effect until now.
+	// Averaged across channels by hand - pa_cvolume_avg is a real libpulse symbol and libpulse here is loaded
+	// dynamically rather than linked, so it cannot be called - then the cubic linear gain PulseAudio applies
+	// for a software volume.
+	float average = 0.0f;
+	if (info->volume.channels > 0) {
+		std::uint64_t sum = 0;
+		for (unsigned int channel = 0; channel < info->volume.channels; ++channel) {
+			sum += info->volume.values[channel];
+		}
+		average = static_cast< float >(sum) / static_cast< float >(info->volume.channels);
+	}
+
+	const float norm              = average / static_cast< float >(PA_VOLUME_NORM);
+	self->m_sinkGain[info->index] = info->mute ? 0.0f : norm * norm * norm;
 }
 
 bool PulseLoopbackSource::isOwnStream(const pa_sink_input_info *info) const {
@@ -588,8 +608,14 @@ void PulseLoopbackSource::mix() {
 	for (auto &entry : m_captures) {
 		std::deque< float > &queue = entry.second.samples;
 		const std::size_t take     = std::min(samples, queue.size());
+
+		// Scaled by the master volume of the sink this stream plays to, so the streamer's master slider sets
+		// how loud everyone hears it. A sink not yet listed plays at full until the next refresh fills it in.
+		const auto gainIt = m_sinkGain.find(entry.second.sinkIndex);
+		const float gain  = gainIt != m_sinkGain.end() ? gainIt->second : 1.0f;
+
 		for (std::size_t i = 0; i < take; ++i) {
-			out[i] += queue[i];
+			out[i] += queue[i] * gain;
 		}
 		queue.erase(queue.begin(), queue.begin() + static_cast< std::ptrdiff_t >(take));
 	}

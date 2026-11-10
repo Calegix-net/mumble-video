@@ -15,6 +15,7 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QFutureWatcher>
 #include <QtCore/QMetaObject>
+#include <QtCore/QPointF>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
@@ -24,6 +25,8 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QScreen>
+#include <QtGui/QWheelEvent>
 #include <QtGui/QWindow>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QGraphicsItem>
@@ -118,6 +121,23 @@ public:
 	/// overlay does, which refreshes the same item once per game frame.
 	static constexpr int OVERLAY_REFRESH_MSEC = 100;
 
+	/// How far the zoom slider goes. 1.0 is the whole picture; above it a sub-rectangle is magnified and
+	/// the mouse pans it. Five times over is enough to read small text on a share that is being downscaled
+	/// into the window, past which bilinear sampling has no more sent detail to show.
+	static constexpr double MAX_ZOOM = 5.0;
+
+	// While zoomed, a block none of whose pixels moved by more than this (per colour channel) counts as
+	// unchanged - the codec re-quantising a still screen. Once such a block has been unchanged for
+	// ZOOM_SETTLE_FRAMES it is held, so that churn stops being resampled through the magnifier and shimmering.
+	// A block that moved more than this is new content and is drawn live. Overridable with MUMBLE_ZOOM_HOLD_DIFF.
+	static constexpr int ZOOM_HOLD_MAX_PIXEL_DIFF = 64;
+	// Side, in source pixels, of the blocks tested and held independently, so a still region beside a moving
+	// one is kept rather than dragged into the moving one's repaints.
+	static constexpr int ZOOM_DIRTY_BLOCK = 24;
+	// After a block last changed, this many frames are still drawn live before it is held, so the codec has
+	// time to finish sharpening a freshly changed region and a block that keeps moving is never held at all.
+	static constexpr int ZOOM_SETTLE_FRAMES = 12;
+
 	/// What asking this window to go away means. The focus-driven fullscreen window gives up the grid's
 	/// focus; a picture-in-picture window puts its own tile back in the grid.
 	using CloseHandler = std::function< void() >;
@@ -140,6 +160,8 @@ public:
 		setAutoFillBackground(true);
 		// Moving the mouse, without a button held, is what brings the controls back.
 		setMouseTracking(true);
+		// Either mouse button drags the zoomed picture, so neither should raise a context menu over it.
+		setContextMenuPolicy(Qt::PreventContextMenu);
 
 		m_repaintTimer = new QTimer(this);
 		m_repaintTimer->setSingleShot(true);
@@ -163,6 +185,17 @@ public:
 	/// The whole picture is different - a different tile was focused, or the stream restarted. Everything
 	/// is repainted, on the next coalesced repaint.
 	void contentReplaced() {
+		// A genuinely different picture - a different tile was focused, or the stream started over - so the
+		// zoom drops back to the whole picture: it, and the part being looked at, belonged to what was
+		// showing before. A change to only the labelling around an unchanged picture must NOT come through
+		// here - it would throw the viewer out of their zoom - see contentRefreshed().
+		resetZoom();
+		contentRefreshed();
+	}
+
+	/// The picture is unchanged but something around it has moved on - the watcher-count label, the stream's
+	/// own volume. Repainted and the bar brought up to date, with the zoom and pan left exactly as they are.
+	void contentRefreshed() {
 		m_wholeDirty = true;
 		scheduleRepaint();
 		refreshVolume();
@@ -193,6 +226,22 @@ public:
 			showNormal();
 			raise();
 		} else {
+			// showFullScreen() otherwise fills whatever monitor Qt last tied this window to - the primary one,
+			// or wherever it was last shown - rather than the one the grid, and so the tile the viewer clicked,
+			// is on. A fresh fullscreen is pinned to the grid's monitor first; a pop-out already on screen being
+			// toggled to fullscreen is left on the monitor it is already on.
+			if (!isVisible() && m_owner) {
+				if (QScreen *const target = m_owner->screen()) {
+					winId();  // force the native handle to exist so its screen can be set before the first show
+
+					if (QWindow *const handle = windowHandle()) {
+						handle->setScreen(target);
+					}
+
+					setGeometry(target->geometry());
+				}
+			}
+
 			showFullScreen();
 		}
 
@@ -298,6 +347,17 @@ public:
 
 	/// Only the given rectangle of the picture, in the picture's own pixel coordinates, changed.
 	void contentChanged(const QRect &sourceRect) {
+		// While zoomed, a changed patch of the source maps onto the window through a different transform
+		// than flushRepaint()'s whole-picture arithmetic assumes, and the area around it has been magnified
+		// too, so there is no small window rectangle that is correct to repaint on its own. The whole view
+		// is redrawn instead. That is cheaper than the 1:1 case, not dearer: only the visible sub-rectangle
+		// of the source is sampled, so a deeper zoom scales fewer source pixels, not more.
+		if (m_zoom > 1.0) {
+			updateZoomedSource();
+
+			return;
+		}
+
 		if (!m_wholeDirty) {
 			m_dirtySource |= sourceRect;
 		}
@@ -314,6 +374,158 @@ protected:
 
 		return QRect((width() - scaled.width()) / 2, (height() - scaled.height()) / 2, scaled.width(),
 					 scaled.height());
+	}
+
+	/// The sub-rectangle of the picture the zoomed view shows, in the picture's own pixels: the whole
+	/// picture at m_zoom == 1, otherwise a 1/zoom-sized window centred on m_panFraction and kept inside the
+	/// picture so panning never runs off the edge into black. Its aspect ratio equals the picture's - both
+	/// sides are divided by the same factor - so targetRectFor() still lands it without distortion.
+	QRectF zoomedSourceRect(const QSize &imageSize) const {
+		const double zoom = std::max(1.0, m_zoom);
+		const double w    = imageSize.width() / zoom;
+		const double h    = imageSize.height() / zoom;
+
+		const double centreX = m_panFraction.x() * imageSize.width();
+		const double centreY = m_panFraction.y() * imageSize.height();
+
+		const double x = std::clamp(centreX - w / 2.0, 0.0, imageSize.width() - w);
+		const double y = std::clamp(centreY - h / 2.0, 0.0, imageSize.height() - h);
+
+		return QRectF(x, y, w, h);
+	}
+
+	/// The pan fraction (each axis 0..1) the cursor points at within the letterboxed picture, or nothing
+	/// when it is out in the black margin. Taken across the picture rectangle, not the whole window, so the
+	/// picture's own edges map to 0 and 1.
+	std::optional< QPointF > panFractionAt(const QPointF &pos) const {
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		if (image.isNull()) {
+			return std::nullopt;
+		}
+
+		const QRect target = targetRectFor(image.size());
+
+		if (target.width() <= 0 || target.height() <= 0 || !target.contains(pos.toPoint())) {
+			return std::nullopt;
+		}
+
+		return QPointF(std::clamp((pos.x() - target.x()) / target.width(), 0.0, 1.0),
+					   std::clamp((pos.y() - target.y()) / target.height(), 0.0, 1.0));
+	}
+
+	/// A frame has arrived while zoomed. Rebuild m_displayedSource - the visible sub-rectangle paintEvent
+	/// magnifies - block by block, and never by blending: every block it draws is a single decoded frame, so
+	/// text stays as sharp as the stream. A block any of whose pixels jumped by more than the threshold is new
+	/// content and is drawn from the new frame, its settle counter started over. A block that did not is still
+	/// drawn from the new frame for the first ZOOM_SETTLE_FRAMES frames after it last moved - long enough for
+	/// the codec to finish sharpening a freshly changed region - and only then held, so that a still screen's
+	/// per-keyframe re-quantisation stops being resampled through the magnifier and shimmering. A block that
+	/// keeps changing never reaches the hold, so busy content is always live and nothing freezes into a stale
+	/// patch. A repaint is asked for only when a pixel actually moved.
+	void updateZoomedSource() {
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		if (image.isNull() || image.format() != QImage::Format_RGB32) {
+			// Not a format this can diff (a camera's frame, say): fall back to magnifying the live frame.
+			m_displayedSource = QImage();
+			m_blockStable.clear();
+			m_wholeDirty = true;
+			scheduleRepaint();
+
+			return;
+		}
+
+		const QRect vis = zoomedSourceRect(image.size()).toRect().intersected(image.rect());
+
+		if (vis.isEmpty()) {
+			return;
+		}
+
+		const int blockCols = (vis.width() + ZOOM_DIRTY_BLOCK - 1) / ZOOM_DIRTY_BLOCK;
+		const int blockRows = (vis.height() + ZOOM_DIRTY_BLOCK - 1) / ZOOM_DIRTY_BLOCK;
+		const int blockCount = blockCols * blockRows;
+
+		if (m_displayedSource.isNull() || m_displayedSource.size() != vis.size()) {
+			// No baseline yet - a fresh zoom or pan: take the whole visible region and draw it.
+			m_displayedSource = image.copy(vis);
+			m_blockStable.fill(0, blockCount);
+			m_wholeDirty = true;
+			scheduleRepaint();
+
+			return;
+		}
+
+		if (m_blockStable.size() != blockCount) {
+			m_blockStable.fill(0, blockCount);
+		}
+
+		const int threshold = qEnvironmentVariableIsSet("MUMBLE_ZOOM_HOLD_DIFF")
+								  ? qEnvironmentVariableIntValue("MUMBLE_ZOOM_HOLD_DIFF")
+								  : ZOOM_HOLD_MAX_PIXEL_DIFF;
+		bool changed = false;
+
+		for (int blockTop = 0; blockTop < vis.height(); blockTop += ZOOM_DIRTY_BLOCK) {
+			const int blockHeight = std::min(ZOOM_DIRTY_BLOCK, vis.height() - blockTop);
+
+			for (int blockLeft = 0; blockLeft < vis.width(); blockLeft += ZOOM_DIRTY_BLOCK) {
+				const int blockWidth = std::min(ZOOM_DIRTY_BLOCK, vis.width() - blockLeft);
+				const int blockIndex = (blockTop / ZOOM_DIRTY_BLOCK) * blockCols + (blockLeft / ZOOM_DIRTY_BLOCK);
+				bool bigChange = false;
+
+				for (int row = 0; row < blockHeight && !bigChange; ++row) {
+					const QRgb *now =
+						reinterpret_cast< const QRgb * >(image.constScanLine(vis.y() + blockTop + row))
+						+ vis.x() + blockLeft;
+					const QRgb *was =
+						reinterpret_cast< const QRgb * >(m_displayedSource.constScanLine(blockTop + row)) + blockLeft;
+
+					for (int col = 0; col < blockWidth; ++col) {
+						if (qAbs(qRed(now[col]) - qRed(was[col])) > threshold
+							|| qAbs(qGreen(now[col]) - qGreen(was[col])) > threshold
+							|| qAbs(qBlue(now[col]) - qBlue(was[col])) > threshold) {
+							bigChange = true;
+							break;
+						}
+					}
+				}
+
+				if (bigChange) {
+					m_blockStable[blockIndex] = 0;
+				} else if (m_blockStable[blockIndex] <= ZOOM_SETTLE_FRAMES) {
+					++m_blockStable[blockIndex];
+				}
+
+				// Held once it has been unchanged for longer than the settle window; until then drawn live, so a
+				// change still being sharpened shows at full detail and a block that keeps moving is never held.
+				if (m_blockStable[blockIndex] > ZOOM_SETTLE_FRAMES) {
+					continue;
+				}
+
+				for (int row = 0; row < blockHeight; ++row) {
+					const QRgb *now =
+						reinterpret_cast< const QRgb * >(image.constScanLine(vis.y() + blockTop + row))
+						+ vis.x() + blockLeft;
+					QRgb *dest = reinterpret_cast< QRgb * >(m_displayedSource.scanLine(blockTop + row)) + blockLeft;
+
+					for (int col = 0; col < blockWidth; ++col) {
+						if (dest[col] != now[col]) {
+							dest[col] = now[col];
+							changed   = true;
+						}
+					}
+				}
+			}
+		}
+
+		if (changed) {
+			m_wholeDirty = true;
+			scheduleRepaint();
+		}
 	}
 
 	void scheduleRepaint() {
@@ -374,11 +586,25 @@ protected:
 		painter.fillRect(event->rect(), Qt::black);
 
 		if (!image.isNull()) {
-			// Always the whole image at its full target rect, never a sub-rect of it: the clip region
-			// paintEvent() is delivered with is what confines the work to the dirty patch, and drawing with
-			// the same transform every time is what guarantees a patch's pixels are identical to those the
-			// surrounding, untouched area was painted with.
-			painter.drawImage(targetRectFor(image.size()), image);
+			const QRectF target(targetRectFor(image.size()));
+
+			if (m_zoom > 1.0) {
+				// Zoomed: magnify the visible sub-rectangle into the letterboxed target. It is drawn from
+				// m_displayedSource - that region with its unchanged blocks held at the pixels they were last
+				// drawn with - so a keyframe re-quantising a still screen does not shimmer through the magnifier
+				// (see updateZoomedSource()). Until that baseline exists, the live frame is magnified instead.
+				if (!m_displayedSource.isNull()) {
+					painter.drawImage(target, m_displayedSource);
+				} else {
+					painter.drawImage(target, image, zoomedSourceRect(image.size()));
+				}
+			} else {
+				// Always the whole image at its full target rect, never a sub-rect of it: the clip region
+				// paintEvent() is delivered with is what confines the work to the dirty patch, and drawing
+				// with the same transform every time is what guarantees a patch's pixels are identical to
+				// those the surrounding, untouched area was painted with.
+				painter.drawImage(target, image);
+			}
 		}
 
 		m_paintedImageSize = image.size();
@@ -424,6 +650,19 @@ protected:
 	/// pop-out could end up with nothing to move it by. Armed on the press and started only once the mouse
 	/// has travelled the drag distance, so a double-click (pop back in) still arrives as one.
 	void mousePressEvent(QMouseEvent *event) override {
+		if ((event->button() == Qt::LeftButton || event->button() == Qt::RightButton) && m_zoom > 1.0) {
+			// Zoomed in: dragging with either mouse button pans the view, grab-and-drag, so the picture moves
+			// only while held and does not wander as the mouse passes over it. Takes precedence over the
+			// windowed drag-to-move below, which keeps the un-zoomed behaviour.
+			m_panning       = true;
+			m_panGrabPos    = event->position();
+			m_panGrabAnchor = m_panFraction;
+			setCursor(Qt::ClosedHandCursor);
+			event->accept();
+
+			return;
+		}
+
 		if (m_windowed && event->button() == Qt::LeftButton) {
 			m_dragArmed       = true;
 			m_dragSystemMove  = false;
@@ -465,10 +704,63 @@ protected:
 			return;
 		}
 
+		if (m_panning && (event->buttons() & (Qt::LeftButton | Qt::RightButton))) {
+			// Dragging with either button held pans the zoomed view; the bare cursor never moves it.
+			dragPanTo(event->position());
+			event->accept();
+
+			return;
+		}
+
 		QWidget::mouseMoveEvent(event);
 	}
 
+	/// Rolling the wheel over the picture zooms, toward wherever the pointer is - point at the small text
+	/// and roll in. The slider is the single source of truth for the level, so this drives it and lets its
+	/// callback do the rest.
+	void wheelEvent(QWheelEvent *event) override {
+		if (!m_zoomSlider || event->angleDelta().y() == 0) {
+			QWidget::wheelEvent(event);
+
+			return;
+		}
+
+		// Aim at the pointer - but not over the control bar - so the zoom grows around what the cursor is on,
+		// even starting from 1:1. This is an explicit scroll, not a bare-cursor follow: panning itself only
+		// happens on a left-drag.
+		if (!(m_controls->isVisible() && m_controls->geometry().contains(event->position().toPoint()))) {
+			if (const auto frac = panFractionAt(event->position())) {
+				m_panFraction = *frac;
+			}
+		}
+
+		// A wheel zoom re-aims the pan, so any held-still baseline no longer lines up: rebuild it.
+		m_displayedSource = QImage();
+
+		const int target = std::clamp(m_zoomSlider->value() + (event->angleDelta().y() > 0 ? 25 : -25),
+									  m_zoomSlider->minimum(), m_zoomSlider->maximum());
+
+		if (target != m_zoomSlider->value()) {
+			// Drives setZoomPercent() through valueChanged(), which applies the zoom and repaints.
+			m_zoomSlider->setValue(target);
+		} else if (m_zoom > 1.0) {
+			// Already at the slider's limit: the value will not change, so valueChanged() never fires and
+			// setZoomPercent() never runs - repaint the re-aimed pan here instead, or it would not show
+			// until the next mouse move or frame.
+			m_wholeDirty = true;
+			scheduleRepaint();
+		}
+
+		event->accept();
+	}
+
 	void mouseReleaseEvent(QMouseEvent *event) override {
+		if (event->button() == Qt::LeftButton || event->button() == Qt::RightButton) {
+			// Either button pans a zoomed view, so either button's release ends the pan.
+			m_panning = false;
+			applyIdleCursor();
+		}
+
 		if (event->button() == Qt::LeftButton) {
 			m_dragArmed      = false;
 			m_dragManual     = false;
@@ -542,6 +834,40 @@ private:
 		m_volumeLabel->setFixedWidth(m_volumeLabel->fontMetrics().horizontalAdvance(QStringLiteral("200%")) + 4);
 		layout->addWidget(m_volumeLabel);
 
+		// The zoom control sits just right of the stream's volume, a magnifier for reading small detail on a
+		// share. The same click-to-position slider as the volume beside it, so the two feel the same under
+		// the pointer; its label reads "1.0×" .. "5.0×".
+		QIcon zoomIcon = QIcon::fromTheme(QStringLiteral("zoom-in"));
+		if (zoomIcon.isNull()) {
+			zoomIcon = style()->standardIcon(QStyle::SP_FileDialogContentsView);
+		}
+		m_zoomTitle             = new QLabel(m_controls);
+		const QPixmap zoomGlyph = zoomIcon.pixmap(18, 18);
+		if (zoomGlyph.isNull()) {
+			// A style with neither a themed nor a standard magnifier: a word is better than an empty gap
+			// where the affordance should be.
+			m_zoomTitle->setText(tr("Zoom"));
+		} else {
+			m_zoomTitle->setPixmap(zoomGlyph);
+		}
+		m_zoomTitle->setToolTip(tr("Zoom"));
+		layout->addWidget(m_zoomTitle);
+
+		m_zoomSlider = new StreamVolumeSlider(m_controls);
+		m_zoomSlider->setRange(100, static_cast< int >(MAX_ZOOM * 100.0));
+		m_zoomSlider->setSingleStep(10);
+		m_zoomSlider->setPageStep(50);
+		m_zoomSlider->setValue(100);
+		m_zoomSlider->setFixedWidth(140);
+		m_zoomSlider->setFocusPolicy(Qt::NoFocus);
+		m_zoomSlider->setToolTip(tr("Zoom into the video, then move the mouse over it to look around"));
+		m_zoomSlider->setAccessibleName(tr("Zoom"));
+		layout->addWidget(m_zoomSlider);
+
+		m_zoomLabel = new QLabel(m_controls);
+		m_zoomLabel->setFixedWidth(m_zoomLabel->fontMetrics().horizontalAdvance(QStringLiteral("5.0×")) + 4);
+		layout->addWidget(m_zoomLabel);
+
 		layout->addStretch();
 
 		// Words, not just an icon: the theme's "restore" icon is small and grey and was easy to miss on top of
@@ -608,6 +934,9 @@ private:
 		connect(m_muteButton, &QToolButton::clicked, this,
 				[this]() { m_volumeSlider->setValue(m_volumeSlider->value() == 0 ? m_volumeBeforeMute : 0); });
 
+		connect(m_zoomSlider, &QSlider::valueChanged, this, [this](int value) { setZoomPercent(value); });
+		showZoom(m_zoomSlider->value());
+
 		m_hideTimer = new QTimer(this);
 		m_hideTimer->setSingleShot(true);
 		m_hideTimer->setInterval(CONTROLS_HIDE_MSEC);
@@ -628,7 +957,11 @@ private:
 		m_controls->setGeometry(0, height() - CONTROLS_HEIGHT, width(), CONTROLS_HEIGHT);
 		m_controls->show();
 		m_controls->raise();
-		unsetCursor();
+		// Leave the drag cursor alone mid-pan; otherwise show the open hand over a zoomed picture (it can be
+		// grabbed and panned) or the ordinary pointer.
+		if (!m_panning) {
+			applyIdleCursor();
+		}
 		m_hideTimer->start();
 	}
 
@@ -646,6 +979,108 @@ private:
 			m_muteButton->setIcon(muted ? m_volumeIcons.second : m_volumeIcons.first);
 			m_muteButton->setToolTip(muted ? tr("Unmute stream") : tr("Mute stream"));
 		}
+	}
+
+	/// Keeps the visible label and the screen-reader text in step with a zoom percentage, without touching
+	/// m_zoom or repainting - the slider callback and resetZoom() do that part.
+	void showZoom(int percent) {
+		const QString text = tr("%1×").arg(std::max(1.0, percent / 100.0), 0, 'f', 1);
+
+		if (m_zoomLabel) {
+			m_zoomLabel->setText(text);
+		}
+		if (m_zoomSlider) {
+			m_zoomSlider->setLevelText(text);
+		}
+	}
+
+	/// The zoom slider moved. Applies the new factor and redraws; on the way back down to 1:1 the pan is
+	/// recentred, so the next zoom-in starts from the middle rather than wherever it was left.
+	void setZoomPercent(int percent) {
+		showZoom(percent);
+
+		const double zoom = std::max(1.0, percent / 100.0);
+
+		if (qFuzzyCompare(zoom, m_zoom)) {
+			return;
+		}
+
+		m_zoom = zoom;
+		m_displayedSource = QImage();
+
+		if (m_zoom <= 1.0) {
+			m_panFraction = QPointF(0.5, 0.5);
+		}
+
+		// The grab cursor appears or disappears as the picture becomes zoomable or not, while the bar is up.
+		if (!m_panning && m_controls->isVisible()) {
+			applyIdleCursor();
+		}
+
+		m_wholeDirty = true;
+		scheduleRepaint();
+	}
+
+	/// Back to the whole picture. The slider is set without re-entering setZoomPercent(), which would be a
+	/// no-op here anyway but need not run.
+	void resetZoom() {
+		m_zoom            = 1.0;
+		m_panFraction     = QPointF(0.5, 0.5);
+		m_displayedSource = QImage();
+
+		if (m_zoomSlider) {
+			const QSignalBlocker blocker(m_zoomSlider);
+			m_zoomSlider->setValue(100);
+		}
+
+		showZoom(100);
+	}
+
+	/// Grab-and-drag panning: keeps the point grabbed at the press under the cursor, so the picture follows
+	/// the hand. Driven only from a held left-drag (see mousePressEvent), never a bare move, so a zoomed
+	/// view holds perfectly still otherwise - which is also what keeps magnified text from shimmering as a
+	/// resting hand nudges the mouse. A no-op without a zoom or a known picture rectangle.
+	void dragPanTo(const QPointF &pos) {
+		if (m_zoom <= 1.0) {
+			return;
+		}
+
+		QImage image;
+		QString label;
+		m_provider(image, label);
+
+		if (image.isNull()) {
+			return;
+		}
+
+		const QRect target = targetRectFor(image.size());
+
+		if (target.width() <= 0 || target.height() <= 0) {
+			return;
+		}
+
+		// One window pixel spans 1/(zoom*targetWidth) of the whole picture across; dragging right shows the
+		// picture further left, so the centred fraction moves against the drag, anchored where it was grabbed.
+		const QPointF delta = pos - m_panGrabPos;
+		const double nx     = m_panGrabAnchor.x() - delta.x() / (m_zoom * target.width());
+		const double ny     = m_panGrabAnchor.y() - delta.y() / (m_zoom * target.height());
+
+		const QPointF next(std::clamp(nx, 0.0, 1.0), std::clamp(ny, 0.0, 1.0));
+
+		if (next == m_panFraction) {
+			return;
+		}
+
+		m_panFraction     = next;
+		m_displayedSource = QImage();
+		m_wholeDirty  = true;
+		scheduleRepaint();
+	}
+
+	/// The cursor shown when not dragging: an open hand over a zoomed picture, to say it can be grabbed and
+	/// panned, and the ordinary pointer otherwise.
+	void applyIdleCursor() {
+		setCursor(m_zoom > 1.0 ? Qt::OpenHandCursor : Qt::ArrowCursor);
 	}
 
 	VideoGrid *m_owner;
@@ -687,6 +1122,9 @@ private:
 	QToolButton *m_muteButton = nullptr;
 	StreamVolumeSlider *m_volumeSlider = nullptr;
 	QLabel *m_volumeLabel     = nullptr;
+	QLabel *m_zoomTitle       = nullptr;
+	StreamVolumeSlider *m_zoomSlider = nullptr;
+	QLabel *m_zoomLabel       = nullptr;
 	QTimer *m_hideTimer       = nullptr;
 	int m_volumeBeforeMute    = static_cast< int >(AudioOutputScreenShare::DEFAULT_VOLUME * 100.0f);
 
@@ -724,6 +1162,19 @@ private:
 	QGraphicsItem *m_overlayItem   = nullptr;
 	QTimer *m_overlayTimer         = nullptr;
 
+	/// 1.0 shows the whole picture; above it, zoomedSourceRect() magnifies a sub-rectangle. Capped at
+	/// MAX_ZOOM by the slider's range.
+	double m_zoom = 1.0;
+
+	/// Which point of the picture the zoomed view is centred on, each axis 0..1. Moves only on a left-drag.
+	QPointF m_panFraction = QPointF(0.5, 0.5);
+
+	/// A left-drag pan in progress, and what to anchor it to: the cursor position and pan fraction at the
+	/// press, so the grabbed point stays under the cursor as it moves (see dragPanTo()).
+	bool m_panning = false;
+	QPointF m_panGrabPos;
+	QPointF m_panGrabAnchor;
+
 	/// Accumulated since the last repaint, in picture pixels. Ignored while m_wholeDirty is set.
 	QRect m_dirtySource;
 	bool m_wholeDirty = true;
@@ -731,6 +1182,18 @@ private:
 	/// The picture size the last paint used. A picture that has since changed size - a surface growing to
 	/// fit a tile at its edge, say - moves the whole target rect, so nothing painted before it is reusable.
 	QSize m_paintedImageSize;
+
+	/// The visible sub-rectangle the zoomed view draws, as RGB32, kept between frames so a block that has been
+	/// unchanged for a while can be held rather than resampled from each new frame - which is what stops a
+	/// still screen share shimmering under the magnifier. Every block drawn is a single frame, never a blend,
+	/// so text stays sharp. Null while not zoomed, rebuilt whenever the zoom or pan changes. See
+	/// updateZoomedSource().
+	QImage m_displayedSource;
+
+	/// Per block of m_displayedSource, how many frames it has gone unchanged, saturating just past
+	/// ZOOM_SETTLE_FRAMES. A block is held only once this exceeds that window. Sized to the block grid and
+	/// zeroed whenever m_displayedSource is rebuilt. See updateZoomedSource().
+	QVector< quint16 > m_blockStable;
 };
 
 } // namespace
@@ -753,6 +1216,12 @@ VideoGrid::VideoGrid(QWidget *parent) : QWidget(parent) {
 	m_gridRepaintTimer->setTimerType(Qt::PreciseTimer);
 	m_gridRepaintTimer->setInterval(GRID_REPAINT_INTERVAL_MSEC);
 	connect(m_gridRepaintTimer, &QTimer::timeout, this, &VideoGrid::flushGridRepaint);
+
+	// Fires one double-click interval after a single click on a live tile, to spotlight it - unless a double
+	// click arrived first and stopped it (that fullscreens instead). See mouseReleaseEvent().
+	m_spotlightClickTimer = new QTimer(this);
+	m_spotlightClickTimer->setSingleShot(true);
+	connect(m_spotlightClickTimer, &QTimer::timeout, this, &VideoGrid::applyPendingSpotlight);
 
 	// Strong rather than the default NoFocus: Esc only reaches keyPressEvent() below if this widget
 	// actually holds keyboard focus, and a click is the only way a user has told it they mean to interact
@@ -1172,9 +1641,32 @@ void VideoGrid::onFrameDecoded(std::uint64_t key, std::uint64_t epoch, quint64 f
 	Surface &surface = it->second;
 
 	if (!decoded) {
-		// Undecodable - typically a frame whose reference was itself damaged. The frames after it fail the
-		// same way until a keyframe, which a run of failures asks for.
-		noteDecodeFailure(surface);
+		// A frame the decoder could not produce cleanly: its own slices were lost, or a reference it needed
+		// had itself been lost and concealed. The frames that come after decode "successfully" against that
+		// concealed reference, so they are shown - as a ghost of the whole picture drifting over the real one,
+		// the flicker seen on a lossy link - and, because they report success, a run of failures is never
+		// counted and no keyframe is asked for until the encoder's own periodic one seconds away.
+		//
+		// Instead freeze on the last good picture (return without presenting) and ask for a fresh keyframe at
+		// once. Setting awaitingKeyframe makes onVp8UnitReceived hold every later frame until that keyframe
+		// arrives, so none of the ghosts reaches the screen; the brief freeze is invisible on a still screen
+		// share and reads as a short pause on moving video, either of which beats the ghost.
+		if (!surface.awaitingKeyframe) {
+			surface.awaitingKeyframe   = true;
+			surface.unitsWhileAwaiting = 0;
+
+			++surface.stats.keyframeRequestsFailure;
+			emit keyframeNeeded(surface.senderSession, surface.streamID);
+		}
+
+		return;
+	}
+
+	if (surface.awaitingKeyframe) {
+		// Decoded cleanly on its own, but it was already in flight on the decode thread when the freeze above
+		// began, so it too was decoded against the reference just disowned and is itself a candidate ghost.
+		// Hold it. The keyframe that was asked for clears awaitingKeyframe as it is submitted to decode
+		// (decodeVp8Unit), before its own frame arrives here, so that frame and everything after it still show.
 		return;
 	}
 
@@ -2539,6 +3031,19 @@ VideoGrid::Layout VideoGrid::currentLayout() const {
 		return layout;
 	}
 
+	const int spotlight = layout.count >= 2 ? spotlightSlotIndex() : -1;
+
+	if (spotlight >= 0) {
+		// Spotlight: the clicked tile fills the top of the grid, the rest a thumbnail strip along the bottom.
+		layout.spotlightSlot  = spotlight;
+		layout.areaWidth      = width();
+		layout.stripHeight    = std::min(std::max(height() / 5, 72), std::max(1, height() / 2));
+		layout.bigHeight      = height() - layout.stripHeight;
+		layout.stripCellWidth = width() / std::max(1, layout.count - 1);
+
+		return layout;
+	}
+
 	// A roughly square arrangement, which is what every other video call looks like and needs no layout
 	// configuration to be reasonable at any participant count.
 	layout.columns = static_cast< int >(std::ceil(std::sqrt(static_cast< double >(layout.count))));
@@ -2551,6 +3056,17 @@ VideoGrid::Layout VideoGrid::currentLayout() const {
 }
 
 QRect VideoGrid::cellRect(const Layout &layout, int slot) {
+	if (layout.spotlightSlot >= 0) {
+		if (slot == layout.spotlightSlot) {
+			return QRect(0, 0, layout.areaWidth, layout.bigHeight);
+		}
+
+		// Its place in the strip skips the spotlighted tile, which is not in the strip.
+		const int stripPos = slot < layout.spotlightSlot ? slot : slot - 1;
+
+		return QRect(stripPos * layout.stripCellWidth, layout.bigHeight, layout.stripCellWidth, layout.stripHeight);
+	}
+
 	if (layout.columns <= 0) {
 		return QRect();
 	}
@@ -2562,7 +3078,35 @@ QRect VideoGrid::cellRect(const Layout &layout, int slot) {
 }
 
 int VideoGrid::slotAt(const QPoint &point, const Layout &layout) const {
-	if (layout.count == 0 || layout.cellWidth <= 0 || layout.cellHeight <= 0) {
+	if (layout.count == 0) {
+		return -1;
+	}
+
+	if (layout.spotlightSlot >= 0) {
+		if (point.y() < 0 || point.x() < 0 || point.x() >= layout.areaWidth) {
+			return -1;
+		}
+
+		if (point.y() < layout.bigHeight) {
+			return layout.spotlightSlot;
+		}
+
+		const int others = layout.count - 1;
+
+		if (layout.stripCellWidth <= 0 || others <= 0) {
+			return -1;
+		}
+
+		const int stripPos = point.x() / layout.stripCellWidth;
+
+		if (stripPos < 0 || stripPos >= others) {
+			return -1;
+		}
+
+		return stripPos < layout.spotlightSlot ? stripPos : stripPos + 1;
+	}
+
+	if (layout.cellWidth <= 0 || layout.cellHeight <= 0) {
 		return -1;
 	}
 
@@ -2579,6 +3123,109 @@ int VideoGrid::slotAt(const QPoint &point, const Layout &layout) const {
 	// leaves some cells in the grid unoccupied, and a click that lands in one of those must not be
 	// mistaken for the tile before it.
 	return slot < layout.count ? slot : -1;
+}
+
+int VideoGrid::spotlightSlotIndex() const {
+	if (m_spotlight == FocusTarget::None) {
+		return -1;
+	}
+
+	int index = 0;
+
+	if (!m_selfCameraFrame.isNull()) {
+		if (m_spotlight == FocusTarget::SelfCamera) {
+			return index;
+		}
+		++index;
+	}
+
+	if (!m_selfScreenFrame.isNull()) {
+		if (m_spotlight == FocusTarget::SelfScreen) {
+			return index;
+		}
+		++index;
+	}
+
+	if (m_spotlight == FocusTarget::Surface) {
+		for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+			if (!occupiesCell(it->second)) {
+				continue;
+			}
+
+			if (it->first == m_spotlightSurfaceKey) {
+				return index;
+			}
+
+			++index;
+		}
+	}
+
+	return -1;
+}
+
+void VideoGrid::spotlightTileAtSlot(int slot, FocusTarget &target, std::uint64_t &key) const {
+	target = FocusTarget::None;
+	key    = 0;
+
+	if (slot < 0) {
+		return;
+	}
+
+	int index = 0;
+
+	if (!m_selfCameraFrame.isNull()) {
+		if (index == slot) {
+			target = FocusTarget::SelfCamera;
+			return;
+		}
+		++index;
+	}
+
+	if (!m_selfScreenFrame.isNull()) {
+		if (index == slot) {
+			target = FocusTarget::SelfScreen;
+			return;
+		}
+		++index;
+	}
+
+	for (auto it = m_surfaces.cbegin(); it != m_surfaces.cend(); ++it) {
+		if (!occupiesCell(it->second)) {
+			continue;
+		}
+
+		if (index == slot) {
+			target = FocusTarget::Surface;
+			key    = it->first;
+			return;
+		}
+
+		++index;
+	}
+}
+
+void VideoGrid::applyPendingSpotlight() {
+	const FocusTarget target = m_pendingSpotlight;
+	const std::uint64_t key  = m_pendingSpotlightKey;
+	m_pendingSpotlight       = FocusTarget::None;
+
+	if (target == FocusTarget::None) {
+		return;
+	}
+
+	// Clicking the tile that is already spotlighted drops back to the equal grid; any other tile becomes the
+	// new spotlight.
+	const bool already =
+		m_spotlight == target && (target != FocusTarget::Surface || m_spotlightSurfaceKey == key);
+
+	if (already) {
+		m_spotlight = FocusTarget::None;
+	} else {
+		m_spotlight           = target;
+		m_spotlightSurfaceKey = key;
+	}
+
+	relayout();
 }
 
 /// The translucent strip along the bottom of a tile that holds its buttons and volume slider.
@@ -3354,7 +4001,9 @@ void VideoGrid::setOwnViewers(bool screen, const std::vector< Viewer > &viewers)
 	}
 
 	if (m_fullscreenWindow && m_focus == (screen ? FocusTarget::SelfScreen : FocusTarget::SelfCamera)) {
-		static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentReplaced();
+		// Only the watcher list changed, not the picture, so the label is refreshed without resetting the
+		// zoom - a viewer joining or leaving must not snap someone out of a share they are reading zoomed in.
+		static_cast< FullscreenVideoWindow * >(m_fullscreenWindow)->contentRefreshed();
 	}
 
 	update();
@@ -3518,6 +4167,13 @@ void VideoGrid::relayout() {
 	m_relayoutInProgress = true;
 
 	validateFocus();
+
+	// Drop a spotlight whose tile has gone, so the equal grid returns rather than the spotlight silently
+	// re-forming if that tile ever comes back.
+	if (m_spotlight != FocusTarget::None && spotlightSlotIndex() < 0) {
+		m_spotlight = FocusTarget::None;
+	}
+
 	relayoutControls(currentLayout());
 	updateHoveredBar();
 	updateFullscreenWindow();
@@ -3611,7 +4267,13 @@ void VideoGrid::paintEvent(QPaintEvent *) {
 	// a count of zero, and divide by it.
 	const Layout layout = currentLayout();
 
-	if (layout.count == 0 || layout.cellWidth <= 0 || layout.cellHeight <= 0) {
+	// In the spotlight layout cellWidth/cellHeight are unused (and left 0), so the big-tile and strip
+	// dimensions are what say whether there is anything drawable - without this the spotlight drew nothing
+	// but the black fill above.
+	const bool degenerate = layout.spotlightSlot >= 0 ? (layout.areaWidth <= 0 || layout.bigHeight <= 0)
+													  : (layout.cellWidth <= 0 || layout.cellHeight <= 0);
+
+	if (layout.count == 0 || degenerate) {
 		return;
 	}
 
@@ -3714,25 +4376,39 @@ void VideoGrid::mouseReleaseEvent(QMouseEvent *event) {
 
 	const Surface *surface = surfaceAtSlot(pressedSlot);
 
-	if (!surface || surface->watching) {
-		// Watched tiles, and your own, act on double-click (fullscreen) and on their control bar, not on
-		// a plain click - a single click on a live picture doing something would make it far too easy to
-		// fullscreen a tile by accident while reaching for its volume slider.
-		QWidget::mouseReleaseEvent(event);
+	if (surface && !surface->watching) {
+		// The placeholder is the button: "click to watch" means exactly that, not "find the small eyeball
+		// in the hover bar at the bottom right of this tile and click that". The bar's eyeball still works
+		// too, and is what stops watching again.
+		m_lastClickWatchMsec = QDateTime::currentMSecsSinceEpoch();
+		setWatching(surface->senderSession, surface->streamID, true);
+
+		event->accept();
 
 		return;
 	}
 
-	// The placeholder is the button: "click to watch" means exactly that, not "find the small eyeball
-	// in the hover bar at the bottom right of this tile and click that". The bar's eyeball still works
-	// too, and is what stops watching again.
-	m_lastClickWatchMsec = QDateTime::currentMSecsSinceEpoch();
-	setWatching(surface->senderSession, surface->streamID, true);
+	// A live tile - a watched share or camera, or your own - is enlarged in place by a single click: it fills
+	// the top of the grid while the rest become a thumbnail strip, and clicking it again returns to the equal
+	// grid. Deferred by the double-click interval and dropped if a double click follows, so the same click that
+	// fullscreens a tile does not also spotlight it (see mouseDoubleClickEvent()/applyPendingSpotlight()).
+	spotlightTileAtSlot(pressedSlot, m_pendingSpotlight, m_pendingSpotlightKey);
+
+	if (m_pendingSpotlight != FocusTarget::None && m_spotlightClickTimer) {
+		m_spotlightClickTimer->start(QApplication::doubleClickInterval());
+	}
 
 	event->accept();
 }
 
 void VideoGrid::mouseDoubleClickEvent(QMouseEvent *event) {
+	// The single click that began this double click armed a deferred spotlight; cancel it, so a double click
+	// fullscreens without also enlarging the tile in the grid underneath.
+	if (m_spotlightClickTimer) {
+		m_spotlightClickTimer->stop();
+	}
+	m_pendingSpotlight = FocusTarget::None;
+
 	// A double-click is delivered as press, release, double-click, release - so by the time it arrives,
 	// the release before it has already started watching the placeholder that was clicked, and that
 	// placeholder has already left the layout (a watched-but-blank stream holds no cell until its first
