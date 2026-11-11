@@ -296,8 +296,12 @@ void ServerHandler::udpReady() {
 
 		std::span< Mumble::Protocol::byte > buffer = m_udpDecoder.getBuffer();
 
-		// 4 bytes is the overhead of the encryption
-		assert(buffer.size() >= buflen - 4);
+		// The datagram was read into a buffer sized for video, which is larger than the decoder's. Decrypting
+		// writes the whole plaintext before the tag is checked, so this has to hold before decrypt() is
+		// called and has to hold in a release build, which an assert does not.
+		if (!Mumble::Protocol::audioPayloadFits(buflen, buffer.size())) {
+			continue;
+		}
 
 		if (!connection->csCrypt->decrypt(audio, buffer.data(), buflen)) {
 			if (connection->csCrypt->tLastGood.elapsed() > std::chrono::seconds(5)) {
@@ -667,12 +671,32 @@ void ServerHandler::handleVideoDatagram(std::span< const Mumble::Protocol::byte 
 	}
 
 	for (const Mumble::Protocol::VideoUnit &unit : events.units) {
+		const qint64 size = static_cast< qint64 >(unit.payload.size());
+
+		if (m_queuedVideoBytes->load() + size > MAX_QUEUED_VIDEO_BYTES) {
+			// The GUI thread is not keeping up. To the viewer this unit was lost, and is recovered the
+			// way a lost one is.
+			continue;
+		}
+		m_queuedVideoBytes->fetch_add(size);
+
 		emit videoUnitReceived(
 			unit.header.senderSession, unit.header.streamID, unit.header.frameNumber, unit.header.isKeyframe,
 			unit.header.x, unit.header.y,
 			QByteArray(reinterpret_cast< const char * >(unit.payload.data()), static_cast< int >(unit.payload.size())),
 			unit.header.captureTimestampUsec);
+
+		// Posted to the same thread after the unit, and events to one thread are delivered in order, so
+		// this runs once the unit has been handed over.
+		QMetaObject::invokeMethod(
+			QCoreApplication::instance(), [queued = m_queuedVideoBytes, size]() { queued->fetch_sub(size); },
+			Qt::QueuedConnection);
 	}
+}
+
+void ServerHandler::removeVideoSender(unsigned int senderSession) {
+	QMetaObject::invokeMethod(
+		this, [this, senderSession]() { m_videoReceiver.removeSender(senderSession); }, Qt::QueuedConnection);
 }
 
 void ServerHandler::sendProtoMessage(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType type) {

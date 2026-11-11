@@ -1954,6 +1954,10 @@ void MainWindow::pruneDepartedVideoSenders() {
 			m_videoStreamDispatcher->removeSender(senderSession);
 		}
 
+		if (Global::get().sh) {
+			Global::get().sh->removeVideoSender(senderSession);
+		}
+
 		removeScreenShareAudioBuffersForSender(senderSession);
 	}
 

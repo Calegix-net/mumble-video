@@ -592,12 +592,21 @@ std::vector< EncodedVideoUnit > VpxEncoder::encode(const QImage &frame, std::uin
 }
 
 VpxDecoder::VpxDecoder(VpxCodec codec) : m_codec(codec) {
+	open();
+}
+
+VpxDecoder::~VpxDecoder() {
+	close();
+	releaseConverter();
+}
+
+void VpxDecoder::open() {
 	auto *context = new vpx_codec_ctx_t();
 
 	vpx_codec_dec_cfg_t cfg = {};
 	cfg.threads             = codecThreads();
 
-	if (vpx_codec_dec_init(context, decoderInterface(codec), &cfg, 0) != VPX_CODEC_OK) {
+	if (vpx_codec_dec_init(context, decoderInterface(m_codec), &cfg, 0) != VPX_CODEC_OK) {
 		delete context;
 
 		return;
@@ -606,13 +615,12 @@ VpxDecoder::VpxDecoder(VpxCodec codec) : m_codec(codec) {
 	m_context = context;
 }
 
-VpxDecoder::~VpxDecoder() {
+void VpxDecoder::close() {
 	if (m_context) {
 		vpx_codec_destroy(m_context);
 		delete m_context;
+		m_context = nullptr;
 	}
-
-	releaseConverter();
 }
 
 QImage VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload) {
@@ -622,6 +630,20 @@ QImage VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload) 
 
 bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QImage *image) {
 	if (!m_context || payload.empty()) {
+		return false;
+	}
+
+	// The size a frame declares is network input, and libvpx allocates its frame buffers for it while
+	// decoding - so the check on the decoded image below comes after the memory has been taken. Where
+	// the header says what the size is, it is read first and an oversized frame is never decoded.
+	// That is every frame that can set a size in VP8, and the key and intra-only frames of VP9; for
+	// the rest the peek reports no size and the check below is what is left.
+	vpx_codec_stream_info_t info = {};
+
+	if (vpx_codec_peek_stream_info(decoderInterface(m_codec), payload.data(),
+								   static_cast< unsigned int >(payload.size()), &info)
+			== VPX_CODEC_OK
+		&& info.w != 0 && info.h != 0 && (info.w > MAX_DECODED_FRAME_WIDTH || info.h > MAX_DECODED_FRAME_HEIGHT)) {
 		return false;
 	}
 
@@ -641,6 +663,15 @@ bool VpxDecoder::decode(const std::vector< Mumble::Protocol::byte > &payload, QI
 	// before the colour conversion, which is what would do the allocating.
 	if (img->d_w == 0 || img->d_h == 0 || img->d_w > MAX_DECODED_FRAME_WIDTH
 		|| img->d_h > MAX_DECODED_FRAME_HEIGHT) {
+		// A VP9 inter-frame can change the size without the peek above seeing it. By now libvpx holds
+		// frame buffers of that size and would keep them for as long as the stream lasts, so the
+		// context goes with the frame. What follows fails to decode until a keyframe, which is what a
+		// run of failures asks for.
+		if (img->d_w > MAX_DECODED_FRAME_WIDTH || img->d_h > MAX_DECODED_FRAME_HEIGHT) {
+			close();
+			open();
+		}
+
 		return false;
 	}
 

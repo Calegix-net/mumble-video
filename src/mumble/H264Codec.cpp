@@ -607,6 +607,13 @@ H264Decoder::H264Decoder() {
 	m_context->thread_type  = FF_THREAD_SLICE;
 	m_context->thread_count = 0;
 
+	// The picture size comes from the bitstream, and the check in decode() is on a frame libavcodec has
+	// already allocated. This makes it refuse the size itself, when the parameter set arrives. In coded
+	// samples, which are whole macroblocks: 2160 lines are coded as 2176.
+	const std::int64_t codedWidth  = (static_cast< std::int64_t >(MAX_DECODED_FRAME_WIDTH) + 15) / 16 * 16;
+	const std::int64_t codedHeight = (static_cast< std::int64_t >(MAX_DECODED_FRAME_HEIGHT) + 15) / 16 * 16;
+	m_context->max_pixels          = codedWidth * codedHeight;
+
 	if (avcodec_open2(m_context, codec, nullptr) < 0) {
 		avcodec_free_context(&m_context);
 		return;

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <limits>
 #include <tuple>
 
@@ -242,16 +243,45 @@ namespace Protocol {
 						   m_streamLoss.upper_bound({ senderSession, std::numeric_limits< std::uint32_t >::max() }));
 	}
 
+	VideoReassembler::StreamLoss &VideoReassembler::lossFor(const UnitKey &key) {
+		const std::pair< std::uint32_t, std::uint32_t > stream{ key.senderSession, key.streamID };
+
+		const auto known = m_streamLoss.find(stream);
+		if (known != m_streamLoss.end()) {
+			return known->second;
+		}
+
+		// A stream not seen before. Room is made among the same sender's streams first, so that a sender
+		// running through stream IDs loses its own counters and nobody else's.
+		const auto first = m_streamLoss.lower_bound({ key.senderSession, 0 });
+		const auto last  = m_streamLoss.upper_bound({ key.senderSession, std::numeric_limits< std::uint32_t >::max() });
+
+		if (static_cast< std::size_t >(std::distance(first, last)) >= MAX_TRACKED_LOSS_STREAMS_PER_SENDER) {
+			m_streamLoss.erase(first);
+		}
+
+		if (m_streamLoss.size() >= MAX_TRACKED_LOSS_STREAMS_TOTAL) {
+			m_streamLoss.erase(m_streamLoss.begin());
+		}
+
+		return m_streamLoss[stream];
+	}
+
 	void VideoReassembler::noteCompleted(const UnitKey &key) {
 		std::lock_guard< std::mutex > lossLock(m_lossMutex);
-		StreamLoss &loss = m_streamLoss[{ key.senderSession, key.streamID }];
+		StreamLoss &loss = lossFor(key);
 		++loss.completed;
 		loss.maxCompleteFrame = std::max(loss.maxCompleteFrame, key.frameNumber);
 	}
 
 	void VideoReassembler::noteExpired(const UnitKey &key) {
 		std::lock_guard< std::mutex > lossLock(m_lossMutex);
-		++m_streamLoss[{ key.senderSession, key.streamID }].expired;
+		++lossFor(key).expired;
+	}
+
+	std::size_t VideoReassembler::trackedLossStreams() const {
+		std::lock_guard< std::mutex > lossLock(m_lossMutex);
+		return m_streamLoss.size();
 	}
 
 	void VideoReassembler::streamLoss(std::uint32_t senderSession, std::uint32_t streamID, StreamLoss &out) const {

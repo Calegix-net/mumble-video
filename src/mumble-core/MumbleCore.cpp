@@ -282,7 +282,7 @@ void MediaSession::receiveDatagram(ByteView datagram, std::uint64_t nowUsec, Med
 	CryptStateOCB2 &audio           = d.crypto.audio();
 	const std::span< byte > buffer  = d.udpDecoder.getBuffer();
 	const std::size_t encryptedSize = media.payload.size();
-	if (encryptedSize < 4 || buffer.size() < encryptedSize - 4) {
+	if (!Mumble::Protocol::audioPayloadFits(encryptedSize, buffer.size())) {
 		return;
 	}
 

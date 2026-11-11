@@ -21,6 +21,10 @@ namespace Protocol {
 		}
 
 		if (m_framing == Framing::Plain) {
+			if (datagram.size() > MAX_AUDIO_PAYLOAD_SIZE) {
+				return result;
+			}
+
 			result.channel = MediaChannel::Audio;
 			result.payload = datagram;
 
@@ -29,6 +33,11 @@ namespace Protocol {
 
 		switch (datagram[0]) {
 			case MEDIA_CHANNEL_AUDIO:
+				// Longer than any audio plaintext the decoder's buffer can take. See MAX_AUDIO_PAYLOAD_SIZE.
+				if (datagram.size() - 1 > MAX_AUDIO_PAYLOAD_SIZE) {
+					break;
+				}
+
 				result.channel = MediaChannel::Audio;
 				result.payload = datagram.subspan(1);
 				break;

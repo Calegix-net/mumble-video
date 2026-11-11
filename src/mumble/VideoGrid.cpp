@@ -11,6 +11,7 @@
 #include "VideoFrameDump.h"
 
 #include <QtConcurrent/QtConcurrentRun>
+#include <QtCore/QBuffer>
 #include <QtCore/QDateTime>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QFutureWatcher>
@@ -21,6 +22,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QEnterEvent>
 #include <QtGui/QIcon>
+#include <QtGui/QImageReader>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPaintEvent>
@@ -1502,11 +1504,24 @@ bool VideoGrid::growToFit(QImage &canvas, int x, int y, int width, int height) {
 }
 
 QImage VideoGrid::decodeJpegTile(const QByteArray &payload) {
-	QImage tile;
-
 	// Explicitly JPEG rather than letting Qt sniff the format. Sniffing would let a sender pick the
 	// decoder by crafting a header, which turns every image format Qt supports into attack surface.
-	if (!tile.loadFromData(payload, "JPEG")) {
+	QBuffer buffer;
+	buffer.setData(payload);
+	buffer.open(QIODevice::ReadOnly);
+
+	QImageReader reader(&buffer, "jpeg");
+
+	// The size is read from the header first. A tile larger than a surface can ever be is refused by
+	// growToFit() anyway, but only once it has been decoded, and a few hundred bytes of JPEG can declare
+	// a picture of hundreds of megabytes.
+	const QSize size = reader.size();
+	if (!size.isValid() || size.width() > MAX_SURFACE_WIDTH || size.height() > MAX_SURFACE_HEIGHT) {
+		return QImage();
+	}
+
+	QImage tile;
+	if (!reader.read(&tile)) {
 		return QImage();
 	}
 
@@ -2171,6 +2186,12 @@ void VideoGrid::onVideoUnitReceived(unsigned int senderSession, unsigned int str
 		// VP8 below stays fully synchronous: its decoder carries reference-frame state that must only
 		// ever be touched from one thread, in strict frame order, which a background task queue cannot
 		// promise the way a stateless JPEG tile can.
+		// A position no surface reaches. growToFit() refuses the tile once it is decoded; this is the
+		// part of that check that needs nothing decoded.
+		if (x >= static_cast< unsigned int >(MAX_SURFACE_WIDTH) || y >= static_cast< unsigned int >(MAX_SURFACE_HEIGHT)) {
+			return;
+		}
+
 		if (m_pendingTileDecodes >= MAX_PENDING_TILE_DECODES
 			|| surface.pendingTiles.size() >= MAX_PENDING_TILE_DECODES) {
 			// Behind. Dropping is how this catches up; the refresh that repaints what was dropped is asked
@@ -2400,6 +2421,19 @@ bool VideoGrid::decodeVp8Unit(std::uint64_t key, Surface &surface, quint64 frame
 		// onFrameDecoded()), as they would have done here.
 		if (!prepareDecoder(surface)) {
 			noteDecodeFailure(surface);
+			return false;
+		}
+
+		if (surface.decodesInFlight->load() >= MAX_DECODES_IN_FLIGHT) {
+			// The decode thread is this far behind, and every frame waiting for it is held in memory,
+			// so the queue stops here. A frame cannot simply be left out - the ones after it are
+			// predicted from it - so the stream freezes until a keyframe, like a frame lost for good.
+			surface.awaitingKeyframe   = true;
+			surface.unitsWhileAwaiting = 0;
+
+			++surface.stats.keyframeRequestsOverload;
+			emit keyframeNeeded(surface.senderSession, surface.streamID);
+
 			return false;
 		}
 

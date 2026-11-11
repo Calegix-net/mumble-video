@@ -130,6 +130,7 @@ private slots:
 	void anAnnouncedButBlankStreamPaintsWithoutCrashing();
 	void aNewStreamStartsAsAnUnwatchedPreview();
 	void nonJpegDataIsRefused();
+	void aTileLargerThanAnySurfaceIsNotDecoded();
 	void itPaintsWithoutCrashing();
 	void rapidWatchToggleWhileFramesArriveDoesNotCrash();
 	void firstFrameShowingTheDockDoesNotReenterUnsafely();
@@ -168,6 +169,8 @@ private slots:
 namespace {
 class ControlledDecodeGrid : public VideoGrid {
 public:
+	using VideoGrid::decodeJpegTile;
+
 	std::shared_ptr< PendingTile > queueTile(const QColor &color) {
 		auto tile   = std::make_shared< PendingTile >();
 		tile->image = QImage(32, 32, QImage::Format_RGB32);
@@ -1035,6 +1038,28 @@ void TestVideoGrid::tilesOutsideTheSurfaceBoundAreRefused() {
 							 encoded);
 	waitForAsyncDecode();
 	QCOMPARE(grid.senderCount(), 0);
+}
+
+// The size a JPEG declares is read from its header, and a tile no surface could hold is refused there.
+// It used to be decoded first and refused afterwards, by growToFit(), with the pixels already allocated.
+void TestVideoGrid::aTileLargerThanAnySurfaceIsNotDecoded() {
+	const auto jpeg = [](int width, int height) {
+		QImage image(width, height, QImage::Format_RGB32);
+		image.fill(Qt::red);
+
+		QByteArray encoded;
+		QBuffer buffer(&encoded);
+		buffer.open(QIODevice::WriteOnly);
+		image.save(&buffer, "JPEG", 50);
+
+		return encoded;
+	};
+
+	const QImage widest = ControlledDecodeGrid::decodeJpegTile(jpeg(VideoGrid::MAX_SURFACE_WIDTH, 16));
+	QCOMPARE(widest.size(), QSize(VideoGrid::MAX_SURFACE_WIDTH, 16));
+
+	QVERIFY(ControlledDecodeGrid::decodeJpegTile(jpeg(VideoGrid::MAX_SURFACE_WIDTH + 8, 16)).isNull());
+	QVERIFY(ControlledDecodeGrid::decodeJpegTile(jpeg(16, VideoGrid::MAX_SURFACE_HEIGHT + 8)).isNull());
 }
 
 void TestVideoGrid::nonJpegDataIsRefused() {
