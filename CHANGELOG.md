@@ -10,7 +10,23 @@ Versions follow [semantic versioning](https://semver.org/) loosely: the patch nu
 the minor number for features, and the fork keeps its own numbering rather than tracking upstream
 Mumble's. "Upstream" below always means the Mumble project this is forked from.
 
-## Unreleased
+## 1.10.1 (2026-11-11)
+
+### Security
+
+- **A server, or anyone able to forge its packets, could crash the desktop client or corrupt its
+  memory.** An audio packet larger than 1024 bytes was decrypted into a 1024-byte buffer before
+  anything checked its size or that it was genuine, so doing it needed no key. Every release from
+  1.7.0 to 1.10.0 is affected; the mobile clients were not. Oversized audio packets are now dropped
+  before they are decrypted. See
+  [GHSA-57w8-4vhq-v3ff](https://github.com/Calegix-net/mumble-video/security/advisories/GHSA-57w8-4vhq-v3ff),
+  reported by Acbn-Nick.
+- **Someone sending video can no longer make a viewer hold unbounded memory.** Decoders refuse a
+  picture larger than a 4K surface before allocating for it, JPEG tiles are measured from their header
+  before they are decoded, the frames waiting for the decode thread and the units waiting for the
+  window are both capped, and the per-stream loss counters are capped and cleared when a user leaves.
+- **Re-synchronising a video stream no longer forgets which packets it has already seen.** The replay
+  window was emptied on every resync, which let an old packet through once afterwards.
 
 ### Screen sharing
 
