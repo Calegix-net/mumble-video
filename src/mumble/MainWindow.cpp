@@ -2251,6 +2251,12 @@ void MainWindow::updateWindowTitle() {
 		title = tr("Mumble");
 	}
 
+	// Show the server this client is connected to, e.g. "Mumble - My Server". m_connectedServerName is empty
+	// while disconnected, which leaves the title as plain "Mumble".
+	if (!m_connectedServerName.isEmpty()) {
+		title = tr("%1 - %2").arg(title, m_connectedServerName);
+	}
+
 	if (!Global::get().windowTitlePostfix.isEmpty()) {
 		title += QString::fromLatin1(" | %1").arg(Global::get().windowTitlePostfix);
 	}
@@ -5363,6 +5369,11 @@ void MainWindow::serverConnected() {
 	TaskList::addToRecentList(Global::get().s.qsLastServer, uname, host, port);
 #endif
 
+	// Put the connected server's name in the window title ("Mumble - <name>"). Captured now so it stays
+	// correct even if the "last server" setting changes later, and is cleared again on disconnect.
+	m_connectedServerName = Global::get().s.qsLastServer;
+	updateWindowTitle();
+
 	qdwMinimalViewNote->hide();
 }
 
@@ -5426,6 +5437,10 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	qaServerBanList->setEnabled(false);
 	qtvUsers->setCurrentIndex(QModelIndex());
 	qteChat->setEnabled(false);
+
+	// No server in the window title once disconnected; back to plain "Mumble".
+	m_connectedServerName.clear();
+	updateWindowTitle();
 
 #ifdef Q_OS_MAC
 	// Remove App Nap suppression now that we're disconnected.

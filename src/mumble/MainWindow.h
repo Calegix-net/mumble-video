@@ -339,6 +339,10 @@ protected:
 	bool m_serverConfigSeen = false;
 	/// ServerConfig.max_video_bandwidth in bits per second, 0 while the server has set no limit.
 	unsigned int m_serverMaxVideoBandwidth = 0;
+	/// The connected server's display name (Settings::qsLastServer, captured at connect), shown in the window
+	/// title as "Mumble - <name>". Empty while disconnected. Set in serverConnected(), cleared in
+	/// serverDisconnected().
+	QString m_connectedServerName;
 	/// Settles, once the server has said, whether this connection has video and how its UDP is framed.
 	void setServerSpeaksVideo(bool speaks);
 	/// Share actions are enabled only where they can do something: to start one, on a server that speaks
