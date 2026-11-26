@@ -1007,8 +1007,15 @@ void MainWindow::setupScreenShare() {
 	m_screenVideoBroadcaster->setStreamIDAllocator([this]() { return allocateStreamID(); });
 	connect(m_screenVideoBroadcaster, &VideoBroadcaster::streamResized, this,
 			[this](unsigned int previousID, unsigned int streamID, QSize size) {
+				// Every viewer is about to move from the old id to the new one; see
+				// updateScreenShareViewerSounds() for why that must not sound like them leaving and rejoining.
+				m_screenShareStreamChangedMsec = QDateTime::currentMSecsSinceEpoch();
 				announceVideoResize(m_screenVideoBroadcaster, m_screenSourceKind, previousID, streamID, size);
 			});
+
+	m_screenShareViewerSoundTimer = new QTimer(this);
+	m_screenShareViewerSoundTimer->setSingleShot(true);
+	connect(m_screenShareViewerSoundTimer, &QTimer::timeout, this, &MainWindow::updateScreenShareViewerSounds);
 
 	m_screenAudioBroadcaster = new ScreenAudioBroadcaster(this);
 
@@ -2008,6 +2015,12 @@ void MainWindow::sendWatchReport(unsigned int senderSession, unsigned int stream
 	Global::get().sh->sendMessage(mpdt);
 }
 
+void MainWindow::stopReportingWatching(unsigned int senderSession, unsigned int streamID) {
+	if (m_reportedWatching.count(screenShareAudioKey(senderSession, streamID)) > 0) {
+		sendWatchReport(senderSession, streamID, false);
+	}
+}
+
 bool MainWindow::handleWatchReport(unsigned int viewerSession, const std::string &dataID, const std::string &data) {
 	if (dataID != WATCH_REPORT_DATA_ID) {
 		return false;
@@ -2046,6 +2059,109 @@ bool MainWindow::handleWatchReport(unsigned int viewerSession, const std::string
 	refreshOwnViewers();
 
 	return true;
+}
+
+void MainWindow::resetScreenShareViewerSounds() {
+	m_screenShareSoundViewers.clear();
+	m_screenShareLeavingViewers.clear();
+
+	if (m_screenShareViewerSoundTimer) {
+		m_screenShareViewerSoundTimer->stop();
+	}
+}
+
+void MainWindow::updateScreenShareViewerSounds() {
+	if (!m_screenVideoBroadcaster || !m_screenVideoBroadcaster->isActive()) {
+		// The share itself ended: its viewers did not leave it, so no sound - and the next share starts with
+		// nobody watching.
+		resetScreenShareViewerSounds();
+
+		return;
+	}
+
+	std::set< unsigned int > watchingNow;
+	const auto stream = m_ownStreamViewers.find(m_screenVideoBroadcaster->streamID());
+	if (stream != m_ownStreamViewers.end()) {
+		for (const auto &viewer : stream->second) {
+			watchingNow.insert(viewer.first);
+		}
+	}
+
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	bool joined      = false;
+	bool left        = false;
+
+	for (const unsigned int viewer : watchingNow) {
+		if (m_screenShareSoundViewers.insert(viewer).second) {
+			joined = true;
+			qInfo("Video: session %u started watching the screen share", viewer);
+		} else {
+			// Back within the grace period (or never really gone): no sound either way.
+			m_screenShareLeavingViewers.erase(viewer);
+		}
+	}
+
+	// A resize gives the share a new stream id, and every viewer's client then unsubscribes from the old one
+	// and subscribes to the new one. For the moment in between they are not watching the current id. That
+	// is not anyone leaving, so for a short while after the id changes a viewer who vanishes is only
+	// marked, and announced as gone if they have not come back by then. Outside that window a viewer who
+	// stops watching is announced at once.
+	const qint64 graceEnds = m_screenShareStreamChangedMsec + SCREEN_SHARE_RESUBSCRIBE_GRACE_MSEC;
+
+	for (auto it = m_screenShareSoundViewers.begin(); it != m_screenShareSoundViewers.end();) {
+		const unsigned int viewer = *it;
+
+		if (watchingNow.count(viewer) > 0) {
+			++it;
+			continue;
+		}
+
+		const auto leaving = m_screenShareLeavingViewers.find(viewer);
+		const qint64 due   = leaving != m_screenShareLeavingViewers.end() ? leaving->second : graceEnds;
+
+		if (now < due) {
+			m_screenShareLeavingViewers[viewer] = due;
+			++it;
+			continue;
+		}
+
+		m_screenShareLeavingViewers.erase(viewer);
+		it   = m_screenShareSoundViewers.erase(it);
+		left = true;
+		qInfo("Video: session %u stopped watching the screen share", viewer);
+	}
+
+	if (!m_screenShareLeavingViewers.empty() && m_screenShareViewerSoundTimer) {
+		qint64 next = m_screenShareLeavingViewers.begin()->second;
+		for (const auto &leaving : m_screenShareLeavingViewers) {
+			next = std::min(next, leaving.second);
+		}
+		m_screenShareViewerSoundTimer->start(static_cast< int >(std::max< qint64 >(0, next - now) + 1));
+	}
+
+	// One sound for whatever happened in this pass, even if several people arrived together - a pile of
+	// identical chimes on top of each other says nothing more than one does. Silent while deafened, like
+	// every other notification sound, and played at the notification volume set under Messages.
+	const Settings &s = Global::get().s;
+
+	const auto play = [&s](bool enabled, const char *sample) {
+		AudioOutputPtr ao   = Global::get().ao;
+		const char *outcome = !enabled ? "off in settings" : s.bDeaf ? "deafened" : !ao ? "no audio output" : nullptr;
+
+		if (!outcome) {
+			outcome = ao->playSample(QLatin1String(sample), s.notificationVolume) ? "played" : "failed to play";
+		}
+
+		qInfo("Video: screen-share viewer sound %s: %s", sample, outcome);
+	};
+
+	if (joined) {
+		play(s.bScreenShareViewerJoinSound, ":/ScreenShareViewerJoined.ogg");
+	}
+
+	if (left) {
+		play(s.bScreenShareViewerLeaveSound, ":/ScreenShareViewerLeft.ogg");
+	}
 }
 
 void MainWindow::refreshOwnViewers() {
@@ -2094,6 +2210,8 @@ void MainWindow::refreshOwnViewers() {
 
 	m_videoGrid->setOwnViewers(false, viewersOf(m_videoBroadcaster));
 	m_videoGrid->setOwnViewers(true, viewersOf(m_screenVideoBroadcaster));
+
+	updateScreenShareViewerSounds();
 }
 
 void MainWindow::setupGui() {
@@ -5400,9 +5518,11 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	m_subscribedScreenAudio.clear();
 	m_pendingScreenAudioUnsubscribes.clear();
 
-	// Sessions are renumbered on reconnect; viewers report again when they resume watching.
+	// Sessions are renumbered on reconnect; viewers report again when they resume watching. Forgotten without
+	// a sound: losing the connection is not everyone walking out.
 	m_ownStreamViewers.clear();
 	m_reportedWatching.clear();
+	resetScreenShareViewerSounds();
 	refreshOwnViewers();
 
 	// Shares are not stopped here. If this drop is about to be retried (decided at the end of this

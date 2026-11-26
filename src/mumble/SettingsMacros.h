@@ -69,21 +69,23 @@
 	PROCESS(idle, UNDO_IDLE_ACTION_UPON_ACTIVITY, bUndoIdleActionUponActivity)
 
 
-#define VIDEO_SETTINGS                                                   \
-	PROCESS(video, VIDEO_DEVICE_KEY, qsVideoDevice)                      \
-	PROCESS(video, VIDEO_CODEC_KEY, videoCodec)                          \
-	PROCESS(video, VIDEO_WIDTH_KEY, iVideoWidth)                         \
-	PROCESS(video, VIDEO_HEIGHT_KEY, iVideoHeight)                       \
-	PROCESS(video, VIDEO_FRAMERATE_KEY, iVideoFramerate)                 \
-	PROCESS(video, VIDEO_BITRATE_KEY, iVideoBitrate)                     \
-	PROCESS(video, VIDEO_TILE_QUALITY_KEY, iVideoTileQuality)            \
-	PROCESS(video, VIDEO_TILE_SIZE_KEY, iVideoTileSize)                  \
-	PROCESS(video, SCREEN_SHARE_CODEC_KEY, screenShareCodec)             \
-	PROCESS(video, SCREEN_SHARE_BITRATE_KEY, iScreenShareBitrate)        \
-	PROCESS(video, SCREEN_SHARE_VP9_BITRATE_KEY, iScreenShareVp9Bitrate) \
-	PROCESS(video, SCREEN_SHARE_FRAMERATE_KEY, iScreenShareFramerate)    \
-	PROCESS(video, VIDEO_OVERLAY_KEY, bVideoOverlay)                     \
-	PROCESS(video, KEEP_SCREEN_AWAKE_KEY, iKeepScreenAwake)              \
+#define VIDEO_SETTINGS                                                                \
+	PROCESS(video, VIDEO_DEVICE_KEY, qsVideoDevice)                                   \
+	PROCESS(video, VIDEO_CODEC_KEY, videoCodec)                                       \
+	PROCESS(video, VIDEO_WIDTH_KEY, iVideoWidth)                                      \
+	PROCESS(video, VIDEO_HEIGHT_KEY, iVideoHeight)                                    \
+	PROCESS(video, VIDEO_FRAMERATE_KEY, iVideoFramerate)                              \
+	PROCESS(video, VIDEO_BITRATE_KEY, iVideoBitrate)                                  \
+	PROCESS(video, VIDEO_TILE_QUALITY_KEY, iVideoTileQuality)                         \
+	PROCESS(video, VIDEO_TILE_SIZE_KEY, iVideoTileSize)                               \
+	PROCESS(video, SCREEN_SHARE_CODEC_KEY, screenShareCodec)                          \
+	PROCESS(video, SCREEN_SHARE_BITRATE_KEY, iScreenShareBitrate)                     \
+	PROCESS(video, SCREEN_SHARE_VP9_BITRATE_KEY, iScreenShareVp9Bitrate)              \
+	PROCESS(video, SCREEN_SHARE_FRAMERATE_KEY, iScreenShareFramerate)                 \
+	PROCESS(video, SCREEN_SHARE_VIEWER_JOIN_SOUND_KEY, bScreenShareViewerJoinSound)   \
+	PROCESS(video, SCREEN_SHARE_VIEWER_LEAVE_SOUND_KEY, bScreenShareViewerLeaveSound) \
+	PROCESS(video, VIDEO_OVERLAY_KEY, bVideoOverlay)                                  \
+	PROCESS(video, KEEP_SCREEN_AWAKE_KEY, iKeepScreenAwake)                           \
 	PROCESS(video, VIDEO_WIZARD_SHOWN_KEY, videoWizardShown)
 
 #define POSITIONAL_AUDIO_SETTINGS                                                  \

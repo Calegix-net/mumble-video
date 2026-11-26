@@ -386,6 +386,9 @@ protected:
 	static constexpr const char *WATCH_REPORT_DATA_ID = "mumble-video/watch";
 	/// Viewer side: tells a sender whether this client is watching one of its streams, and how loud.
 	void sendWatchReport(unsigned int senderSession, unsigned int streamID, bool watching);
+	/// Viewer side: if this client reported watching the stream, reports that it stopped. For a stream taken
+	/// away rather than unwatched (it ended here, or the subscription was withdrawn).
+	void stopReportingWatching(unsigned int senderSession, unsigned int streamID);
 	/// Sender side: a report from a viewer. False if the data was not a watch report.
 	bool handleWatchReport(unsigned int viewerSession, const std::string &dataID, const std::string &data);
 	/// Sender side: shows the current viewers of this client's own streams on their tiles.
@@ -399,6 +402,26 @@ protected:
 	/// at every step - the server allows only a few plugin messages a second.
 	std::set< unsigned int > m_volumeReportPending;
 	QTimer *m_volumeReportTimer = nullptr;
+
+	/// Plays the "started watching" / "stopped watching" sounds for this client's screen share, by comparing
+	/// who watches it now (m_ownStreamViewers, from the viewers' watch reports) with who did. Called from
+	/// refreshOwnViewers(), which every change goes through - a report, a viewer leaving the server, the share
+	/// starting or stopping.
+	void updateScreenShareViewerSounds();
+	/// Forgets who was watching without making a sound: the share ended, or the connection dropped.
+	void resetScreenShareViewerSounds();
+	/// Viewers of the current screen share that a "started watching" sound has been played for and a
+	/// "stopped watching" one has not.
+	std::set< unsigned int > m_screenShareSoundViewers;
+	/// Viewers who disappeared just after the share's stream id changed (a resize re-subscribes everyone to a
+	/// new id), and the time their "stopped watching" sound is due unless they come back first.
+	std::map< unsigned int, qint64 > m_screenShareLeavingViewers;
+	/// When this client's screen-share stream id last changed - see m_screenShareLeavingViewers.
+	qint64 m_screenShareStreamChangedMsec = 0;
+	QTimer *m_screenShareViewerSoundTimer = nullptr;
+	/// How long after the stream id changes a viewer may vanish and come back without being announced as
+	/// leaving and joining again.
+	static constexpr qint64 SCREEN_SHARE_RESUBSCRIBE_GRACE_MSEC = 2500;
 
 	/// Video congestion control. One controller per active outgoing stream (camera, screen), keyed by
 	/// stream id, driven once a second by m_videoCongestionTimer: as a sender it folds the viewers' loss

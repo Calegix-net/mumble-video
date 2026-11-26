@@ -919,6 +919,10 @@ void MainWindow::msgUserRemove(const MumbleProto::UserRemove &msg) {
 		removeScreenShareAudioBuffersForSender(pDst->uiSession);
 
 		pmModel->removeUser(pDst);
+
+		// If they were watching this client's share, they no longer are: drop them from its viewer list now,
+		// which also plays the "stopped watching" sound, rather than when the departed-user poll next runs.
+		refreshOwnViewers();
 	}
 }
 
@@ -1391,6 +1395,11 @@ void MainWindow::msgVideoState(const MumbleProto::VideoState &msg) {
 		// If that was the screen being watched, its audio is no longer wanted either.
 		syncScreenShareAudioSubscription(msg.session());
 
+		// Watching it, and now it is gone from here - most often because this client changed channel. Tell
+		// its sender this client stopped watching, which nothing else would: they would otherwise keep listing
+		// this client as a viewer (and play no "stopped watching" sound) until it left the server.
+		stopReportingWatching(msg.session(), msg.stream_id());
+
 		return;
 	}
 
@@ -1529,6 +1538,9 @@ void MainWindow::msgVideoSubscribe(const MumbleProto::VideoSubscribe &msg) {
 	}
 
 	removeScreenShareAudioBuffer(msg.session(), msg.stream_id());
+
+	// No longer watching it, though not by choice - tell its sender, as msgVideoState does.
+	stopReportingWatching(msg.session(), msg.stream_id());
 }
 
 /// A step of the server-mediated file transfer state machine. Not implemented yet - only the wire format

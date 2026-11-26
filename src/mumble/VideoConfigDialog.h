@@ -70,6 +70,9 @@ protected:
 
 	QComboBox *m_keepAwake = nullptr;
 
+	QCheckBox *m_viewerJoinSound  = nullptr;
+	QCheckBox *m_viewerLeaveSound = nullptr;
+
 	QPushButton *m_previewButton = nullptr;
 	VideoPreview *m_preview      = nullptr;
 	QLabel *m_stats              = nullptr;

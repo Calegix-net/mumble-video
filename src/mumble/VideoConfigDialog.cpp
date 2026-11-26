@@ -192,6 +192,21 @@ void VideoConfigDialog::buildUi() {
 	previewLayout->addWidget(m_previewButton);
 
 	outer->addWidget(previewBox);
+
+	auto *soundsBox    = new QGroupBox(tr("Sounds"), this);
+	auto *soundsLayout = new QVBoxLayout(soundsBox);
+
+	m_viewerJoinSound = new QCheckBox(tr("Play a sound when someone starts &watching my screen share"), soundsBox);
+	m_viewerJoinSound->setToolTip(tr("Only you hear it. It plays at the notification volume set under Messages, "
+									 "and not while you are deafened."));
+	soundsLayout->addWidget(m_viewerJoinSound);
+
+	m_viewerLeaveSound = new QCheckBox(tr("Play a sound when someone &stops watching my screen share"), soundsBox);
+	m_viewerLeaveSound->setToolTip(tr("Also plays when a viewer leaves the channel or disconnects. Only you hear "
+									  "it."));
+	soundsLayout->addWidget(m_viewerLeaveSound);
+
+	outer->addWidget(soundsBox);
 	outer->addStretch(1);
 
 	connect(m_previewButton, &QPushButton::clicked, this, &VideoConfigDialog::onPreviewToggled);
@@ -350,6 +365,9 @@ void VideoConfigDialog::load(const Settings &r) {
 	m_screenVp9Bitrate->setValue(r.iScreenShareVp9Bitrate);
 	m_screenFramerate->setValue(r.iScreenShareFramerate);
 
+	m_viewerJoinSound->setChecked(r.bScreenShareViewerJoinSound);
+	m_viewerLeaveSound->setChecked(r.bScreenShareViewerLeaveSound);
+
 	const int keepAwakeIndex = m_keepAwake->findData(r.iKeepScreenAwake);
 	m_keepAwake->setCurrentIndex(keepAwakeIndex >= 0 ? keepAwakeIndex : 1);
 }
@@ -372,4 +390,7 @@ void VideoConfigDialog::save() const {
 	s.iScreenShareVp9Bitrate = m_screenVp9Bitrate->value();
 	s.iScreenShareFramerate  = m_screenFramerate->value();
 	s.iKeepScreenAwake       = m_keepAwake->currentData().toInt();
+
+	s.bScreenShareViewerJoinSound  = m_viewerJoinSound->isChecked();
+	s.bScreenShareViewerLeaveSound = m_viewerLeaveSound->isChecked();
 }

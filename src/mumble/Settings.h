@@ -313,6 +313,10 @@ struct Settings {
 	/// since viewers repaint at most 60 times a second - so scrolling and motion are smooth out of the box.
 	/// It is only a ceiling: a frame is sent when the screen changes, so a still screen spends almost nothing.
 	int iScreenShareFramerate = 60;
+	/// Whether a sound plays when someone starts watching this client's screen share.
+	bool bScreenShareViewerJoinSound = true;
+	/// Whether a sound plays when someone stops watching this client's screen share.
+	bool bScreenShareViewerLeaveSound = true;
 
 	/// Whether the Mumble overlay - the same talking-user list it draws over a fullscreen game - is drawn
 	/// over video being watched fullscreen or popped out. Off by default: it is the overlay's own
