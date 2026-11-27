@@ -12,6 +12,7 @@
 #include <QPointer>
 #include <QtCore/QMetaObject>
 #include <QtCore/QThread>
+#include <QtCore/QTimer>
 #include <algorithm>
 #include <utility>
 
@@ -125,6 +126,12 @@ VideoEncodeCore::Result VideoEncodeCore::process(const Job &job) {
 		const bool unchanged = !m_lastEncoded.isNull() && m_lastEncoded == frame;
 		m_unchangedFrames    = unchanged ? m_unchangedFrames + 1 : 0;
 
+		// The same comparison decides whether the sharer's own preview needs repainting - see
+		// VideoBroadcaster::previewFrame for why an unchanged picture must not repaint it.
+		if (!unchanged) {
+			result.changedScreenFrame = job.frame;
+		}
+
 		const bool keepAliveDue = job.captureTimestampUsec >= m_lastEncodeTimestamp
 								  && job.captureTimestampUsec - m_lastEncodeTimestamp >= 2000000;
 
@@ -178,6 +185,35 @@ VideoEncodeCore::Result VideoEncodeCore::process(const Job &job) {
 
 VideoBroadcaster::VideoBroadcaster(QObject *parent) : QObject(parent), m_core(std::make_shared< VideoEncodeCore >()) {
 	m_stats.enabled = !qEnvironmentVariableIsEmpty("MUMBLE_VIDEO_STATS");
+
+	m_screenPreviewTimer = new QTimer(this);
+	m_screenPreviewTimer->setSingleShot(true);
+	connect(m_screenPreviewTimer, &QTimer::timeout, this, [this]() {
+		if (m_heldScreenPreview.isNull()) {
+			return;
+		}
+		const QImage frame  = std::move(m_heldScreenPreview);
+		m_heldScreenPreview = QImage();
+		m_screenPreviewClock.restart();
+		emit previewFrame(frame);
+	});
+}
+
+void VideoBroadcaster::showScreenPreview(const QImage &frame) {
+	if (!m_screenPreviewClock.isValid() || m_screenPreviewClock.elapsed() >= SCREEN_PREVIEW_INTERVAL_MSEC) {
+		m_heldScreenPreview = QImage();
+		m_screenPreviewTimer->stop();
+		m_screenPreviewClock.restart();
+		emit previewFrame(frame);
+
+		return;
+	}
+
+	m_heldScreenPreview = frame;
+	if (!m_screenPreviewTimer->isActive()) {
+		m_screenPreviewTimer->start(
+			static_cast< int >(std::max< qint64 >(1, SCREEN_PREVIEW_INTERVAL_MSEC - m_screenPreviewClock.elapsed())));
+	}
 }
 
 VideoBroadcaster::~VideoBroadcaster() {
@@ -319,6 +355,10 @@ bool VideoBroadcaster::start(std::unique_ptr< VideoSource > source) {
 }
 
 void VideoBroadcaster::stop() {
+	// A preview held back by the rate limit belongs to the share that is ending; the next one starts at once.
+	m_heldScreenPreview = QImage();
+	m_screenPreviewTimer->stop();
+	m_screenPreviewClock.invalidate();
 	m_lastFrame = QImage();
 	m_lastTargetSize = QSize();
 	m_captureActivity.invalidate();
@@ -453,7 +493,11 @@ void VideoBroadcaster::encodeFrame(const QImage &frame, std::uint64_t captureTim
 		m_forceKeyframe = true;
 	}
 
-	emit previewFrame(frame);
+	// A screen's preview comes back with the encoder's result, and only if the picture changed: see
+	// previewFrame() for the loop this prevents.
+	if (!isScreenCodec()) {
+		emit previewFrame(frame);
+	}
 
 	VideoEncodeCore::Job job;
 	job.frame                = frame;
@@ -520,7 +564,17 @@ void VideoBroadcaster::dispatch(VideoEncodeCore::Job job) {
 }
 
 void VideoBroadcaster::deliver(const VideoEncodeCore::Result &result, std::uint64_t generation) {
-	if (generation != m_generation || !result.encoded) {
+	if (generation != m_generation) {
+		return;
+	}
+
+	// Before the units, as the preview was when it was emitted ahead of encoding: the first frame's preview is
+	// what announces a portal share's stream (MainWindow), and that has to reach viewers before its units do.
+	if (!result.changedScreenFrame.isNull()) {
+		showScreenPreview(result.changedScreenFrame);
+	}
+
+	if (!result.encoded) {
 		return;
 	}
 

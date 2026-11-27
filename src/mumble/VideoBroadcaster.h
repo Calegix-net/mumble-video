@@ -24,6 +24,7 @@
 #include <optional>
 
 class QThread;
+class QTimer;
 class VideoSource;
 
 /**
@@ -53,6 +54,10 @@ public:
 		bool keyframeRequested             = false;
 		std::uint64_t captureTimestampUsec = 0;
 		std::uint64_t encodeUsec           = 0;
+		/// A screen codec's frame whose pixels differ from the last one it was given - or the first since a
+		/// reset - carried back so the sharer's own preview is repainted with it. Null when the picture had
+		/// not changed, and always for the camera codec, whose preview is shown before encoding instead.
+		QImage changedScreenFrame;
 	};
 
 	void configure(int codec, unsigned int bitrateKbps, unsigned int framerate, int tileQuality, int tileSize);
@@ -244,11 +249,17 @@ signals:
 	/// One encoded unit, ready to fragment and send.
 	void unitReady(const Mumble::Protocol::VideoUnitHeader &header, const QByteArray &payload);
 
-	/// The frame just captured, before encoding.
+	/// The frame just captured, for the sender's own preview tile.
 	///
 	/// Self-view deliberately shows the raw capture rather than the encoded-and-decoded result: the point
 	/// is to confirm framing and that the camera is live, and putting your own encoder and decoder in that
 	/// path would cost CPU to make your own picture look worse.
+	///
+	/// A camera's frame is emitted before encoding, every frame. A screen's is emitted once the encoder has
+	/// looked at it, and only when its pixels changed. That is what stops a share of the screen the preview
+	/// is on from feeding itself: repainting the preview redraws the screen, and on Windows (and through the
+	/// desktop portal on Linux) any redraw - even to the same pixels - is delivered as a new frame, which
+	/// repainted the preview again, as fast as the share's frame rate allowed, for as long as the share ran.
 	void previewFrame(const QImage &frame);
 
 	/// Capture started or stopped, so the UI can update the toggle.
@@ -303,6 +314,19 @@ protected:
 	QElapsedTimer m_captureActivity;
 	std::uint64_t m_captureTimestamp    = 0;
 	std::uint64_t m_lastEncodeTimestamp = 0;
+
+	/// The fastest a screen share repaints its own preview. It only has to show the sharer what they are
+	/// sharing, so ten a second is plenty - and every repaint is work on the GUI thread, and, when the preview
+	/// is itself on the shared screen, one more frame to capture. With anything moving in that mirror loop,
+	/// each repaint changed the screen again, so the loop ran at the share's full frame rate however slowly
+	/// the content itself moved. A camera's preview is not limited.
+	static constexpr int SCREEN_PREVIEW_INTERVAL_MSEC = 100;
+	/// Emits a changed screen frame as the preview, at most every SCREEN_PREVIEW_INTERVAL_MSEC; one that comes
+	/// sooner is held and shown when the interval is up, so the preview always ends on the latest picture.
+	void showScreenPreview(const QImage &frame);
+	QElapsedTimer m_screenPreviewClock;
+	QImage m_heldScreenPreview;
+	QTimer *m_screenPreviewTimer = nullptr;
 
 	/// MUMBLE_VIDEO_STATS: what was encoded since the last stats line (logged at most every 2 s).
 	struct EncodeStats {

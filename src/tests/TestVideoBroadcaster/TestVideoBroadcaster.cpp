@@ -11,6 +11,7 @@
 #include "VideoBroadcaster.h"
 #include "VideoSource.h"
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QSignalSpy>
 #include <QtTest>
@@ -42,7 +43,108 @@ private slots:
 	void aDroppedFrameLeavesNoGap();
 	void tinyFramesAreRaisedToTheEncodersFloor();
 	void theSourceIsToldTheFrameRate();
+	void aStillScreenDoesNotRepaintItsOwnPreview();
+	void aStillScreenDoesNotRepaintItsOwnPreview_data();
+	void aMovingScreenPreviewsAtMostTenTimesASecond();
 };
+
+// With anything moving in the mirror loop, every preview repaint changes the screen again, so a preview
+// repainted for every changed frame kept the loop at the share's full frame rate. Ten a second at most - and
+// the last picture is still shown, rather than whichever one happened to fall on the limit.
+void TestVideoBroadcaster::aMovingScreenPreviewsAtMostTenTimesASecond() {
+	VideoBroadcaster broadcaster;
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 60, 80, 128);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(320, 180);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(100);
+	QVERIFY(broadcaster.start(std::move(owned)));
+
+	QSignalSpy captured(source, &VideoSource::frameReady);
+	QSignalSpy previews(&broadcaster, &VideoBroadcaster::previewFrame);
+
+	QElapsedTimer clock;
+	clock.start();
+	for (int i = 0; i < 30; ++i) {
+		source->pump(static_cast< std::uint64_t >(i) * 16667 + 1);
+		QTest::qWait(5);
+	}
+	const qint64 elapsed = clock.elapsed();
+
+	// The first at once, then at most one per 100 ms, plus the held-back last one.
+	QTRY_VERIFY_WITH_TIMEOUT(previews.count() >= 2, 2000);
+	QTest::qWait(250);
+	QVERIFY2(previews.count() <= elapsed / 100 + 2, "the preview was repainted faster than ten times a second");
+	QVERIFY(previews.count() < captured.count());
+	QCOMPARE(previews.last().at(0).value< QImage >(), captured.last().at(0).value< QImage >());
+}
+
+void TestVideoBroadcaster::aStillScreenDoesNotRepaintItsOwnPreview_data() {
+	QTest::addColumn< bool >("threaded");
+	QTest::newRow("encoder on the GUI thread") << false;
+	QTest::newRow("encoder on its own thread") << true;
+}
+
+// Sharing the screen the share's own preview is on. Repainting the preview redraws the screen, and on Windows
+// (and through the Linux desktop portal) a redraw is delivered as a new frame even when not one pixel
+// changed - so a preview repainted for every frame fed itself forever, at the share's full frame rate. A
+// still picture must repaint the preview once, and a changed one again.
+void TestVideoBroadcaster::aStillScreenDoesNotRepaintItsOwnPreview() {
+	QFETCH(bool, threaded);
+
+	VideoBroadcaster broadcaster;
+	broadcaster.setThreadedEncoding(threaded);
+	broadcaster.configure(VideoBroadcaster::CODEC_VP9, 3000, 30, 80, 128);
+
+	auto owned                   = std::make_unique< SyntheticVideoSource >(640, 360);
+	SyntheticVideoSource *source = owned.get();
+	source->setChangeRatio(0);
+	QVERIFY(broadcaster.start(std::move(owned)));
+
+	QSignalSpy previews(&broadcaster, &VideoBroadcaster::previewFrame);
+	QSignalSpy units(&broadcaster, &VideoBroadcaster::unitReady);
+	constexpr std::uint64_t FRAME_USEC = 1000000 / 30;
+
+	// The same picture, over and over, as the self-fed loop delivered it.
+	for (int i = 0; i < 20; ++i) {
+		source->pump(static_cast< std::uint64_t >(i) * FRAME_USEC + 1);
+		if (threaded) {
+			// Spaced out, so frames reach the encoder rather than replacing one another while it is busy.
+			QTest::qWait(20);
+		}
+	}
+	QTest::qWait(threaded ? 300 : 0);
+
+	QCOMPARE(previews.count(), 1);
+	QVERIFY(units.count() >= 1);
+
+	// A changed picture is shown.
+	source->setChangeRatio(100);
+	source->pump(20 * FRAME_USEC + 1);
+	QTRY_COMPARE_WITH_TIMEOUT(previews.count(), 2, 5000);
+
+	// After the share stops, nothing still on its way through the encoder may repaint a preview the grid has
+	// already cleared.
+	source->pump(21 * FRAME_USEC + 1);
+	broadcaster.stop();
+	const qsizetype atStop = previews.count();
+	QTest::qWait(300);
+	QCOMPARE(previews.count(), atStop);
+
+	// A camera's preview is unchanged: every frame, before encoding, still or not.
+	VideoBroadcaster camera;
+	camera.setThreadedEncoding(threaded);
+	camera.configure(VideoBroadcaster::CODEC_VP8, 800, 30, 80, 128);
+	auto cameraOwned                   = std::make_unique< SyntheticVideoSource >(640, 360);
+	SyntheticVideoSource *cameraSource = cameraOwned.get();
+	cameraSource->setChangeRatio(0);
+	QVERIFY(camera.start(std::move(cameraOwned)));
+	QSignalSpy cameraPreviews(&camera, &VideoBroadcaster::previewFrame);
+	for (int i = 0; i < 5; ++i) {
+		cameraSource->pump(static_cast< std::uint64_t >(i) * FRAME_USEC + 1);
+	}
+	QCOMPARE(cameraPreviews.count(), 5);
+}
 
 // A frame the encoder had to drop - here a keyframe of noise too large for one transport unit - must not use
 // up a frame number: viewers would take the gap for a lost frame and wait for it.
